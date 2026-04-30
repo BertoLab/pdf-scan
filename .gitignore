@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Data
+data/input/*
+data/processed/*
+data/rejected/*
+data/crops/*
+outputs/batches/*
+outputs/logs/*
+
+# Keep these folders
+!data/input/.gitkeep
+!data/processed/.gitkeep
+!data/rejected/.gitkeep
+!data/crops/.gitkeep
+!outputs/batches/.gitkeep
+!outputs/logs/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
