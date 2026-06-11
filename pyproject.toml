@@ -7,14 +7,16 @@ name = "estrattore-scan-fatture"
 version = "0.1.0"
 description = "Conservative extraction from scanned invoices"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "openpyxl>=3.1.0",
     "Pillow>=10.0.0",
+    "pdf2image>=1.16.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+ocr = ["pytesseract>=0.3.13"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

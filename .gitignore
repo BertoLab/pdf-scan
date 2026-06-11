@@ -6,6 +6,8 @@ __pycache__/
 dist/
 build/
 *.egg
+.pytest_cache/
+.pytest-tmp/
 
 # Virtual environments
 venv/
@@ -23,7 +25,12 @@ data/processed/*
 data/rejected/*
 data/crops/*
 outputs/batches/*
+outputs/debug/*
+outputs/*.csv
 outputs/logs/*
+outputs/pytest-cache-files-*/
+outputs/pytest-tmp/
+vendor/tesseract/*
 
 # Keep these folders
 !data/input/.gitkeep
@@ -31,7 +38,9 @@ outputs/logs/*
 !data/rejected/.gitkeep
 !data/crops/.gitkeep
 !outputs/batches/.gitkeep
+!outputs/debug/.gitkeep
 !outputs/logs/.gitkeep
+!vendor/tesseract/README.md
 
 # OS
 .DS_Store

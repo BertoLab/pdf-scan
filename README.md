@@ -1,188 +1,382 @@
 # Estrattore Scan Fatture
 
-Pipeline per processare fatture scannerizzate, estrarre campi stampati affidabili, individuare la data scritta a mano e generare un file Excel verificabile rapidamente da una persona.
+Pipeline conservativa per processare fatture scannerizzate, estrarre i dati affidabili, isolare le informazioni incerte e generare un Excel pensato per una revisione umana rapida.
 
-## Contesto del problema
+Questo README e il documento di contesto principale del progetto. Quando si apre una nuova chat o si riprende il lavoro, va letto prima del codice per mantenere chiari obiettivo, architettura e criteri di qualita.
 
-Il sistema lavora su fatture che nascono come documenti digitali, vengono stampate e poi scannerizzate. Ogni fattura contiene due tipi di informazione molto diversi:
+## Obiettivo
 
-1. testo stampato, regolare e relativamente stabile;
-2. una data scritta a mano, irregolare e molto piu difficile da riconoscere automaticamente.
+Il progetto lavora su fatture che erano originariamente digitali, poi sono state stampate, annotate manualmente e scannerizzate di nuovo. I PDF finali sono quindi immagini, non documenti digitali strutturati.
 
-Questa distinzione e centrale per tutto il progetto: non trattiamo il documento come un unico problema OCR generico, ma separiamo cio che puo essere estratto in modo affidabile da cio che richiede verifica umana.
+L'obiettivo non e costruire una "AI perfetta" che capisce sempre ogni fattura. L'obiettivo professionale e:
 
-## Contenuto stampato
+- massimizzare l'estrazione automatica affidabile;
+- minimizzare i falsi positivi;
+- rifiutare esplicitamente i casi incerti;
+- rendere veloce la verifica umana;
+- mantenere il sistema semplice da debuggare e migliorare.
 
-Il testo stampato e considerato la parte a bassa difficolta.
+La regola piu importante e: meglio un campo `uncertain` o `missing` che un valore sbagliato scritto con sicurezza.
 
-Caratteristiche attese:
+## Strategia Architetturale
 
-- testo regolare, allineato e leggibile;
-- documento originariamente digitale;
-- struttura abbastanza stabile;
-- presenza di circa 4-5 template principali;
-- pochi campi chiave da estrarre.
+La pipeline deve essere ibrida e a layer. Non vogliamo basarci solo su OCR grezzo e regex, ma non vogliamo nemmeno partire subito con un modello ML custom.
 
-Per questa parte l'obiettivo e usare OCR standard, regole deterministiche e validazioni forti. Se un campo stampato non viene estratto con affidabilita sufficiente, il documento puo essere scartato o marcato come non valido.
+Direzione corretta:
 
-## Data scritta a mano
+```text
+PDF scannerizzato
+  -> immagini pagina
+  -> rappresentazione documentale strutturata
+  -> regole di estrazione conservative
+  -> validazione
+  -> InvoiceResult
+  -> Excel + crop immagini + log rifiuti
+```
 
-La data manoscritta e la parte ad alta difficolta.
+Il principio e separare percezione, giudizio e revisione:
 
-Caratteristiche attese:
+- la percezione legge il documento e produce evidenze;
+- il codice applicativo decide cosa e abbastanza affidabile;
+- la persona verifica rapidamente solo cio che resta incerto.
 
-- e l'unico elemento manoscritto presente nella fattura;
-- si trova in una zona approssimativamente simile, ma non fissa;
-- puo essere inclinata, irregolare o poco leggibile;
-- non e affidabile presumere un riconoscimento automatico corretto in V1.
+## Layer Della Pipeline
 
-Per questo motivo, in V1 il requisito principale non e leggere sempre la data, ma individuare correttamente la regione dell'immagine che la contiene e salvarla come crop.
+### 1. Input e normalizzazione
 
-## Obiettivo V1
+Responsabilita:
 
-Per ogni fattura il sistema deve:
+- caricare PDF scannerizzati o immagini;
+- convertire ogni pagina in immagine;
+- applicare preprocessing solo quando utile;
+- mantenere tracciabilita tra file sorgente, pagina e output.
 
-1. estrarre in modo affidabile le informazioni stampate principali;
-2. individuare la regione dell'immagine contenente la data scritta a mano;
-3. salvare un crop dell'area della data;
-4. tentare il riconoscimento automatico della data, solo quando possibile;
-5. scrivere una riga in Excel con dati strutturati, eventuale data riconosciuta e immagine del crop.
+Il preprocessing non deve distruggere informazioni. Ogni trasformazione deve avere uno scopo chiaro: migliorare OCR, layout detection o crop.
 
-L'Excel finale non e pensato come verita automatica assoluta, ma come strumento operativo per velocizzare la revisione umana.
+### 2. Perception layer
 
-## Decisioni progettuali
+Questo layer deve trasformare le immagini in una rappresentazione strutturata del documento.
 
-### Separazione dei problemi
+Deve usare un backend OCR leggero e controllabile, piu un layer geometrico proprietario, per ottenere:
 
-Il sistema distingue esplicitamente:
+- testo OCR;
+- token e coordinate;
+- blocchi di testo;
+- regioni di layout;
+- tabelle;
+- possibili relazioni chiave-valore;
+- confidence per testo e regioni.
 
-- estrazione dei dati stampati: problema strutturato, validabile e ad alta affidabilita;
-- data manoscritta: problema incerto, da supportare con crop e verifica umana.
+Questo layer non deve decidere il significato finale dei dati fiscali. Deve produrre osservazioni leggibili e verificabili.
 
-Questa separazione evita di abbassare la qualita complessiva della pipeline a causa della componente piu incerta.
+### 3. Extraction layer
 
-### Riduzione dei falsi positivi
+Questo layer usa la rappresentazione strutturata per trovare candidati ai campi richiesti.
 
-La priorita e non produrre dati sbagliati con apparente sicurezza.
+Esempi:
 
-Regole guida:
+- partita IVA tramite anchor testuali, coordinate e validazione formale;
+- totale fattura tramite label vicine come `Totale`, `Totale fattura`, `Importo documento`;
+- date tramite pattern, posizione e contesto;
+- righe tabellari usando la struttura tabella quando disponibile.
 
-- se un campo stampato non supera le validazioni, il documento va scartato o marcato;
-- se la data manoscritta non e riconosciuta con confidenza sufficiente, il valore testuale resta vuoto o non affidabile;
-- il crop della data resta comunque l'artefatto principale per la verifica.
+Le regole devono produrre candidati con evidenze, non solo valori finali.
 
-### Centralita del crop
+### 4. Validation layer
 
-Per la data manoscritta, il risultato fondamentale e:
+Questo layer decide lo stato finale di ogni campo.
 
-> individuare correttamente la regione contenente la data e salvarla come immagine.
+Stati consigliati:
 
-Il riconoscimento automatico e utile, ma secondario. Un crop corretto permette all'utente di controllare la data direttamente nell'Excel senza riaprire il file originale.
+- `accepted`: valore affidabile e validato;
+- `uncertain`: candidato presente ma non abbastanza sicuro;
+- `missing`: campo non trovato;
+- `conflict`: piu candidati plausibili in contraddizione;
+- `rejected`: documento non processabile o sotto soglia minima.
 
-### Revisione umana
+Validazioni tipiche:
 
-Ogni riga dell'Excel deve contenere:
+- formato data valido;
+- partita IVA formalmente valida;
+- importi normalizzati correttamente;
+- confidence sopra soglia;
+- coerenza tra label, posizione e valore;
+- assenza di candidati concorrenti troppo simili.
 
-- campi stampati estratti automaticamente;
-- eventuale data manoscritta riconosciuta;
-- immagine del crop della data;
-- stato di validazione o motivo di eventuale incertezza.
+### 5. Handwriting layer
 
-Il sistema serve ad automatizzare la parte affidabile e rendere rapida la revisione della parte incerta.
+La data scritta a mano e un problema separato.
 
-### Fallimenti espliciti
+Caratteristiche:
 
-I documenti che non soddisfano i criteri minimi devono essere separati e tracciati.
+- e irregolare;
+- puo essere inclinata o poco leggibile;
+- puo stare in una zona simile ma non perfettamente fissa;
+- non deve essere accettata automaticamente se la confidence e bassa.
 
-Esempi di motivi di fallimento:
+Comportamento corretto:
 
-- template non riconosciuto;
-- campi stampati obbligatori mancanti;
-- OCR stampato sotto soglia;
-- area data non individuata;
-- qualita immagine insufficiente;
-- errore tecnico durante il processamento.
+- individuare una o piu regioni candidate;
+- salvare sempre il crop immagine;
+- tentare OCR manoscritto solo come supporto opzionale;
+- scrivere il testo riconosciuto come `uncertain` se non e molto affidabile;
+- permettere alla persona di verificare il crop direttamente dall'Excel.
 
-Questi casi sono importanti: costituiscono la base per migliorare la pipeline nelle versioni successive.
+Per la V1, il crop corretto della data manoscritta vale piu del riconoscimento automatico.
 
-## Sintesi operativa
+### 6. Export e review
 
-Per ogni fattura:
+L'Excel non e una verita assoluta. E uno strumento operativo per ridurre lavoro manuale.
 
-1. caricare immagine o PDF scannerizzato;
-2. normalizzare l'immagine se necessario;
-3. riconoscere il template;
-4. estrarre e validare i campi stampati;
-5. individuare l'unica area manoscritta;
-6. generare il crop della data;
-7. tentare il riconoscimento automatico della data;
-8. scrivere i risultati nell'Excel;
-9. spostare o registrare il documento come processato o rifiutato.
+Ogni riga dovrebbe contenere:
 
-## Output attesi
-
-Output principali:
-
-- file Excel con una riga per fattura;
-- immagini crop delle date manoscritte;
-- log di processo;
-- elenco dei documenti rifiutati con motivo.
-
-Campi tipici dell'Excel:
-
-- identificativo documento;
-- nome file originale;
+- nome file sorgente;
 - campi stampati estratti;
-- data manoscritta riconosciuta, se disponibile;
-- confidenza o stato della data;
-- immagine crop della data;
-- stato finale;
-- motivo di fallimento, se presente.
+- stato finale del documento;
+- stato dei campi importanti;
+- motivo di incertezza o rifiuto;
+- eventuale testo riconosciuto per la data manoscritta;
+- immagine crop della data manoscritta o riferimento al file crop.
 
-## Filosofia del progetto
+## Modello Dati
 
-Il progetto non punta alla completezza immediata. La direzione corretta e:
+Il sistema deve rappresentare i risultati con abbastanza contesto da poterli debuggare.
 
-- automatizzare in modo sicuro una parte significativa del lavoro;
-- non inventare confidenza dove non esiste;
-- rendere verificabile rapidamente la parte incerta;
-- migliorare iterativamente partendo dai casi rifiutati e dagli errori osservati.
+Esempio concettuale:
 
-Una V1 solida deve essere conservativa, tracciabile e facile da correggere.
+```python
+InvoiceField(
+    name="total_amount",
+    value="1234.56",
+    status="accepted",
+    confidence=0.94,
+    page=1,
+    bbox=(120, 710, 260, 735),
+    evidence=[
+        "label vicino: Totale fattura",
+        "formato importo valido",
+        "nessun candidato concorrente forte",
+    ],
+)
+```
 
-## Struttura del progetto
+Il repository contiene i modelli principali in `src/estrattore/model.py`. `InvoiceResult` rappresenta il risultato finale della fattura, mentre `DocumentRepresentation` rappresenta l'output intermedio prodotto dal perception layer.
+
+## Stato Attuale Del Repository
+
+Stato corrente:
+
+- progetto Python installabile da `pyproject.toml`;
+- codice principale in `src/estrattore`;
+- test automatici in `tests`;
+- caricamento PDF tramite `pdf2image`;
+- caricamento immagini singole per prove OCR mirate;
+- modelli dominio/documento in `model.py`;
+- `DocumentRepresentation` con pagine, token OCR, blocchi layout e tabelle;
+- backend perception vuoto per test e struttura;
+- adapter Tesseract word-level in `tesseract_adapter.py`;
+- grouping geometrico token -> righe in `text_layout.py`;
+- debug output generico in `debug_output.py`;
+- pipeline iniziale che carica una scansione, produce la rappresentazione documentale e rifiuta i casi non caricabili;
+- moduli `handwriting_roi.py` ed `excel_export.py` ancora da implementare.
+
+Questo significa che il progetto e ancora nella fase di fondazione. Prima si consolidano struttura, modelli e contratti; poi si aggiungono OCR, layout analysis ed export.
+
+## Struttura Del Progetto
 
 ```text
 estrattore-scan-fatture/
-|-- src/estrattore/      # Codice principale della pipeline
+|-- src/estrattore/
+|   |-- pipeline.py          # Orchestrazione del processamento
+|   |-- io.py                # Caricamento input e preprocessing immagini
+|   |-- model.py             # Modelli dominio, documento e stati
+|   |-- perception.py        # Contratto pubblico del perception layer
+|   |-- tesseract_adapter.py # OCR leggero parola-per-parola
+|   |-- text_layout.py       # Ricostruzione righe da token OCR
+|   |-- debug_output.py      # JSON e immagini annotate per debug perception
+|   |-- handwriting_roi.py   # Futuro rilevamento crop manoscritto
+|   |-- excel_export.py      # Futuro export Excel
+|   `-- config.py            # Configurazione
 |-- data/
-|   |-- input/           # Fatture da processare
-|   |-- processed/       # File gia processati
-|   |-- rejected/        # File scartati o non gestibili
-|   `-- crops/           # Crop delle date manoscritte
+|   |-- input/               # Fatture da processare
+|   |-- processed/           # File gia processati
+|   |-- rejected/            # File scartati o non gestibili
+|   `-- crops/               # Crop delle date manoscritte
 |-- outputs/
-|   |-- batches/         # File Excel generati
-|   `-- logs/            # Log e report di processo
-|-- tests/               # Test automatici
-|-- pyproject.toml       # Configurazione Python
-`-- README.md            # Contesto e specifiche operative
+|   |-- batches/             # File Excel generati
+|   |-- debug/               # Output di ispezione OCR/layout
+|   `-- logs/                # Log e report di processo
+|-- scripts/
+|   |-- dev_run.py           # Script di sviluppo
+|   `-- debug_words.py       # Salva token OCR e bounding box
+|-- tests/                   # Test automatici
+|-- pyproject.toml
+`-- README.md
 ```
 
-## Avvio rapido
+## Milestone Consigliate
+
+### Milestone 1: base solida
+
+- caricare PDF e immagini in modo affidabile;
+- normalizzare il risultato in un modello chiaro;
+- gestire errori tecnici con `rejected` e motivazione;
+- coprire il comportamento con test.
+
+### Milestone 2: rappresentazione documentale
+
+- integrare un OCR/document understanding layer;
+- salvare token, blocchi, coordinate e confidence;
+- rendere ispezionabile l'output intermedio.
+
+### Milestone 3: primi campi stampati
+
+- estrarre pochi campi ad alto valore;
+- validare formalmente ogni campo;
+- distinguere `accepted`, `missing`, `uncertain` e `conflict`.
+
+### Milestone 4: crop data manoscritta
+
+- individuare regioni candidate;
+- salvare crop per ogni fattura;
+- collegare crop e stato nel risultato finale.
+
+### Milestone 5: Excel operativo
+
+- generare Excel con una riga per fattura;
+- includere dati, stati, motivi di rifiuto e crop;
+- usare l'Excel come interfaccia di revisione rapida.
+
+## Avvio Rapido
+
+Installazione in sviluppo:
 
 ```bash
-pip install -e .
-python -m estrattore run data/input
+pip install -e .[dev]
 ```
 
-## Principio di sviluppo
+Esecuzione test:
 
-Ogni nuova funzione deve avere input e output chiari, fallimenti espliciti e test proporzionati al rischio.
+```bash
+pytest
+```
 
-Prima di aggiungere automazione complessa, preferire:
+La CLI definitiva non e ancora stabilizzata. Se una chat futura deve lavorare sul progetto, deve prima verificare gli script disponibili e lo stato dei test.
 
-- validazioni semplici;
-- soglie conservative;
-- log leggibili;
-- casi rifiutati ben spiegati;
-- output facilmente verificabile da una persona.
+## Debug Token OCR
+
+Il primo obiettivo operativo e valutare se l'OCR produce token puliti, coordinate utili e gruppi di token leggibili. Il backend leggero corrente usa Tesseract tramite `pytesseract`.
+
+Installazione dipendenza Python:
+
+```bash
+pip install -e .[ocr]
+```
+
+Serve anche l'eseguibile Tesseract installato nel sistema e disponibile su `PATH`.
+Per il packaging finale, l'app non deve richiedere installazioni manuali: Tesseract va distribuito dentro `vendor/tesseract/`.
+
+Ordine di ricerca Tesseract:
+
+1. `vendor/tesseract/tesseract.exe`;
+2. `C:\Program Files\Tesseract-OCR\tesseract.exe`;
+3. `C:\Program Files (x86)\Tesseract-OCR\tesseract.exe`;
+4. `tesseract.exe` disponibile su `PATH`.
+
+Layout previsto per distribuzione:
+
+```text
+vendor/tesseract/
+|-- tesseract.exe
+`-- tessdata/
+    |-- ita.traineddata
+    `-- eng.traineddata
+```
+
+Esecuzione:
+
+```bash
+python scripts/debug_words.py data/input/fattura.pdf
+```
+
+Esecuzione batch su tutti i PDF/immagini in `data/input`:
+
+```bash
+python scripts/debug_words_batch.py
+```
+
+Output:
+
+```text
+outputs/debug/words/fattura/
+|-- document.json
+|-- lines.csv
+|-- spans.csv
+|-- vat_candidates.csv
+|-- fiscal_identifier_candidates.csv
+|-- invoice_number_candidates.csv
+|-- invoice_date_candidates.csv
+|-- condominium_candidates.csv
+|-- economic_summary_regions.csv
+|-- economic_summary_field_candidates.csv
+|-- economic_summary_resolved_rows.csv
+`-- page-001-boxes.png
+```
+
+`document.json` contiene token OCR, righe ricostruite e span di token con testo, bounding box e confidence. `lines.csv` contiene una riga per ogni riga visuale ricostruita. `spans.csv` contiene gruppi di token separati dai gap orizzontali ed e il modo piu comodo per controllare rapidamente le unita candidate per il parsing. `vat_candidates.csv` contiene i candidati P.IVA validati formalmente e segnati con uno score contestuale. `fiscal_identifier_candidates.csv` valuta gli stessi identificativi fiscali a coppia, con score separati per `p_iva` e `codice_fiscale`, cosi l'anchor mista `COD. FISCALE / P.IVA` puo rimanere ambigua finche non ci sono altri indizi. `invoice_number_candidates.csv` contiene i candidati `numero_fattura`, con formato riconosciuto, anchor vicina, data vicina, esclusioni di contesto e score. `invoice_date_candidates.csv` contiene i candidati `data_fattura`. `condominium_candidates.csv` contiene gli span riconosciuti come `condominio`. `economic_summary_regions.csv` contiene i quadranti riepilogo economico riconosciuti tramite anchor e importi vicini. `economic_summary_field_candidates.csv` collega ogni descrizione economica al valore numerico piu plausibile nel quadrante. `economic_summary_resolved_rows.csv` contiene una riga per quadrante economico risolto con `totale_fattura`, `ritenuta`, percentuale, `totale_netto_fattura`, sorgenti e controllo matematico. Le immagini annotate mostrano visivamente le bounding box degli span senza etichetta, i token con etichetta e i target riconosciuti con bbox gialla.
+
+Nel progetto chiamiamo **span** un gruppo contiguo di token vicini tra loro, separato dagli altri gruppi da un gap orizzontale significativo. Lo span e l'unita candidata principale per il parsing.
+
+## Decisione OCR/Layout
+
+PaddleOCR con PP-StructureV3 e stato valutato e scartato come backend della pipeline.
+
+Motivi:
+
+- installazione e setup troppo pesanti per un'app destinata a una persona non tecnica;
+- download automatici di modelli molto grandi;
+- problemi iniziali di compatibilita runtime su Windows CPU;
+- tempi di inferenza non accettabili su documenti multipagina anche dopo cache calda;
+- rischio alto per packaging e distribuzione futura.
+
+La direzione corrente e:
+
+```text
+OCR leggero parola-per-parola
+  -> token con bounding box
+  -> grouping geometrico di righe e colonne
+  -> ricostruzione tabelle controllata dal progetto
+  -> labeling assistito quando le regole non bastano
+```
+
+Il progetto deve scegliere il backend piu leggero che produce parole e coordinate affidabili. La struttura tabellare non deve dipendere da un modello pesante se puo essere ricostruita con geometria, validazioni e labeling incrementale.
+
+## Regole Di Sviluppo
+
+Ogni nuova funzione deve avere:
+
+- input e output chiari;
+- fallimenti espliciti;
+- test proporzionati al rischio;
+- log o motivazioni utili alla revisione;
+- nessuna accettazione automatica senza validazione.
+
+Preferenze tecniche:
+
+- usare strutture dati esplicite invece di dizionari opachi quando il dominio cresce;
+- mantenere separati OCR, estrazione, validazione ed export;
+- non mischiare codice di business con dettagli Excel;
+- non allenare modelli custom finche non ci sono dati, metriche e fallimenti chiari;
+- aggiungere automazione solo quando e misurabile e verificabile.
+
+## Criterio Di Qualita
+
+Una modifica e buona se rende il sistema piu:
+
+- conservativo sui valori incerti;
+- facile da testare;
+- facile da debuggare;
+- utile per ridurre lavoro manuale reale;
+- chiaro per chi riprende il progetto in una chat futura.
+
+Il progetto deve trattare l'incertezza come un risultato normale, non come un errore imprevisto.
