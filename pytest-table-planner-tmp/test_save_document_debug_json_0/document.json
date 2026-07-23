@@ -1,0 +1,53 @@
+{
+  "source_file": "data\\input\\fattura.pdf",
+  "pages": [
+    {
+      "page_number": 1,
+      "width": 100,
+      "height": 200,
+      "tokens": [
+        {
+          "text": "Totale",
+          "bbox": {
+            "x1": 10,
+            "y1": 20,
+            "x2": 50,
+            "y2": 35
+          },
+          "confidence": 0.97
+        }
+      ],
+      "ocr_hole_regions": [],
+      "lines": [],
+      "spans": [],
+      "blocks": [
+        {
+          "block_type": "text",
+          "bbox": {
+            "x1": 8,
+            "y1": 18,
+            "x2": 80,
+            "y2": 45
+          },
+          "confidence": 0.91,
+          "text": null
+        }
+      ],
+      "tables": [
+        {
+          "bbox": {
+            "x1": 5,
+            "y1": 60,
+            "x2": 90,
+            "y2": 120
+          },
+          "confidence": null,
+          "html": "<table></table>",
+          "rows": []
+        }
+      ],
+      "detected_table_regions": []
+    }
+  ],
+  "backend": "empty"
+}

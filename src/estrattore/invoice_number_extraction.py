@@ -18,6 +18,9 @@ from estrattore.model import BoundingBox, DocumentPage, DocumentRepresentation, 
 MIN_FUZZY_ANCHOR_SIMILARITY = 0.88
 SHORT_ANCHOR_MAX_LEN = 4
 MIN_SELECTED_SCORE = 120.0
+MIN_CANDIDATE_TOKEN_HEIGHT = 4
+MIN_CANDIDATE_TOKEN_WIDTH = 4
+MIN_CANDIDATE_TOKEN_AREA = 24
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,9 @@ def find_invoice_number_candidates(
         for token in page.tokens:
             normalized_value = _normalize_invoice_number(token.text)
             if normalized_value is None:
+                continue
+
+            if _has_implausible_invoice_number_bbox(token):
                 continue
 
             format_kind = _invoice_number_format_kind(normalized_value)
@@ -242,6 +248,9 @@ def _invoice_number_format_kind(value: str) -> str | None:
     if re.fullmatch(r"\d{1,6}/\d{2,4}", value):
         return "slash_progressivo"
 
+    if re.fullmatch(r"\d{1,6}/[A-Z]{1,3}", value):
+        return "slash_alfanumerico"
+
     if re.fullmatch(r"\d{1,6}", value):
         return "progressivo_numerico"
 
@@ -288,10 +297,23 @@ def _format_score(format_kind: str) -> float:
     if format_kind == "slash_progressivo":
         return 70.0
 
+    if format_kind == "slash_alfanumerico":
+        return 75.0
+
     if format_kind == "progressivo_numerico":
         return 35.0
 
     return 60.0
+
+
+def _has_implausible_invoice_number_bbox(token: OcrToken) -> bool:
+    width = token.bbox.x2 - token.bbox.x1
+    height = token.bbox.y2 - token.bbox.y1
+    return (
+        width < MIN_CANDIDATE_TOKEN_WIDTH
+        or height < MIN_CANDIDATE_TOKEN_HEIGHT
+        or width * height < MIN_CANDIDATE_TOKEN_AREA
+    )
 
 
 def _format_anchor_matches(matches: list[_AnchorMatch]) -> str:
@@ -437,6 +459,10 @@ def _invoice_number_anchor_matches(
             "documento numero",
             "documento n",
             "n documento",
+            "numero doc",
+            "doc numero",
+            "doc n",
+            "n doc",
             "numero",
             "nr",
             "n",

@@ -42,6 +42,12 @@ class BoundingBox:
     y2: int
 
 
+@dataclass(frozen=True)
+class Point:
+    x: int
+    y: int
+
+
 @dataclass
 class InvoiceField:
     name: str
@@ -59,6 +65,8 @@ class OcrToken:
     text: str
     bbox: BoundingBox
     confidence: float | None = None
+    source: str | None = None
+    source_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +115,22 @@ class TextSpan:
     tokens: list[OcrToken] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class DetectedTableRegion:
+    bbox: BoundingBox
+    horizontal_line_count: int
+    vertical_line_count: int
+
+
+@dataclass(frozen=True)
+class DetectedTableCellRegion:
+    bbox: BoundingBox
+    table_index: int
+    row_index: int
+    column_index: int
+    polygon: list[Point] = field(default_factory=list)
+
+
 @dataclass
 class DocumentPage:
     page_number: int
@@ -118,6 +142,10 @@ class DocumentPage:
     spans: list[TextSpan] = field(default_factory=list)
     blocks: list[LayoutBlock] = field(default_factory=list)
     tables: list[TableRegion] = field(default_factory=list)
+    detected_table_regions: list[DetectedTableRegion] = field(default_factory=list)
+    detected_table_cell_regions: list[DetectedTableCellRegion] = field(
+        default_factory=list
+    )
 
 
 @dataclass

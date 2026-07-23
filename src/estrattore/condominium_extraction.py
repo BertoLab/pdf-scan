@@ -10,6 +10,8 @@ from estrattore.model import BoundingBox, DocumentPage, DocumentRepresentation, 
 
 
 MIN_FUZZY_SIMILARITY = 0.88
+MAX_EXTREME_SHORT_TOKEN_HEIGHT = 4
+MAX_EXTREME_SHORT_TOKEN_CONFIDENCE = 0.5
 
 
 @dataclass(frozen=True)
@@ -38,7 +40,8 @@ def find_condominium_candidates(
 
     for page in document.pages:
         for span in page.spans:
-            condominio_matches = _condominio_matches(span.text)
+            candidate_text = _clean_condominium_candidate_text(span)
+            condominio_matches = _condominio_matches(candidate_text)
             if not condominio_matches:
                 continue
 
@@ -60,13 +63,13 @@ def find_condominium_candidates(
             score = (
                 80
                 + max([match.score for match in anchor_matches] or [0])
-                - _dirty_condominium_span_penalty(span.text)
+                - _dirty_condominium_span_penalty(candidate_text)
             )
             candidates.append(
                 CondominiumCandidate(
                     page=page.page_number,
-                    raw_text=span.text,
-                    bbox=span.bbox,
+                    raw_text=candidate_text,
+                    bbox=_clean_condominium_candidate_bbox(span),
                     score=round(score, 2),
                     selected_as_condominio=False,
                     condominio_context=_format_anchor_matches(condominio_matches),
@@ -76,6 +79,44 @@ def find_condominium_candidates(
             )
 
     return _mark_selected_targets(candidates)
+
+
+def _clean_condominium_candidate_text(span: TextSpan) -> str:
+    tokens = [
+        token
+        for token in span.tokens
+        if not _is_extreme_short_low_confidence_token(token)
+    ]
+    if not tokens:
+        return span.text
+
+    return " ".join(token.text for token in tokens)
+
+
+def _clean_condominium_candidate_bbox(span: TextSpan) -> BoundingBox:
+    tokens = [
+        token
+        for token in span.tokens
+        if not _is_extreme_short_low_confidence_token(token)
+    ]
+    if not tokens:
+        return span.bbox
+
+    return BoundingBox(
+        x1=min(token.bbox.x1 for token in tokens),
+        y1=min(token.bbox.y1 for token in tokens),
+        x2=max(token.bbox.x2 for token in tokens),
+        y2=max(token.bbox.y2 for token in tokens),
+    )
+
+
+def _is_extreme_short_low_confidence_token(token) -> bool:
+    height = token.bbox.y2 - token.bbox.y1
+    confidence = token.confidence if token.confidence is not None else 1.0
+    return (
+        height <= MAX_EXTREME_SHORT_TOKEN_HEIGHT
+        and confidence <= MAX_EXTREME_SHORT_TOKEN_CONFIDENCE
+    )
 
 
 def selected_condominium_candidates_by_page(

@@ -1,0 +1,5 @@
+﻿source_file,page,raw_text,normalized_value,score,selected_for_page,positive_context,negative_context,nearby_text,x1,y1,x2,y2
+data/input/2025/batch_2025_1/pdf_2025_2.pdf,1,01469610537,01469610537,110.0,False,piva,cf,Ge (GR) 58023 Di Gavorrano Bagno Italia tl P.IVA: CF: 01469610537 Ù < Q CELL: 3479941518 MAIL: monicanascetti@gmail.com,228,662,369,680
+data/input/2025/batch_2025_1/pdf_2025_2.pdf,1,01469610537,01469610537,110.0,False,piva,cf,(GR) 58023 Di Gavorrano Bagno Italia P.IVA: 01469610537 CF: Ù < Q CELL: 3479941518 MAIL: monicanascetti@gmail.com,200,695,341,713
+data/input/2025/batch_2025_1/pdf_2025_2.pdf,2,01445070533,01445070533,110.0,False,piva,c.f.,"223- Via dell'Artigianato, ind. 58022 Follonica (GR) zona - P.IVA C.F. Tel. 0566 028030 Fax 0566 028031 E-mail: primosole@milleritalia.net Pec: primosole@cgn.legalmail.it",214,339,346,357
+data/input/2025/batch_2025_1/pdf_2025_2.pdf,2,90013820536,90013820536,190.0,True,partita iva,codice fiscale|iban,(88022 FOLLONICA (GR) (ITA) Sconto Sconti I Partita IVA Valuta Codice fiscale: | ABI: CAB: IBAN: 61 94/CV Ni doo. ABI01030 CAB:72240 IBANIT25D0103072240000002726803 18/12/2024 Data doc.,1026,778,1160,796

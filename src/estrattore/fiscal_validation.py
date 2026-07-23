@@ -4,6 +4,7 @@ import re
 
 
 _TAX_CODE_PATTERN = re.compile(r"^[A-Z0-9]{16}$")
+_ALPHANUMERIC_TAX_CODE_LETTER_POSITIONS = {0, 1, 2, 3, 4, 5, 8, 11, 15}
 _ALPHANUMERIC_TAX_CODE_DIGIT_POSITIONS = {6, 7, 9, 10, 12, 13, 14}
 _OCR_DIGIT_CONFUSIONS = {
     "O": "0",
@@ -14,6 +15,15 @@ _OCR_DIGIT_CONFUSIONS = {
     "Z": "2",
     "S": "5",
     "B": "8",
+}
+_OCR_LETTER_CONFUSIONS = {
+    "0": "O",
+    "1": "I",
+    "2": "Z",
+    "4": "A",
+    "5": "S",
+    "6": "G",
+    "8": "B",
 }
 
 
@@ -65,6 +75,21 @@ def normalize_italian_tax_code(value: str) -> str | None:
         corrected = _correct_ocr_alphanumeric_tax_code(normalized)
         if corrected is not None:
             return corrected
+
+    return None
+
+
+def normalize_italian_tax_code_with_anchored_ocr_correction(value: str) -> str | None:
+    normalized = "".join(char for char in value.strip().upper() if char.isalnum())
+    if normalized.startswith("IT"):
+        normalized = normalized[2:]
+
+    if normalize_italian_tax_code(normalized) is not None:
+        return normalize_italian_tax_code(normalized)
+
+    corrected = _correct_structural_ocr_alphanumeric_tax_code(normalized)
+    if corrected is not None:
+        return corrected
 
     return None
 
@@ -145,6 +170,40 @@ def _correct_ocr_alphanumeric_tax_code(tax_code: str) -> str | None:
         candidates.extend(
             candidate[:position] + replacement + candidate[position + 1 :]
             for candidate in current_candidates
+        )
+
+    for candidate in candidates[1:]:
+        if _is_valid_alphanumeric_tax_code(candidate):
+            return candidate
+
+    return None
+
+
+def _correct_structural_ocr_alphanumeric_tax_code(tax_code: str) -> str | None:
+    if not _TAX_CODE_PATTERN.fullmatch(tax_code):
+        return None
+
+    repair_options: list[tuple[int, str]] = []
+    for position in sorted(_ALPHANUMERIC_TAX_CODE_LETTER_POSITIONS):
+        char = tax_code[position]
+        replacement = _OCR_LETTER_CONFUSIONS.get(char)
+        if replacement is not None:
+            repair_options.append((position, replacement))
+
+    for position in sorted(_ALPHANUMERIC_TAX_CODE_DIGIT_POSITIONS):
+        char = tax_code[position]
+        replacement = _OCR_DIGIT_CONFUSIONS.get(char)
+        if replacement is not None:
+            repair_options.append((position, replacement))
+
+    if not repair_options or len(repair_options) > 2:
+        return None
+
+    candidates = [tax_code]
+    for position, replacement in repair_options:
+        candidates.extend(
+            candidate[:position] + replacement + candidate[position + 1 :]
+            for candidate in list(candidates)
         )
 
     for candidate in candidates[1:]:

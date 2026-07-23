@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from difflib import SequenceMatcher
@@ -16,6 +17,8 @@ CENT_TOLERANCE = Decimal("0.01")
 MONEY_AMOUNT_PATTERN = re.compile(
     r"-?\d{1,3}(?:\.\d{3})*,\d{2}|-?\d+,\d{2}|-?\d+\.\d{2}"
 )
+TABLE_CROP_TOKEN_SOURCE = "table_column_masked_psm12"
+MIN_TABLE_CROP_PAIR_SCORE = 0.42
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,24 @@ class _AnchorHit:
     score: float
     bbox: BoundingBox
     text: str
+
+
+@dataclass(frozen=True)
+class _EconomicValueCandidate:
+    text: str
+    value: Decimal
+    bbox: BoundingBox
+    confidence: float
+    source: str
+    anchor_text: str = ""
+    anchor_score: float = 0.0
+
+
+@dataclass(frozen=True)
+class _EconomicValueCombination:
+    values: dict[str, _EconomicValueCandidate]
+    score: float
+    notes: tuple[str, ...]
 
 
 def find_economic_summary_regions(
@@ -224,6 +245,13 @@ def find_economic_summary_field_candidates(
             )
             if value_token is None:
                 continue
+            if (
+                target == "ritenuta"
+                and "%" in anchor_hit.text
+                and _ritenuta_percent_hint(anchor_hit.text) is None
+                and not _is_same_visual_row(anchor_hit.bbox, value_token.bbox)
+            ):
+                continue
 
             value_text = _clean_money_amount_text(value_token.text)
             if value_text is None:
@@ -330,7 +358,11 @@ def resolve_economic_summary_rows(
             for candidate in selected_fields
             if candidate.page == page
         }
-        rows.append(_resolve_economic_summary_row(region, fields))
+        document_page = next(
+            (document_page for document_page in document.pages if document_page.page_number == page),
+            None,
+        )
+        rows.append(_resolve_economic_summary_row(region, fields, document_page))
 
     return rows
 
@@ -429,6 +461,7 @@ def _mark_selected_targets(
 def _resolve_economic_summary_row(
     region: EconomicSummaryRegionCandidate,
     fields: dict[str, EconomicSummaryFieldCandidate],
+    page: DocumentPage | None = None,
 ) -> EconomicSummaryResolvedRow:
     totale_imponibile = _field_decimal(fields.get("totale_imponibile"))
     totale_fattura = _field_decimal(fields.get("totale_fattura"))
@@ -441,7 +474,7 @@ def _resolve_economic_summary_row(
 
     ritenuta_abs = abs(ritenuta_direct) if ritenuta_direct is not None else None
     ritenuta_source = "direct" if ritenuta_abs is not None else ""
-    selected_percent = percent_candidates[0]
+    selected_percent = percent_hint
 
     if totale_imponibile is not None:
         matched_percent = _percent_matching_ritenuta(
@@ -467,21 +500,47 @@ def _resolve_economic_summary_row(
                 ritenuta_abs = derived_from_net
                 ritenuta_source = "derived_from_totale_fattura_minus_netto"
                 notes.append("ritenuta_derived_from_totale_netto")
-            elif ritenuta_abs is None:
+            elif ritenuta_abs is None and percent_hint is not None:
                 ritenuta_abs = _ritenuta_from_imponibile(
                     totale_imponibile,
-                    selected_percent,
+                    percent_hint,
                 )
                 ritenuta_source = "calculated_from_imponibile"
-                notes.append("ritenuta_calculated_from_default_or_hint_percent")
+                notes.append("ritenuta_calculated_from_hint_percent")
             elif percent_hint is not None:
                 notes.append("ritenuta_kept_from_direct_value_with_percent_hint")
 
-    if percent_hint is None:
-        notes.append("ritenuta_percent_default_4")
+    combination = (
+        _best_economic_value_combination(
+            page=page,
+            region=region,
+            fields=fields,
+            percent=selected_percent if selected_percent is not None else percent_candidates[0],
+        )
+        if page is not None
+        else None
+    )
+    combination_values = combination.values if combination is not None else {}
+    if totale_imponibile is None and "totale_imponibile" in combination_values:
+        totale_imponibile = combination_values["totale_imponibile"].value
+        notes.append("totale_imponibile_from_combinatorial_candidates")
+    if totale_fattura is None and "totale_fattura" in combination_values:
+        totale_fattura = combination_values["totale_fattura"].value
+        notes.append("totale_fattura_from_combinatorial_candidates")
+    if ritenuta_abs is None and "ritenuta" in combination_values:
+        ritenuta_abs = abs(combination_values["ritenuta"].value)
+        ritenuta_source = "combinatorial"
+        notes.append("ritenuta_from_combinatorial_candidates")
+    if totale_netto is None and "totale_netto_fattura" in combination_values:
+        totale_netto = combination_values["totale_netto_fattura"].value
+        notes.append("totale_netto_from_combinatorial_candidates")
+    if combination is not None and combination.notes:
+        notes.extend(combination.notes)
 
     resolved_netto = totale_netto
     netto_source = "direct" if resolved_netto is not None else ""
+    if fields.get("totale_netto_fattura") is None and "totale_netto_fattura" in combination_values:
+        netto_source = "combinatorial"
     if totale_fattura is not None and ritenuta_abs is not None:
         calculated_netto = _money(totale_fattura - ritenuta_abs)
         if resolved_netto is None:
@@ -510,18 +569,34 @@ def _resolve_economic_summary_row(
     return EconomicSummaryResolvedRow(
         page=region.page,
         bbox=region.bbox,
-        totale_imponibile_text=_field_value_text(fields.get("totale_imponibile")),
+        totale_imponibile_text=_field_or_combination_value_text(
+            fields.get("totale_imponibile"),
+            combination_values.get("totale_imponibile"),
+        ),
         totale_imponibile_value=_format_decimal(totale_imponibile),
-        totale_fattura_text=_field_value_text(fields.get("totale_fattura")),
+        totale_fattura_text=_field_or_combination_value_text(
+            fields.get("totale_fattura"),
+            combination_values.get("totale_fattura"),
+        ),
         totale_fattura_value=_format_decimal(totale_fattura),
-        totale_fattura_source="direct" if totale_fattura is not None else "",
+        totale_fattura_source=(
+            "direct"
+            if fields.get("totale_fattura") is not None
+            else "combinatorial"
+            if "totale_fattura" in combination_values
+            else ""
+        ),
         ritenuta_label_text=ritenuta_field.label_text if ritenuta_field else "",
-        ritenuta_text=_field_value_text(ritenuta_field),
+        ritenuta_text=_field_or_combination_value_text(
+            ritenuta_field,
+            combination_values.get("ritenuta"),
+        ),
         ritenuta_value=_format_decimal(signed_ritenuta),
-        ritenuta_percentuale=f"{selected_percent}%",
+        ritenuta_percentuale=f"{selected_percent}%" if selected_percent is not None else "",
         ritenuta_source=ritenuta_source,
-        totale_netto_fattura_text=_field_value_text(
-            fields.get("totale_netto_fattura")
+        totale_netto_fattura_text=_field_or_combination_value_text(
+            fields.get("totale_netto_fattura"),
+            combination_values.get("totale_netto_fattura"),
         ),
         totale_netto_fattura_value=_format_decimal(resolved_netto),
         totale_netto_fattura_source=netto_source,
@@ -532,6 +607,17 @@ def _resolve_economic_summary_row(
 
 def _field_value_text(candidate: EconomicSummaryFieldCandidate | None) -> str:
     return candidate.value_text if candidate is not None else ""
+
+
+def _field_or_combination_value_text(
+    field_candidate: EconomicSummaryFieldCandidate | None,
+    combination_candidate: _EconomicValueCandidate | None,
+) -> str:
+    if field_candidate is not None:
+        return field_candidate.value_text
+    if combination_candidate is not None:
+        return combination_candidate.text
+    return ""
 
 
 def _field_decimal(candidate: EconomicSummaryFieldCandidate | None) -> Decimal | None:
@@ -606,6 +692,457 @@ def _format_decimal(value: Decimal | None) -> str:
         return ""
 
     return f"{_money(value):.2f}"
+
+
+def _best_economic_value_combination(
+    page: DocumentPage | None,
+    region: EconomicSummaryRegionCandidate,
+    fields: dict[str, EconomicSummaryFieldCandidate],
+    percent: int,
+) -> _EconomicValueCombination | None:
+    if page is None:
+        return None
+
+    combination_bbox = _economic_combination_bbox(page, region.bbox)
+    crop_candidates = _table_crop_value_candidates_by_target(page, combination_bbox)
+    if not any(crop_candidates.values()):
+        return None
+
+    anchor_hits = [
+        hit
+        for hit in _economic_anchor_hits(page)
+        if _bbox_center_inside(hit.bbox, combination_bbox)
+    ]
+    candidates_by_target = {
+        target: _target_value_candidates(
+            target=target,
+            crop_candidates=crop_candidates.get(target, []),
+            field_candidate=fields.get(target),
+            anchor_hits=anchor_hits,
+            page=page,
+        )
+        for target in _economic_targets()
+    }
+    _add_derived_combination_candidates(candidates_by_target, percent=percent)
+    existing_values = {
+        target: _field_decimal(field)
+        for target, field in fields.items()
+        if _field_decimal(field) is not None
+    }
+    best: _EconomicValueCombination | None = None
+
+    for imponibile in candidates_by_target["totale_imponibile"]:
+        for imposta in candidates_by_target["totale_imposta"]:
+            for totale in candidates_by_target["totale_fattura"]:
+                for ritenuta in candidates_by_target["ritenuta"]:
+                    for netto in candidates_by_target["totale_netto_fattura"]:
+                        values = {
+                            "totale_imponibile": imponibile,
+                            "totale_imposta": imposta,
+                            "totale_fattura": totale,
+                            "ritenuta": ritenuta,
+                            "totale_netto_fattura": netto,
+                        }
+                        combination = _score_economic_value_combination(
+                            values=values,
+                            existing_values=existing_values,
+                            percent=percent,
+                        )
+                        if combination is None:
+                            continue
+                        if best is None or combination.score > best.score:
+                            best = combination
+
+    return best
+
+
+def _table_crop_value_candidates_by_target(
+    page: DocumentPage,
+    region_bbox: BoundingBox,
+) -> dict[str, list[_EconomicValueCandidate]]:
+    candidates_by_target: dict[str, list[_EconomicValueCandidate]] = {
+        target: [] for target in _economic_targets()
+    }
+    tokens_by_source_id: dict[str, list[OcrToken]] = defaultdict(list)
+    for token in page.tokens:
+        if token.source != TABLE_CROP_TOKEN_SOURCE or not token.source_id:
+            continue
+        if not _bbox_center_inside(token.bbox, region_bbox):
+            continue
+        tokens_by_source_id[token.source_id].append(token)
+
+    seen: set[tuple[str, Decimal, BoundingBox, str]] = set()
+    for source_tokens in tokens_by_source_id.values():
+        for value_token in source_tokens:
+            value_text = _clean_money_amount_text(value_token.text)
+            if value_text is None:
+                continue
+            try:
+                value = abs(_money(Decimal(_normalize_money_amount(value_text))))
+            except InvalidOperation:
+                continue
+
+            context_tokens = _nearby_crop_context_tokens(
+                source_tokens,
+                value_token,
+                page=page,
+            )
+            context_text = " ".join(token.text for token in context_tokens)
+            target_scores = _table_crop_pair_target_scores(context_text)
+            for target, anchor_score in target_scores.items():
+                if anchor_score < MIN_TABLE_CROP_PAIR_SCORE:
+                    continue
+                confidence = _table_crop_pair_confidence(
+                    token_confidence=value_token.confidence,
+                    anchor_score=anchor_score,
+                    context_tokens=context_tokens,
+                    value_token=value_token,
+                    page=page,
+                )
+                key = (target, value, value_token.bbox, context_text)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates_by_target[target].append(
+                    _EconomicValueCandidate(
+                        text=value_text,
+                        value=value,
+                        bbox=value_token.bbox,
+                        confidence=confidence,
+                        source="table_crop_pair",
+                        anchor_text=context_text,
+                        anchor_score=anchor_score,
+                    )
+                )
+
+    return candidates_by_target
+
+
+def _economic_combination_bbox(
+    page: DocumentPage,
+    region_bbox: BoundingBox,
+) -> BoundingBox:
+    return BoundingBox(
+        x1=max(0, region_bbox.x1 - int(page.width * 0.02)),
+        y1=max(0, region_bbox.y1 - int(page.height * 0.015)),
+        x2=min(page.width, region_bbox.x2 + int(page.width * 0.02)),
+        y2=min(page.height, region_bbox.y2 + int(page.height * 0.11)),
+    )
+
+
+def _nearby_crop_context_tokens(
+    source_tokens: list[OcrToken],
+    value_token: OcrToken,
+    page: DocumentPage,
+) -> list[OcrToken]:
+    value_center_y = (value_token.bbox.y1 + value_token.bbox.y2) / 2
+    row_tolerance = max(
+        10,
+        (value_token.bbox.y2 - value_token.bbox.y1) * 1.4,
+        page.height * 0.006,
+    )
+    context_tokens = [
+        token
+        for token in source_tokens
+        if token is not value_token
+        and _clean_money_amount_text(token.text) is None
+        and abs(((token.bbox.y1 + token.bbox.y2) / 2) - value_center_y) <= row_tolerance
+        and token.bbox.x1 <= value_token.bbox.x2 + int(page.width * 0.03)
+    ]
+    if context_tokens:
+        return sorted(context_tokens, key=lambda token: (token.bbox.y1, token.bbox.x1))
+
+    fallback_tokens = [
+        token
+        for token in source_tokens
+        if token is not value_token
+        and _clean_money_amount_text(token.text) is None
+        and abs(((token.bbox.y1 + token.bbox.y2) / 2) - value_center_y) <= page.height * 0.035
+        and token.bbox.x1 <= value_token.bbox.x2 + int(page.width * 0.04)
+    ]
+    return sorted(fallback_tokens, key=lambda token: (token.bbox.y1, token.bbox.x1))[:8]
+
+
+def _table_crop_pair_target_scores(context_text: str) -> dict[str, float]:
+    normalized_text = _normalize_context_text(context_text)
+    if not normalized_text:
+        return {}
+
+    scores: dict[str, float] = {}
+    for target, anchor in _anchor_definitions():
+        if _is_ambiguous_economic_anchor(target, normalized_text):
+            continue
+        score = _best_anchor_similarity(normalized_text, anchor)
+        if score > scores.get(target, 0.0):
+            scores[target] = score
+
+    words = set(normalized_text.split())
+    keyword_scores = {
+        "totale_imponibile": _keyword_score(words, required={"imponibile"}, helpful={"totale", "tot"}),
+        "totale_imposta": _keyword_score(words, required={"iva"}, helpful={"totale", "tot", "imposta"}),
+        "totale_fattura": _keyword_score(words, required={"totale"}, helpful={"fattura", "documento", "euro"}),
+        "ritenuta": _keyword_score(words, required={"ritenuta"}, helpful={"rit", "acconto"}),
+        "totale_netto_fattura": _keyword_score(
+            words,
+            required={"pagare", "dovuto", "importo"},
+            helpful={"netto", "saldo"},
+        ),
+    }
+    for target, score in keyword_scores.items():
+        if score > scores.get(target, 0.0):
+            scores[target] = score
+
+    return scores
+
+
+def _keyword_score(
+    words: set[str],
+    required: set[str],
+    helpful: set[str],
+) -> float:
+    if not words.intersection(required):
+        return 0.0
+    score = 0.46
+    score += min(0.22, 0.08 * len(words.intersection(helpful)))
+    return score
+
+
+def _table_crop_pair_confidence(
+    token_confidence: float | None,
+    anchor_score: float,
+    context_tokens: list[OcrToken],
+    value_token: OcrToken,
+    page: DocumentPage,
+) -> float:
+    confidence = (token_confidence if token_confidence is not None else 0.55) * 0.45
+    confidence += anchor_score * 0.45
+    if context_tokens and any(_is_same_visual_row(token.bbox, value_token.bbox) for token in context_tokens):
+        confidence += 0.06
+    center_x = (value_token.bbox.x1 + value_token.bbox.x2) / 2
+    center_y = (value_token.bbox.y1 + value_token.bbox.y2) / 2
+    if center_x / page.width >= 0.58:
+        confidence += 0.02
+    if center_y / page.height >= 0.50:
+        confidence += 0.02
+    return round(min(1.0, confidence), 4)
+
+
+def _target_value_candidates(
+    target: str,
+    crop_candidates: list[_EconomicValueCandidate],
+    field_candidate: EconomicSummaryFieldCandidate | None,
+    anchor_hits: list[_AnchorHit],
+    page: DocumentPage,
+) -> list[_EconomicValueCandidate]:
+    candidates = list(crop_candidates)
+    if field_candidate is not None:
+        value = _field_decimal(field_candidate)
+        if value is not None:
+            candidates.append(
+                _EconomicValueCandidate(
+                    text=field_candidate.value_text,
+                    value=abs(_money(value)),
+                    bbox=field_candidate.value_bbox,
+                    confidence=1.0,
+                    source="selected_field",
+                )
+            )
+
+    candidates = sorted(
+        _deduplicate_value_candidates(candidates),
+        key=lambda candidate: _score_value_candidate_for_target(
+            candidate=candidate,
+            target=target,
+            anchor_hits=anchor_hits,
+            page=page,
+        ),
+        reverse=True,
+    )
+    return candidates[:8]
+
+
+def _add_derived_combination_candidates(
+    candidates_by_target: dict[str, list[_EconomicValueCandidate]],
+    percent: int,
+) -> None:
+    for imponibile in candidates_by_target["totale_imponibile"]:
+        for imposta in candidates_by_target["totale_imposta"]:
+            total_value = _money(imponibile.value + imposta.value)
+            candidates_by_target["totale_fattura"].append(
+                _EconomicValueCandidate(
+                    text=_format_decimal(total_value),
+                    value=total_value,
+                    bbox=_union_candidate_bbox([imponibile, imposta]),
+                    confidence=min(imponibile.confidence, imposta.confidence, 0.72),
+                    source="table_crop_calculated_imponibile_plus_imposta",
+                    anchor_text="",
+                    anchor_score=min(imponibile.anchor_score, imposta.anchor_score),
+                )
+            )
+
+            expected_ritenuta = _ritenuta_from_imponibile(imponibile.value, percent)
+            candidates_by_target["ritenuta"].append(
+                _EconomicValueCandidate(
+                    text=_format_decimal(expected_ritenuta),
+                    value=expected_ritenuta,
+                    bbox=imponibile.bbox,
+                    confidence=min(imponibile.confidence, 0.48),
+                    source="table_crop_calculated_ritenuta_from_imponibile",
+                    anchor_text="",
+                    anchor_score=0.0,
+                )
+            )
+
+    for totale in candidates_by_target["totale_fattura"]:
+        for ritenuta in candidates_by_target["ritenuta"]:
+            if ritenuta.value >= totale.value:
+                continue
+            netto_value = _money(totale.value - ritenuta.value)
+            candidates_by_target["totale_netto_fattura"].append(
+                _EconomicValueCandidate(
+                    text=_format_decimal(netto_value),
+                    value=netto_value,
+                    bbox=_union_candidate_bbox([totale, ritenuta]),
+                    confidence=min(totale.confidence, ritenuta.confidence, 0.64),
+                    source="table_crop_calculated_totale_minus_ritenuta",
+                    anchor_text="",
+                    anchor_score=min(totale.anchor_score, ritenuta.anchor_score),
+                )
+            )
+
+    for target in _economic_targets():
+        candidates_by_target[target] = sorted(
+            _deduplicate_value_candidates(candidates_by_target[target]),
+            key=lambda candidate: candidate.confidence,
+            reverse=True,
+        )[:10]
+
+
+def _union_candidate_bbox(candidates: list[_EconomicValueCandidate]) -> BoundingBox:
+    return BoundingBox(
+        x1=min(candidate.bbox.x1 for candidate in candidates),
+        y1=min(candidate.bbox.y1 for candidate in candidates),
+        x2=max(candidate.bbox.x2 for candidate in candidates),
+        y2=max(candidate.bbox.y2 for candidate in candidates),
+    )
+
+
+def _score_value_candidate_for_target(
+    candidate: _EconomicValueCandidate,
+    target: str,
+    anchor_hits: list[_AnchorHit],
+    page: DocumentPage,
+) -> float:
+    score = candidate.confidence * 40
+    score += candidate.anchor_score * 55
+    if candidate.source == "table_crop_pair":
+        score += 18
+    center_x = (candidate.bbox.x1 + candidate.bbox.x2) / 2
+    center_y = (candidate.bbox.y1 + candidate.bbox.y2) / 2
+    if center_x / page.width >= 0.58:
+        score += 12
+    if center_y / page.height >= 0.55:
+        score += 10
+
+    target_anchors = [hit for hit in anchor_hits if hit.label == target]
+    if target_anchors:
+        best_distance = min(
+            _field_link_distance(page, hit.bbox, candidate.bbox)
+            for hit in target_anchors
+        )
+        score += max(0, 65 - best_distance * 220)
+
+    return score
+
+
+def _score_economic_value_combination(
+    values: dict[str, _EconomicValueCandidate],
+    existing_values: dict[str, Decimal | None],
+    percent: int,
+) -> _EconomicValueCombination | None:
+    notes = []
+    score = sum(candidate.confidence * 12 for candidate in values.values())
+
+    for target, existing_value in existing_values.items():
+        if existing_value is None or target not in values:
+            continue
+        if _money_matches(abs(existing_value), values[target].value):
+            score += 80
+        else:
+            score -= 120
+
+    imponibile = values["totale_imponibile"].value
+    imposta = values["totale_imposta"].value
+    totale = values["totale_fattura"].value
+    ritenuta = values["ritenuta"].value
+    netto = values["totale_netto_fattura"].value
+    if totale < imponibile or imposta > totale or ritenuta >= totale or netto <= 0 or netto > totale:
+        return None
+    if _has_reused_incompatible_value_candidate(values):
+        return None
+
+    if _money_matches(_money(imponibile + imposta), totale):
+        score += 120
+        notes.append("combinatorial_imponibile_plus_imposta_matches_totale")
+    else:
+        score -= 40
+
+    if not _money_matches(_money(totale - ritenuta), netto):
+        return None
+    score += 140
+    notes.append("combinatorial_totale_minus_ritenuta_matches_netto")
+
+    if _money_matches(_ritenuta_from_imponibile(imponibile, percent), ritenuta):
+        score += 120
+        notes.append("combinatorial_ritenuta_matches_imponibile_percent")
+    else:
+        score -= 40
+
+    if _values_are_column_aligned(values):
+        score += 30
+        notes.append("combinatorial_values_column_aligned")
+
+    if score < 260:
+        return None
+
+    return _EconomicValueCombination(values=values, score=round(score, 2), notes=tuple(notes))
+
+
+def _has_reused_incompatible_value_candidate(
+    values: dict[str, _EconomicValueCandidate],
+) -> bool:
+    incompatible_pairs = [
+        ("totale_fattura", "ritenuta"),
+        ("totale_fattura", "totale_netto_fattura"),
+        ("ritenuta", "totale_netto_fattura"),
+        ("totale_imponibile", "ritenuta"),
+        ("totale_imponibile", "totale_fattura"),
+    ]
+    for left, right in incompatible_pairs:
+        left_candidate = values[left]
+        right_candidate = values[right]
+        if left_candidate.value == right_candidate.value and left_candidate.bbox == right_candidate.bbox:
+            return True
+
+    return False
+
+
+def _values_are_column_aligned(values: dict[str, _EconomicValueCandidate]) -> bool:
+    x2_values = [candidate.bbox.x2 for candidate in values.values()]
+    return max(x2_values) - min(x2_values) <= 180
+
+
+def _deduplicate_value_candidates(
+    candidates: list[_EconomicValueCandidate],
+) -> list[_EconomicValueCandidate]:
+    best_by_value_and_box: dict[tuple[Decimal, BoundingBox], _EconomicValueCandidate] = {}
+    for candidate in candidates:
+        key = (candidate.value, candidate.bbox)
+        current = best_by_value_and_box.get(key)
+        if current is None or candidate.confidence > current.confidence:
+            best_by_value_and_box[key] = candidate
+
+    return list(best_by_value_and_box.values())
 
 
 def _mark_selected_fields(
@@ -772,6 +1309,7 @@ def _anchor_definitions() -> list[tuple[str, str]]:
         ("ritenuta", "ritenuta"),
         ("ritenuta", "ritenuta 4"),
         ("ritenuta", "ritenuta 20"),
+        ("ritenuta", "ra"),
         ("ritenuta", "rit acconto"),
         ("ritenuta", "rit acconto 4"),
         ("ritenuta", "rit acconto 20"),
@@ -780,6 +1318,8 @@ def _anchor_definitions() -> list[tuple[str, str]]:
         ("totale_netto_fattura", "netto fattura"),
         ("totale_netto_fattura", "netto a pagare"),
         ("totale_netto_fattura", "importo da pagare"),
+        ("totale_netto_fattura", "importo scadenza"),
+        ("totale_netto_fattura", "totale dovuto"),
         ("totale_netto_fattura", "tot dovuto"),
     ]
 
@@ -791,6 +1331,10 @@ def _is_ambiguous_economic_anchor(label: str, normalized_text: str) -> bool:
 
     if label == "totale_imponibile" and "imposta" in words:
         return True
+
+    if label == "totale_fattura" and "documento" in words:
+        if "tipo" in words or "numero" in words:
+            return True
 
     return False
 

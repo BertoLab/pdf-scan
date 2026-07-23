@@ -1,0 +1,4 @@
+﻿source_file,page,raw_text,normalized_value,score,selected_for_page,positive_context,negative_context,nearby_text,x1,y1,x2,y2
+data/input/20250203162928830.pdf,1,90006070537,90006070537,190.0,True,partita iva,codice fiscale|iban|banca,58022 FOLLONICA GR CODICE FISCALE PARTITA IVA COD.CU. 5089 PAGAMENTO RIMESSA DIRETTA BANCA D'APPOGGIO Unicredit Banca 1 IBAN: IT75W0200872241000040720653 -,91,522,228,540
+data/input/20250203162928830.pdf,1,01303760530,01303760530,110.0,False,p.i.,,"-4,20 TOTALE NETTO FATTURA EURO 123,90 Follonica (GR) Tel 056649020 P.I. Email: all' elenco dei Laboratori della Regione Toscana secondo la L.R.",1254,2211,1405,2231
+data/input/20250203162928830.pdf,2,01303760530,01303760530,10.0,False,,,Bonifico Istantaneo NO Beneficiario BIOCONSULT S.R.L. Italia identificativo fiscale IT - Persana fisica Conta beneficiario 1T75W0200872241000040720653 Codice SWIFT Codice Tipo codice CBI Altri Destinatario esito,485,1429,635,1448

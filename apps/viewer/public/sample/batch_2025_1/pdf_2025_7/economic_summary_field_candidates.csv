@@ -1,0 +1,8 @@
+﻿source_file,page,target,label_text,value_text,normalized_value,score,selected_as_field,x1,y1,x2,y2,label_x1,label_y1,label_x2,label_y2,value_x1,value_y1,value_x2,value_y2
+data/input/2025/batch_2025_1/pdf_2025_7.pdf,1,ritenuta,Ritenuta d'acconto,"-3,80",-3.80,153.3,True,1140,1233,1547,1261,1140,1233,1353,1256,1491,1237,1547,1261
+data/input/2025/batch_2025_1/pdf_2025_7.pdf,1,totale_netto_fattura,Netto da pagare,"100,70",100.70,154.25,True,1158,1288,1547,1317,1158,1288,1347,1317,1476,1291,1547,1316
+data/input/2025/batch_2025_1/pdf_2025_7.pdf,3,totale_imponibile,TOTALE IMPONIBILE,"105,00",105.00,171.64,True,1283,1896,1559,1934,1283,1896,1424,1907,1492,1913,1559,1934
+data/input/2025/batch_2025_1/pdf_2025_7.pdf,3,totale_imposta,TOTALE IMPOSTA,"23,10",23.10,169.97,True,1283,1953,1559,1990,1283,1953,1406,1964,1505,1970,1559,1990
+data/input/2025/batch_2025_1/pdf_2025_7.pdf,3,totale_fattura,TOTALE FATTURA EURO,"128,10",128.10,171.54,True,1283,2010,1559,2047,1283,2010,1454,2021,1493,2027,1559,2047
+data/input/2025/batch_2025_1/pdf_2025_7.pdf,3,ritenuta,RITENUTA 4%,"-4,20",-4.20,169.27,True,1283,2066,1559,2104,1283,2066,1378,2077,1510,2084,1559,2104
+data/input/2025/batch_2025_1/pdf_2025_7.pdf,3,totale_netto_fattura,TOTALE NETTO FATTURA EURO,"123,90",123.90,172.64,True,1283,2123,1559,2171,1283,2123,1507,2134,1480,2148,1559,2171

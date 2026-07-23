@@ -1,0 +1,8 @@
+﻿source_file,page,target,label_text,value_text,normalized_value,score,selected_as_field,x1,y1,x2,y2,label_x1,label_y1,label_x2,label_y2,value_x1,value_y1,value_x2,value_y2
+data/input/2025/batch_2025_1/pdf_2025_5.pdf,1,totale_imponibile,Tot. imponibile,"443,00",443.00,140.14,True,1006,1785,1527,1811,1006,1785,1177,1810,1456,1788,1527,1811
+data/input/2025/batch_2025_1/pdf_2025_5.pdf,1,totale_imposta,Tot. Iva,"97,46",97.46,141.2,True,1006,1823,1526,1849,1006,1823,1090,1842,1448,1825,1526,1849
+data/input/2025/batch_2025_1/pdf_2025_5.pdf,1,totale_fattura,Tot. documento,"540,46",540.46,141.33,True,1006,1878,1525,1905,1006,1878,1191,1898,1447,1881,1525,1905
+data/input/2025/batch_2025_1/pdf_2025_5.pdf,1,ritenuta,"Rit. acconto 4% su € 443,00","-17,72",-17.72,139.61,True,1007,1916,1526,1942,1007,1916,1315,1940,1461,1918,1526,1942
+data/input/2025/batch_2025_1/pdf_2025_5.pdf,1,totale_netto_fattura,Tot. dovuto,"522,74",522.74,145.18,True,1006,2098,1521,2132,1006,2098,1188,2124,1418,2101,1521,2132
+data/input/2025/batch_2025_1/pdf_2025_5.pdf,3,totale_imponibile,Totale imponibile,"90,00",90.00,169.25,True,679,1736,961,1778,679,1736,823,1754,906,1758,961,1778
+data/input/2025/batch_2025_1/pdf_2025_5.pdf,3,ritenuta,Ritenuta d'ucconto,"3,60",3.60,168.42,True,1268,2037,1543,2082,1268,2037,1416,2054,1500,2062,1543,2082

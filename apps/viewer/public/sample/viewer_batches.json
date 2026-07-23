@@ -1,0 +1,19 @@
+{
+  "batches": [
+    {
+      "id": "batch_2025_1",
+      "label": "batch 2025 1",
+      "base_path": "/sample/batch_2025_1"
+    },
+    {
+      "id": "batch_codex_check",
+      "label": "batch codex check",
+      "base_path": "/sample/batch_codex_check"
+    },
+    {
+      "id": "regression_set",
+      "label": "regression set",
+      "base_path": "/sample/regression_set"
+    }
+  ]
+}

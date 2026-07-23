@@ -1,9 +1,11 @@
 import json
 import os
 import sys
+from decimal import Decimal
 from pathlib import Path
 
-from PIL import Image
+from openpyxl import Workbook
+from PIL import Image, ImageDraw
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "scripts"))
 from debug_words import (
@@ -24,6 +26,9 @@ from estrattore.debug_output import (
 from estrattore import debug_flags
 from estrattore.economic_summary_extraction import find_economic_summary_regions
 from estrattore.economic_summary_extraction import (
+    EconomicSummaryResolvedRow,
+    EconomicSummaryRegionCandidate,
+    _best_economic_value_combination,
     find_economic_summary_field_candidates,
     resolve_economic_summary_rows,
 )
@@ -46,6 +51,8 @@ from estrattore.issuer_name_extraction import (
 from estrattore import pipeline
 from estrattore.model import (
     BoundingBox,
+    DetectedTableCellRegion,
+    DetectedTableRegion,
     DocumentPage,
     DocumentRepresentation,
     DocumentStatus,
@@ -53,8 +60,10 @@ from estrattore.model import (
     InvoiceField,
     LayoutBlock,
     LayoutBlockType,
+    OcrHoleRegion,
     OcrToken,
     PerceptionBackend,
+    Point,
     TableRegion,
     TextLine,
     TextSpan,
@@ -65,6 +74,18 @@ from estrattore.ocr_normalization import (
     normalize_fiscal_anchor_text,
 )
 from estrattore.perception import analyze_pages
+from estrattore.registry import (
+    RegistryCache,
+    RegistryRecord,
+    clean_registry_cache_duplicates,
+    extract_registry_fiscal_identifiers,
+    import_registry_excel,
+    load_registry_cache,
+    normalize_registry_name,
+    read_registry_records_from_excel,
+    save_registry_cache,
+)
+from estrattore.registry_enrichment import enrich_invoice_fields_from_registry
 from estrattore import tesseract_adapter
 from estrattore.tesseract_adapter import (
     DEFAULT_TESSERACT_LANG,
@@ -73,6 +94,15 @@ from estrattore.tesseract_adapter import (
     deduplicate_overlapping_tokens,
     resolve_tesseract_cmd,
     tesseract_data_to_tokens,
+)
+from estrattore.table_region_detection import (
+    _LineSegment,
+    _add_or_snap_implied_vertical_border_line,
+    _line_model_from_dark_pixel_centers,
+    detect_table_cell_regions,
+    detect_table_ocr_regions,
+    detect_table_regions,
+    detect_table_regions_and_ocr_regions,
 )
 from estrattore.viewer_invoice_segmentation import build_viewer_invoices
 from estrattore.text_layout import (
@@ -165,6 +195,529 @@ def test_ocr_anchor_normalization_handles_common_domain_errors() -> None:
     assert normalize_fiscal_anchor_text("P.lVA") == "p iva"
     assert normalize_company_legal_form("OTIS Servizi S.r.t.") == "OTIS Servizi SRL"
     assert normalize_company_legal_form("OTIS Servizi S.r.1,") == "OTIS Servizi SRL,"
+
+
+# SECTION: Registry cache from external anagrafica files
+# Tests parsing and normalization of the mixed customer/supplier registry without
+# depending on real personal data files.
+def test_registry_normalizes_names_from_anagrafica_export() -> None:
+    assert (
+        normalize_registry_name('00014365 "OTIS SERVIZI S.R.L."')
+        == "OTIS SERVIZI SRL"
+    )
+    assert (
+        normalize_registry_name('00011286 "COND. ""I GIRASOLI"" VIA PASOLINI 18-54 "')
+        == "COND. I GIRASOLI VIA PASOLINI 18-54"
+    )
+
+
+def test_read_registry_records_from_excel_parses_anagrafica_columns() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    for _ in range(10):
+        worksheet.append([])
+    worksheet.append(
+        [
+            "Nominativo",
+            None,
+            None,
+            None,
+            "Codice fiscale",
+            "Partita IVA",
+            "Tipologia",
+            "Ultima mod.",
+            None,
+            None,
+            None,
+            None,
+            "Utente",
+        ]
+    )
+    worksheet.append([])
+    worksheet.append(
+        [
+            '00014365 "OTIS SERVIZI S.R.L."',
+            None,
+            None,
+            None,
+            "01729590032",
+            "01729590032",
+            "Società di capitali / ente commerciale",
+            None,
+            None,
+            None,
+            None,
+            None,
+            "GIORGIO",
+        ]
+    )
+    worksheet.append(
+        [
+            "00000001 RECORD VUOTO",
+            None,
+            None,
+            None,
+            "00000000000",
+            None,
+            "Altro soggetto",
+        ]
+    )
+    output_dir = Path("outputs") / "pytest-tmp" / "registry_tests"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_path = output_dir / "anagrafica.xlsx"
+    workbook.save(input_path)
+
+    records = read_registry_records_from_excel(input_path)
+
+    assert records[0].registry_id == "00014365"
+    assert records[0].normalized_name == "OTIS SERVIZI SRL"
+    assert records[0].codice_fiscale_raw == "01729590032"
+    assert records[0].codice_fiscale == "01729590032"
+    assert records[0].partita_iva_raw == "01729590032"
+    assert records[0].partita_iva == "01729590032"
+    assert records[0].utente == "GIORGIO"
+    assert records[1].codice_fiscale is None
+    assert records[1].codice_fiscale_raw == "00000000000"
+
+
+def test_read_registry_records_from_excel_preserves_unmatchable_rows() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    for _ in range(10):
+        worksheet.append([])
+    worksheet.append(
+        [
+            "Nominativo",
+            None,
+            None,
+            None,
+            "Codice fiscale",
+            "Partita IVA",
+            "Tipologia",
+            "Ultima mod.",
+            None,
+            None,
+            None,
+            None,
+            "Utente",
+        ]
+    )
+    worksheet.append([])
+    worksheet.append(["00013211 ;;;;;;;;;;;;;;;; ", None, None, None, ";;;;;;;;;;;;;;;;"])
+    input_path = Path("outputs") / "pytest-tmp" / "registry_tests" / "dirty.xlsx"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(input_path)
+
+    records = read_registry_records_from_excel(input_path)
+
+    assert len(records) == 1
+    assert records[0].nominativo == "00013211 ;;;;;;;;;;;;;;;;"
+    assert records[0].normalized_name == ""
+    assert records[0].codice_fiscale_raw == ";;;;;;;;;;;;;;;;"
+    assert records[0].codice_fiscale is None
+    assert records[0].warnings == [
+        "missing_normalized_name",
+        "invalid_codice_fiscale",
+    ]
+
+
+def test_import_registry_excel_replaces_single_active_registry() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    for _ in range(10):
+        worksheet.append([])
+    worksheet.append(
+        [
+            "Nominativo",
+            None,
+            None,
+            None,
+            "Codice fiscale",
+            "Partita IVA",
+            "Tipologia",
+            "Ultima mod.",
+            None,
+            None,
+            None,
+            None,
+            "Utente",
+        ]
+    )
+    worksheet.append([])
+    worksheet.append(
+        [
+            '00014365 "OTIS SERVIZI S.R.L."',
+            None,
+            None,
+            None,
+            "01729590032",
+            "01729590032",
+            "SocietÃ  di capitali / ente commerciale",
+        ]
+    )
+    output_dir = Path("outputs") / "pytest-tmp" / "registry_tests" / "import"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_path = output_dir / "source.xlsx"
+    input_path = output_dir / "elenco_anagrafiche.xlsx"
+    cache_path = output_dir / "anagrafica_registry.json"
+    workbook.save(source_path)
+
+    cache = import_registry_excel(
+        source_path,
+        input_path=input_path,
+        cache_path=cache_path,
+    )
+
+    assert input_path.exists()
+    assert cache_path.exists()
+    assert cache.source_file == input_path.as_posix()
+    assert cache.records[0].normalized_name == "OTIS SERVIZI SRL"
+    assert load_registry_cache(cache_path).records[0].partita_iva == "01729590032"
+
+
+def test_save_and_load_registry_cache_roundtrip() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="data/registry/input/anagrafica.xlsx",
+        records=[
+            RegistryRecord(
+                registry_id="00014365",
+                source_row=13,
+                codice_anagrafica="00014365",
+                nominativo='00014365 "OTIS SERVIZI S.R.L."',
+                normalized_name="OTIS SERVIZI SRL",
+                codice_fiscale_raw="01729590032",
+                codice_fiscale="01729590032",
+                partita_iva_raw="01729590032",
+                partita_iva="01729590032",
+                tipologia="Società di capitali / ente commerciale",
+                utente="GIORGIO",
+                warnings=[],
+            )
+        ],
+    )
+    output_dir = Path("outputs") / "pytest-tmp" / "registry_tests"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "anagrafica_registry.json"
+
+    save_registry_cache(cache, output_path)
+    loaded = load_registry_cache(output_path)
+
+    assert loaded == cache
+
+
+def test_registry_name_normalization_extracts_fiscal_identifiers_from_nominativo() -> None:
+    codice_fiscale, partita_iva = extract_registry_fiscal_identifiers(
+        "P.IVA 01729590032"
+    )
+
+    assert codice_fiscale == "01729590032"
+    assert partita_iva == "01729590032"
+    assert normalize_registry_name("P.IVA 01729590032") == ""
+
+
+def test_registry_cleaning_merges_fiscal_identifier_only_name_with_complete_row() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="registry.json",
+        records=[
+            RegistryRecord(
+                registry_id="piva-only",
+                source_row=13,
+                codice_anagrafica=None,
+                nominativo="P.IVA 01729590032",
+                normalized_name=normalize_registry_name("P.IVA 01729590032"),
+                codice_fiscale_raw="",
+                codice_fiscale="01729590032",
+                partita_iva_raw="",
+                partita_iva="01729590032",
+                tipologia="Societa",
+                warnings=[],
+            ),
+            RegistryRecord(
+                registry_id="complete",
+                source_row=14,
+                codice_anagrafica="00014365",
+                nominativo="00014365 OTIS SERVIZI S.R.L.",
+                normalized_name="OTIS SERVIZI SRL",
+                codice_fiscale_raw="01729590032",
+                codice_fiscale="01729590032",
+                partita_iva_raw="01729590032",
+                partita_iva="01729590032",
+                tipologia="Societa",
+                warnings=[],
+            ),
+        ],
+    )
+
+    duplicate_report_path = (
+        Path("outputs") / "pytest-tmp" / "registry_duplicate_report.json"
+    )
+    duplicate_report_path.unlink(missing_ok=True)
+    result = clean_registry_cache_duplicates(
+        cache,
+        duplicate_report_path=duplicate_report_path,
+    )
+    duplicate_report_path.unlink(missing_ok=True)
+
+    assert len(result.cache.records) == 1
+    assert result.cache.records[0].normalized_name == "OTIS SERVIZI SRL"
+    assert result.report["deleted_count"] == 1
+    assert result.report["groups"][0]["deleted_records"][0]["source_row"] == 13
+
+
+def test_registry_cleaning_keeps_different_registry_codes_as_conflict() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="registry.json",
+        records=[
+            RegistryRecord(
+                registry_id="00016328",
+                source_row=10448,
+                codice_anagrafica="00016328",
+                nominativo="00016328 FASTER SAILING TEAM",
+                normalized_name="FASTER SAILING TEAM",
+                codice_fiscale_raw="07270490480",
+                codice_fiscale="07270490480",
+                partita_iva_raw="",
+                partita_iva=None,
+                tipologia="Altro soggetto",
+                warnings=[],
+            ),
+            RegistryRecord(
+                registry_id="00004108",
+                source_row=1359,
+                codice_anagrafica="00004108",
+                nominativo="00004108 ASSOCIAZIONE FASTER SAILING TEAM",
+                normalized_name="ASSOCIAZIONE FASTER SAILING TEAM",
+                codice_fiscale_raw="07270490480",
+                codice_fiscale="07270490480",
+                partita_iva_raw="07270490480",
+                partita_iva="07270490480",
+                tipologia="Altro soggetto",
+                warnings=[],
+            ),
+        ],
+    )
+    duplicate_report_path = (
+        Path("outputs") / "pytest-tmp" / "registry_duplicate_report.json"
+    )
+    duplicate_report_path.unlink(missing_ok=True)
+
+    result = clean_registry_cache_duplicates(
+        cache,
+        duplicate_report_path=duplicate_report_path,
+    )
+    duplicate_report_path.unlink(missing_ok=True)
+
+    assert len(result.cache.records) == 2
+    assert result.report["merged_count"] == 0
+    assert result.report["conflict_count"] == 1
+    assert result.report["deleted_count"] == 0
+    assert result.report["groups"][0]["source_rows"] == [10448, 1359]
+
+
+def test_registry_enrichment_completes_missing_fields_from_exact_vat_match() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="registry.json",
+        records=[
+            RegistryRecord(
+                registry_id="00014365",
+                source_row=13,
+                codice_anagrafica="00014365",
+                nominativo='00014365 "OTIS SERVIZI S.R.L."',
+                normalized_name="OTIS SERVIZI SRL",
+                codice_fiscale_raw="01729590032",
+                codice_fiscale="01729590032",
+                partita_iva_raw="01729590032",
+                partita_iva="01729590032",
+                tipologia="SocietÃ  di capitali / ente commerciale",
+                warnings=[],
+            )
+        ],
+    )
+    fields = [
+        {"kind": "nome_emittente", "value": "", "score": 0},
+        {"kind": "codice_fiscale_emittente", "value": "", "score": 0},
+        {"kind": "p_iva", "value": "01729590032", "score": 130},
+    ]
+
+    enriched = enrich_invoice_fields_from_registry(fields, cache)
+    by_kind = {field["kind"]: field for field in enriched}
+
+    assert by_kind["nome_emittente"]["value"] == "OTIS SERVIZI SRL"
+    assert by_kind["codice_fiscale_emittente"]["value"] == "01729590032"
+    assert by_kind["nome_emittente"]["role"] == "registry_enriched"
+    assert by_kind["nome_emittente"]["registry_match_group"] == "supplier"
+    assert by_kind["nome_emittente"]["registry_match_fields"] == ["partita_iva"]
+
+
+def test_registry_enrichment_completes_valid_vat_from_exact_name_match() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="registry.json",
+        records=[
+            RegistryRecord(
+                registry_id="00025866",
+                source_row=13,
+                codice_anagrafica="00025866",
+                nominativo="00025866 BELLADONNA S.A.S DI L.SIMONELLI & C.",
+                normalized_name="BELLADONNA S.A.S DI L.SIMONELLI & C.",
+                codice_fiscale_raw="00301910527",
+                codice_fiscale="00301910527",
+                partita_iva_raw="00301910527",
+                partita_iva="00301910527",
+                tipologia="SocietÃ  di persone",
+                warnings=[],
+            )
+        ],
+    )
+    fields = [
+        {
+            "kind": "nome_emittente",
+            "value": "Belladonna s.a.s di L.Simonelli & C.",
+            "score": 120,
+        },
+        {"kind": "codice_fiscale_emittente", "value": "", "score": 0},
+        {"kind": "p_iva", "value": "", "score": 0},
+    ]
+
+    enriched = enrich_invoice_fields_from_registry(fields, cache)
+    by_kind = {field["kind"]: field for field in enriched}
+
+    assert by_kind["codice_fiscale_emittente"]["value"] == "00301910527"
+    assert by_kind["p_iva"]["value"] == "00301910527"
+
+
+def test_registry_enrichment_does_not_use_invalid_registry_vat() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="registry.json",
+        records=[
+            RegistryRecord(
+                registry_id="bad",
+                source_row=13,
+                codice_anagrafica=None,
+                nominativo="BAD SRL",
+                normalized_name="BAD SRL",
+                codice_fiscale_raw="01729590032",
+                codice_fiscale="01729590032",
+                partita_iva_raw="12345678901",
+                partita_iva="12345678901",
+                tipologia="SocietÃ ",
+                warnings=[],
+            )
+        ],
+    )
+    fields = [
+        {"kind": "nome_emittente", "value": "", "score": 0},
+        {"kind": "codice_fiscale_emittente", "value": "01729590032", "score": 100},
+        {"kind": "p_iva", "value": "", "score": 0},
+    ]
+
+    enriched = enrich_invoice_fields_from_registry(fields, cache)
+    by_kind = {field["kind"]: field for field in enriched}
+
+    assert by_kind["nome_emittente"]["value"] == "BAD SRL"
+    assert by_kind["p_iva"]["value"] == ""
+
+
+def test_registry_enrichment_matches_supplier_and_condominium_as_separate_groups() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="registry.json",
+        records=[
+            RegistryRecord(
+                registry_id="supplier",
+                source_row=13,
+                codice_anagrafica="00014365",
+                nominativo="00014365 OTIS SERVIZI S.R.L.",
+                normalized_name="OTIS SERVIZI SRL",
+                codice_fiscale_raw="01729590032",
+                codice_fiscale="01729590032",
+                partita_iva_raw="01729590032",
+                partita_iva="01729590032",
+                tipologia="SocietÃ ",
+                warnings=[],
+            ),
+            RegistryRecord(
+                registry_id="condominio",
+                source_row=14,
+                codice_anagrafica="00011286",
+                nominativo="00011286 COND. I GIRASOLI VIA PASOLINI",
+                normalized_name="COND. I GIRASOLI VIA PASOLINI",
+                codice_fiscale_raw="90006070537",
+                codice_fiscale="90006070537",
+                partita_iva_raw="",
+                partita_iva=None,
+                tipologia="Condominio",
+                warnings=[],
+            ),
+        ],
+    )
+    fields = [
+        {"kind": "nome_emittente", "value": "", "score": 0},
+        {"kind": "codice_fiscale_emittente", "value": "", "score": 0},
+        {"kind": "p_iva", "value": "01729590032", "score": 130},
+        {"kind": "condominio", "value": "", "score": 0},
+        {"kind": "codice_fiscale", "value": "90006070537", "score": 120},
+    ]
+
+    enriched = enrich_invoice_fields_from_registry(fields, cache)
+    by_kind = {field["kind"]: field for field in enriched}
+
+    assert by_kind["nome_emittente"]["value"] == "OTIS SERVIZI SRL"
+    assert by_kind["nome_emittente"]["registry_match_group"] == "supplier"
+    assert by_kind["condominio"]["value"] == "COND. I GIRASOLI VIA PASOLINI"
+    assert by_kind["condominio"]["registry_match_group"] == "condominium"
+
+
+def test_registry_enrichment_marks_conflict_when_group_matches_multiple_rows() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="registry.json",
+        records=[
+            RegistryRecord(
+                registry_id="name-row",
+                source_row=13,
+                codice_anagrafica="00014365",
+                nominativo="00014365 OTIS SERVIZI S.R.L.",
+                normalized_name="OTIS SERVIZI SRL",
+                codice_fiscale_raw="01729590032",
+                codice_fiscale="01729590032",
+                partita_iva_raw="01729590032",
+                partita_iva="01729590032",
+                tipologia="SocietÃ ",
+                warnings=[],
+            ),
+            RegistryRecord(
+                registry_id="vat-row",
+                source_row=14,
+                codice_anagrafica="00099999",
+                nominativo="00099999 ALTRA SOCIETA S.R.L.",
+                normalized_name="ALTRA SOCIETA SRL",
+                codice_fiscale_raw="02157780536",
+                codice_fiscale="02157780536",
+                partita_iva_raw="02157780536",
+                partita_iva="02157780536",
+                tipologia="SocietÃ ",
+                warnings=[],
+            ),
+        ],
+    )
+    fields = [
+        {"kind": "nome_emittente", "value": "OTIS SERVIZI SRL", "score": 120},
+        {"kind": "codice_fiscale_emittente", "value": "", "score": 0},
+        {"kind": "p_iva", "value": "02157780536", "score": 130},
+    ]
+
+    enriched = enrich_invoice_fields_from_registry(fields, cache)
+    by_kind = {field["kind"]: field for field in enriched}
+
+    assert by_kind["codice_fiscale_emittente"]["value"] == ""
+    assert by_kind["nome_emittente"]["registry_conflict"] is True
+    assert by_kind["p_iva"]["registry_conflict"] is True
 
 
 # SECTION: Fiscal identifier extraction from OCR tokens
@@ -491,6 +1044,44 @@ def test_find_fiscal_identifier_candidates_prefers_closer_piva_over_farther_tax_
     assert candidates[0].campo_suggerito == "p_iva"
 
 
+def test_find_fiscal_identifier_candidates_keeps_adjacent_piva_anchor_over_stacked_tokens() -> None:
+    stacked_tokens = [
+        OcrToken("DTTPRI57S09E2021", BoundingBox(473, 229, 723, 251)),
+        OcrToken("3472972688", BoundingBox(477, 298, 630, 320)),
+        OcrToken("Follonica", BoundingBox(506, 198, 614, 218)),
+        OcrToken("-", BoundingBox(624, 209, 632, 212)),
+        OcrToken("pierodetti@libero.it", BoundingBox(420, 331, 653, 357)),
+        OcrToken("SUGHERAIO", BoundingBox(534, 166, 699, 187)),
+        OcrToken("pierodetti@pec.cgn.it", BoundingBox(420, 358, 682, 393)),
+        OcrToken("GR", BoundingBox(642, 198, 680, 218)),
+        OcrToken("Uff.", BoundingBox(571, 394, 610, 415)),
+        OcrToken("VIDEO", BoundingBox(516, 134, 601, 155)),
+        OcrToken("DEL", BoundingBox(473, 166, 525, 186)),
+        OcrToken("provi", BoundingBox(622, 400, 679, 420)),
+        OcrToken("PEC:", BoundingBox(663, 331, 723, 352)),
+    ]
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    *stacked_tokens,
+                    OcrToken("P.IVA", BoundingBox(420, 264, 490, 287)),
+                    OcrToken("01034680536", BoundingBox(499, 264, 667, 287)),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_fiscal_identifier_candidates(document)
+
+    assert candidates[0].p_iva_context == "piva"
+    assert candidates[0].campo_suggerito == "p_iva"
+
+
 def test_find_fiscal_identifier_candidates_accepts_tax_code_when_bank_context_is_farther() -> None:
     document = DocumentRepresentation(
         source_file=Path("fattura.pdf"),
@@ -599,6 +1190,45 @@ def test_find_fiscal_identifier_candidates_corrects_ocr_issuer_tax_code() -> Non
     assert by_value["SSSMRC81R03F032J"].selected_as_codice_fiscale_emittente is True
 
 
+def test_find_fiscal_identifier_candidates_corrects_letter_position_ocr_tax_code_with_strong_anchor() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    OcrToken("C.F", BoundingBox(420, 229, 462, 251)),
+                    OcrToken("DTTPRI57S09E2021", BoundingBox(473, 229, 723, 251)),
+                    OcrToken("P.IVA", BoundingBox(420, 264, 490, 287)),
+                    OcrToken("01034680536", BoundingBox(499, 264, 667, 287)),
+                    OcrToken("condominio", BoundingBox(1033, 154, 1180, 196)),
+                    OcrToken("C.F.", BoundingBox(1033, 254, 1083, 278)),
+                    OcrToken("81005680533", BoundingBox(1093, 254, 1262, 278)),
+                ],
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="condominio via 2 giugno",
+                        bbox=BoundingBox(1033, 154, 1350, 196),
+                    )
+                ],
+            )
+        ],
+    )
+
+    candidates = find_fiscal_identifier_candidates(document)
+    by_value = {candidate.normalized_value: candidate for candidate in candidates}
+
+    assert "DTTPRI57S09E202I" in by_value
+    assert by_value["DTTPRI57S09E202I"].raw_text == "DTTPRI57S09E2021"
+    assert by_value["DTTPRI57S09E202I"].selected_as_codice_fiscale_emittente is True
+    assert by_value["01034680536"].selected_as_p_iva is True
+
+
 def test_find_fiscal_identifier_candidates_splits_two_numeric_tax_codes_by_role() -> None:
     document = DocumentRepresentation(
         source_file=Path("fattura.pdf"),
@@ -667,6 +1297,62 @@ def test_find_invoice_number_candidates_accepts_slash_format_near_anchor() -> No
     assert candidates[0].anchor_context == "numero fattura"
     assert candidates[0].score >= 120
     assert candidates[0].selected_as_numero_fattura is True
+
+
+def test_find_invoice_number_candidates_accepts_short_alphanumeric_slash_document_number() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    OcrToken("NUMERO", BoundingBox(637, 620, 714, 643)),
+                    OcrToken("DOCUMENTO", BoundingBox(720, 620, 827, 643)),
+                    OcrToken("Fattura", BoundingBox(60, 652, 153, 684)),
+                    OcrToken("06/01/2025", BoundingBox(390, 653, 525, 684)),
+                    OcrToken("4/A", BoundingBox(641, 654, 680, 675)),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_invoice_number_candidates(document)
+    by_value = {candidate.normalized_value: candidate for candidate in candidates}
+
+    assert by_value["4/A"].format_kind == "slash_alfanumerico"
+    assert by_value["4/A"].anchor_context == "numero documento"
+    assert by_value["4/A"].selected_as_numero_fattura is True
+
+
+def test_find_invoice_number_candidates_ignores_flat_spurious_token_near_document_anchor() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    OcrToken("DOCUMENTO", BoundingBox(99, 619, 289, 641)),
+                    OcrToken("DATADOCUMENTO", BoundingBox(385, 619, 545, 642)),
+                    OcrToken("NUMERO", BoundingBox(637, 620, 714, 643)),
+                    OcrToken("DOCUMENTO", BoundingBox(720, 620, 827, 643)),
+                    OcrToken("Fattura", BoundingBox(60, 652, 153, 684)),
+                    OcrToken("__1", BoundingBox(339, 683, 380, 684), 0.33),
+                    OcrToken("06/01/2025", BoundingBox(390, 653, 525, 684)),
+                    OcrToken("4/A", BoundingBox(641, 654, 680, 675)),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_invoice_number_candidates(document)
+    by_value = {candidate.normalized_value: candidate for candidate in candidates}
+
+    assert "1" not in by_value
+    assert by_value["4/A"].selected_as_numero_fattura is True
 
 
 def test_find_invoice_number_candidates_excludes_date_suffix_fragment() -> None:
@@ -1020,6 +1706,41 @@ def test_find_condominium_candidates_accepts_cond_abbreviation() -> None:
 
     assert candidates[0].raw_text == "Cond. Ariosto 10"
     assert candidates[0].selected_as_condominio is True
+
+
+def test_find_condominium_candidates_drops_extreme_short_low_confidence_noise() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1000,
+                height=1000,
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="condominio NE. via 2 giugno i",
+                        bbox=BoundingBox(100, 100, 430, 145),
+                        tokens=[
+                            OcrToken("condominio", BoundingBox(100, 100, 230, 145), 0.96),
+                            OcrToken("NE.", BoundingBox(235, 104, 300, 107), 0.43),
+                            OcrToken("via", BoundingBox(305, 109, 340, 126), 0.97),
+                            OcrToken("2", BoundingBox(350, 105, 365, 126), 0.93),
+                            OcrToken("giugno", BoundingBox(375, 105, 430, 130), 0.90),
+                            OcrToken("i", BoundingBox(425, 104, 428, 107), 0.30),
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
+
+    candidates = find_condominium_candidates(document)
+
+    assert candidates[0].raw_text == "condominio via 2 giugno"
+    assert candidates[0].bbox == BoundingBox(100, 100, 430, 145)
 
 
 def test_find_condominium_candidates_penalizes_dirty_payment_line() -> None:
@@ -1780,6 +2501,12 @@ def test_save_viewer_manifest_writes_stable_overlay_contract() -> None:
         for target in page["targets"]
         if target["kind"] == "economic_summary.ritenuta.value"
     )
+    direct_total = next(
+        target
+        for target in page["targets"]
+        if target["kind"] == "economic_summary.totale_fattura.value"
+        and target["role"] == "value"
+    )
     data_fattura_field = next(
         field for field in invoice["fields"] if field["kind"] == "data_fattura"
     )
@@ -1806,16 +2533,111 @@ def test_save_viewer_manifest_writes_stable_overlay_contract() -> None:
     assert page["tokens"][0]["confidence"] == 0.95
     assert page["spans"][0]["text"] == "TOTALE IMPONIBILE"
     assert "economic_summary" in target_kinds
+    assert direct_total["value"] == "128,10"
     assert "economic_summary.ritenuta" in target_kinds
     assert "economic_summary.ritenuta.label" in target_kinds
     assert "economic_summary.ritenuta.value" in target_kinds
     assert ritenuta_value["role"] == "value"
     assert ritenuta_value["label"] == ""
     assert ritenuta_value["ocr_confidence"] == 0.55
+    assert ritenuta_value["bbox"] == {"x1": 880, "y1": 835, "x2": 930, "y2": 850}
     assert ritenuta_value["has_low_confidence_token"] is True
     assert page["candidate_tables"]["economic_summary_resolved_rows"][0][
         "math_check"
     ] == "ok"
+
+
+def test_viewer_manifest_uses_matching_token_bbox_for_calculated_economic_value() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1000,
+                height=1000,
+                tokens=[
+                    OcrToken("Totale", BoundingBox(600, 700, 660, 715), 0.95),
+                    OcrToken("85,79", BoundingBox(870, 700, 930, 715), 0.95),
+                    OcrToken("Ritenuta", BoundingBox(600, 760, 680, 775), 0.95),
+                    OcrToken("2,81", BoundingBox(880, 780, 930, 795), 0.95),
+                    OcrToken("Importo", BoundingBox(80, 900, 150, 915), 0.95),
+                    OcrToken("scadenza", BoundingBox(155, 900, 240, 915), 0.95),
+                    OcrToken("82,98", BoundingBox(870, 900, 930, 915), 0.95),
+                ],
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="Totale documento",
+                        bbox=BoundingBox(600, 700, 760, 715),
+                    ),
+                    TextSpan(
+                        span_id=2,
+                        line_id=2,
+                        page_span_index=2,
+                        text="Ritenuta",
+                        bbox=BoundingBox(600, 760, 680, 775),
+                    ),
+                    TextSpan(
+                        span_id=3,
+                        line_id=3,
+                        page_span_index=3,
+                        text="Importo scadenza",
+                        bbox=BoundingBox(80, 900, 240, 915),
+                    ),
+                ],
+            )
+        ],
+    )
+    row = EconomicSummaryResolvedRow(
+        page=1,
+        bbox=BoundingBox(560, 680, 950, 820),
+        totale_imponibile_text="",
+        totale_imponibile_value="",
+        totale_fattura_text="85,79",
+        totale_fattura_value="85.79",
+        totale_fattura_source="direct",
+        ritenuta_label_text="Ritenuta",
+        ritenuta_text="2,81",
+        ritenuta_value="-2.81",
+        ritenuta_percentuale="4%",
+        ritenuta_source="direct",
+        totale_netto_fattura_text="",
+        totale_netto_fattura_value="82.98",
+        totale_netto_fattura_source="calculated_from_totale_fattura_minus_ritenuta",
+        math_check="ok",
+        notes="netto_calculated",
+    )
+
+    output_path = save_viewer_manifest(
+        document=document,
+        output_path=Path("outputs/debug/test-viewer-calculated-bbox/viewer_manifest.json"),
+        vat_candidates=[],
+        fiscal_identifier_candidates=[],
+        issuer_name_candidates=[],
+        invoice_number_candidates=[],
+        invoice_date_candidates=[],
+        condominium_candidates=[],
+        economic_summary_regions=[],
+        economic_summary_field_candidates=[],
+        economic_summary_resolved_rows=[row],
+    )
+
+    manifest = json.loads(output_path.read_text(encoding="utf-8"))
+    calculated_target = next(
+        target
+        for target in manifest["pages"][0]["targets"]
+        if target["kind"] == "economic_summary.totale_netto_fattura.value"
+    )
+
+    assert calculated_target["role"] == "calculated"
+    assert calculated_target["bbox"] == {
+        "x1": 870,
+        "y1": 900,
+        "x2": 930,
+        "y2": 915,
+    }
 
 
 # SECTION: Viewer invoice segmentation and invoice-level field resolution
@@ -2340,6 +3162,71 @@ def test_resolve_economic_summary_rows_accepts_tot_documento_rit_acconto_tot_dov
     assert rows[0].math_check == "ok"
 
 
+def test_combinatorial_economic_values_use_only_same_table_crop_pairs() -> None:
+    source = "table_column_masked_psm12"
+    source_id = "table_column_masked_psm12:580:680:950:940"
+    crop_tokens = [
+        OcrToken("Tot.", BoundingBox(600, 700, 635, 715), 0.92, source, source_id),
+        OcrToken("imponibile", BoundingBox(640, 700, 740, 715), 0.92, source, source_id),
+        OcrToken("443,00", BoundingBox(880, 700, 940, 715), 0.96, source, source_id),
+        OcrToken("Tot.", BoundingBox(600, 750, 635, 765), 0.92, source, source_id),
+        OcrToken("Iva", BoundingBox(640, 750, 670, 765), 0.92, source, source_id),
+        OcrToken("97,46", BoundingBox(890, 750, 940, 765), 0.96, source, source_id),
+        OcrToken("Tot.", BoundingBox(600, 800, 635, 815), 0.92, source, source_id),
+        OcrToken("documento", BoundingBox(640, 800, 740, 815), 0.92, source, source_id),
+        OcrToken("540,46", BoundingBox(880, 800, 940, 815), 0.96, source, source_id),
+        OcrToken("Rit.", BoundingBox(600, 850, 635, 865), 0.92, source, source_id),
+        OcrToken("acconto", BoundingBox(640, 850, 710, 865), 0.92, source, source_id),
+        OcrToken("-17,72", BoundingBox(880, 850, 940, 865), 0.96, source, source_id),
+        OcrToken("Tot.", BoundingBox(600, 910, 635, 925), 0.92, source, source_id),
+        OcrToken("dovuto", BoundingBox(640, 910, 710, 925), 0.92, source, source_id),
+        OcrToken("522,74", BoundingBox(880, 910, 940, 925), 0.96, source, source_id),
+    ]
+    page = DocumentPage(
+        page_number=1,
+        width=1000,
+        height=1000,
+        tokens=[OcrToken("999,99", BoundingBox(880, 650, 940, 665), 0.99)]
+        + crop_tokens,
+    )
+    region = EconomicSummaryRegionCandidate(
+        page=1,
+        bbox=BoundingBox(580, 680, 950, 930),
+        score=100,
+        selected_as_economic_summary=True,
+        anchor_context="",
+        amount_count=0,
+        amount_context="",
+    )
+
+    combination = _best_economic_value_combination(page, region, fields={}, percent=4)
+
+    assert combination is not None
+    assert combination.values["totale_fattura"].value == Decimal("540.46")
+    assert combination.values["ritenuta"].value == Decimal("17.72")
+    assert combination.values["totale_netto_fattura"].value == Decimal("522.74")
+    assert {candidate.source for candidate in combination.values.values()} == {
+        "table_crop_pair"
+    }
+
+    page_without_crop_provenance = DocumentPage(
+        page_number=1,
+        width=1000,
+        height=1000,
+        tokens=[OcrToken(token.text, token.bbox, token.confidence) for token in page.tokens],
+    )
+
+    assert (
+        _best_economic_value_combination(
+            page_without_crop_provenance,
+            region,
+            fields={},
+            percent=4,
+        )
+        is None
+    )
+
+
 # SECTION: Invoice number regression cases
 # Tests stricter selection/exclusion behavior for invoice numbers that were
 # ambiguous in real documents or easy to confuse with other numeric values.
@@ -2597,9 +3484,459 @@ def test_analyze_pages_creates_empty_document_pages() -> None:
     assert document.pages[1].height == 400
 
 
+def test_detect_table_regions_finds_line_grid_region() -> None:
+    image = Image.new("RGB", (400, 300), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [60, 100, 140, 180, 220]:
+        draw.line((40, y, 360, y), fill="black", width=2)
+
+    for x in [40, 140, 260, 360]:
+        draw.line((x, 60, x, 220), fill="black", width=2)
+
+    regions = detect_table_regions(image)
+
+    assert len(regions) == 1
+    assert regions[0].horizontal_line_count == 5
+    assert regions[0].vertical_line_count == 4
+    assert regions[0].bbox == BoundingBox(x1=28, y1=48, x2=373, y2=232)
+
+
+def test_detect_table_regions_ignores_page_without_grid() -> None:
+    image = Image.new("RGB", (400, 300), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((40, 60), "Totale fattura 123,45", fill="black")
+
+    assert detect_table_regions(image) == []
+
+
+def test_detect_table_regions_keeps_separate_grids_separate() -> None:
+    image = Image.new("RGB", (400, 500), "white")
+    draw = ImageDraw.Draw(image)
+
+    for top in [40, 300]:
+        for y in [top, top + 50, top + 100, top + 150]:
+            draw.line((40, y, 360, y), fill="black", width=2)
+
+        for x in [40, 140, 260, 360]:
+            draw.line((x, top, x, top + 150), fill="black", width=2)
+
+    regions = detect_table_regions(image)
+
+    assert len(regions) == 2
+    assert regions[0].bbox.y2 < regions[1].bbox.y1
+
+
+def test_detect_table_regions_merges_blocks_with_continuous_verticals() -> None:
+    image = Image.new("RGB", (420, 480), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [40, 80, 120, 160, 300, 340, 380, 420]:
+        draw.line((40, y, 380, y), fill="black", width=2)
+
+    for x in [40, 140, 260, 380]:
+        draw.line((x, 40, x, 420), fill="black", width=2)
+
+    regions = detect_table_regions(image)
+
+    assert len(regions) == 1
+    assert regions[0].bbox == BoundingBox(x1=28, y1=28, x2=393, y2=432)
+
+
+def test_detect_table_regions_merges_blocks_across_large_empty_cell() -> None:
+    image = Image.new("RGB", (420, 620), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [60, 100, 140, 180, 420, 460, 500, 540]:
+        draw.line((40, y, 380, y), fill="black", width=2)
+
+    for x in [40, 160, 280, 380]:
+        draw.line((x, 60, x, 540), fill="black", width=2)
+
+    regions = detect_table_regions(image)
+
+    assert len(regions) == 1
+    assert regions[0].bbox == BoundingBox(x1=28, y1=48, x2=393, y2=552)
+
+
+def test_table_line_model_follows_local_horizontal_slope() -> None:
+    image = Image.new("L", (500, 200), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line((50, 100, 450, 108), fill="black", width=3)
+
+    model = _line_model_from_dark_pixel_centers(
+        image,
+        _LineSegment(start=99, end=109, cross_start=50, cross_end=450),
+    )
+
+    assert model is not None
+    assert 0.015 < model.slope < 0.025
+
+
+def test_detect_table_cell_regions_extracts_grid_cells() -> None:
+    image = Image.new("RGB", (400, 300), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [60, 100, 140, 180, 220]:
+        draw.line((40, y, 360, y), fill="black", width=2)
+
+    for x in [40, 140, 260, 360]:
+        draw.line((x, 60, x, 220), fill="black", width=2)
+
+    cells = detect_table_cell_regions(image)
+
+    assert len(cells) == 12
+    assert cells[0].table_index == 0
+    assert cells[0].row_index == 0
+    assert cells[0].column_index == 0
+    assert cells[0].bbox == BoundingBox(x1=42, y1=62, x2=138, y2=98)
+    assert cells[-1].row_index == 3
+    assert cells[-1].column_index == 2
+
+
+def test_detect_table_cell_regions_uses_local_vertical_segments() -> None:
+    image = Image.new("RGB", (700, 520), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [60, 120, 180, 240, 300, 360, 420]:
+        draw.line((40, y, 660, y), fill="black", width=2)
+
+    for x in [40, 340, 660]:
+        draw.line((x, 60, x, 420), fill="black", width=2)
+
+    for x in [120, 220]:
+        draw.line((x, 300, x, 420), fill="black", width=2)
+
+    cells = detect_table_cell_regions(image)
+    bottom_row_cells = [
+        cell
+        for cell in cells
+        if 300 <= cell.bbox.y1 and cell.bbox.y2 <= 420
+    ]
+
+    assert len(bottom_row_cells) >= 8
+    assert any(cell.bbox == BoundingBox(x1=42, y1=302, x2=118, y2=358) for cell in cells)
+
+
+def test_detect_table_cell_regions_keeps_short_title_bands() -> None:
+    image = Image.new("RGB", (700, 420), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [60, 120, 180, 199, 260, 320]:
+        draw.line((40, y, 660, y), fill="black", width=2)
+
+    for x in [40, 180, 320, 460, 660]:
+        draw.line((x, 60, x, 320), fill="black", width=2)
+
+    cells = detect_table_cell_regions(image)
+
+    assert any(cell.bbox == BoundingBox(x1=42, y1=182, x2=178, y2=197) for cell in cells)
+
+
+def test_detect_table_cell_regions_implies_consumed_outer_border() -> None:
+    image = Image.new("RGB", (500, 360), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [60, 120, 180, 240, 300]:
+        draw.line((40, y, 460, y), fill="black", width=2)
+
+    for x in [180, 320, 460]:
+        draw.line((x, 60, x, 300), fill="black", width=2)
+
+    cells = detect_table_cell_regions(image)
+
+    assert any(cell.bbox == BoundingBox(x1=42, y1=62, x2=178, y2=118) for cell in cells)
+
+
+def test_detect_table_cell_regions_implies_consumed_corner_from_horizontal_edges() -> None:
+    image = Image.new("RGB", (500, 360), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [60, 120, 180, 240, 300]:
+        draw.line((40, y, 460, y), fill="black", width=2)
+
+    for x in [40, 180, 320, 460]:
+        draw.line((x, 60, x, 240), fill="black", width=2)
+
+    for x in [180, 320, 460]:
+        draw.line((x, 240, x, 300), fill="black", width=2)
+
+    cells = detect_table_cell_regions(image)
+
+    assert any(cell.bbox == BoundingBox(x1=42, y1=242, x2=178, y2=298) for cell in cells)
+
+
+def test_implied_vertical_border_preserves_nearby_real_line_position() -> None:
+    lines = [
+        _LineSegment(start=38, end=42, cross_start=60, cross_end=180),
+        _LineSegment(start=456, end=460, cross_start=60, cross_end=180),
+    ]
+
+    updated_lines = _add_or_snap_implied_vertical_border_line(
+        vertical_lines=lines,
+        x=464,
+        top_y=40,
+        bottom_y=220,
+    )
+
+    right_line = max(updated_lines, key=lambda line: line.center)
+    assert right_line == _LineSegment(start=456, end=460, cross_start=40, cross_end=220)
+
+
+def test_detect_table_cell_regions_preserves_noisy_outer_border_position() -> None:
+    image = Image.new("RGB", (500, 360), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [60, 120, 180, 240, 300]:
+        draw.line((40, y, 464, y), fill="black", width=2)
+
+    draw.rectangle((40, 60, 70, 300), fill="black")
+    for x in [180, 320, 458]:
+        draw.line((x, 60, x, 300), fill="black", width=2)
+
+    cells = detect_table_cell_regions(image)
+
+    assert any(cell.bbox == BoundingBox(x1=322, y1=63, x2=456, y2=118) for cell in cells)
+    assert all(cell.bbox.x2 <= 456 for cell in cells)
+
+
+def test_detect_table_cell_regions_keeps_short_local_horizontal_divider() -> None:
+    image = Image.new("RGB", (700, 520), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [60, 120, 300, 420]:
+        draw.line((40, y, 660, y), fill="black", width=2)
+
+    for x in [40, 340, 660]:
+        draw.line((x, 60, x, 420), fill="black", width=2)
+
+    draw.line((340, 210, 632, 210), fill="black", width=2)
+
+    cells = detect_table_cell_regions(image)
+
+    assert any(cell.bbox == BoundingBox(x1=342, y1=122, x2=658, y2=208) for cell in cells)
+    assert any(cell.bbox == BoundingBox(x1=342, y1=212, x2=658, y2=298) for cell in cells)
+
+
+def test_detect_table_ocr_regions_creates_vertical_bands() -> None:
+    image = Image.new("RGB", (400, 300), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [60, 100, 140, 180, 220]:
+        draw.line((40, y, 360, y), fill="black", width=2)
+
+    for x in [40, 140, 260, 360]:
+        draw.line((x, 60, x, 220), fill="black", width=2)
+
+    regions = detect_table_ocr_regions(image)
+
+    assert any(region.reason == "table_vertical_band" for region in regions)
+    assert any(region.reason == "table_horizontal_band" for region in regions)
+    assert all(48 <= region.bbox.y1 <= 232 for region in regions)
+
+
+def test_detect_table_ocr_regions_marks_economic_vertical_bands() -> None:
+    image = Image.new("RGB", (400, 300), "white")
+    draw = ImageDraw.Draw(image)
+
+    for y in [60, 100, 140, 180, 220]:
+        draw.line((40, y, 360, y), fill="black", width=2)
+
+    for x in [40, 140, 260, 360]:
+        draw.line((x, 60, x, 220), fill="black", width=2)
+
+    _tables, regions = detect_table_regions_and_ocr_regions(
+        image,
+        tokens=[OcrToken("Totale", BoundingBox(280, 120, 330, 140), 0.95)],
+    )
+
+    assert any(region.reason == "table_vertical_band_economic" for region in regions)
+
+
 # SECTION: Tesseract adapter and OCR layout normalization
 # Tests conversion from Tesseract dictionaries, missing-confidence handling,
 # line/span grouping, progressive ids, and duplicate-token cleanup.
+def test_tesseract_adapter_does_not_detect_table_regions_without_crop_fallback(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(tesseract_adapter, "_configure_tesseract_command", lambda: None)
+    monkeypatch.setattr(
+        tesseract_adapter,
+        "_validate_tesseract_profile",
+        lambda _profile: None,
+    )
+    monkeypatch.setattr(
+        tesseract_adapter,
+        "_validate_tesseract_languages",
+        lambda _lang, ocr_profile=None: None,
+    )
+    monkeypatch.setattr(
+        tesseract_adapter,
+        "_tokens_from_image_region",
+        lambda *args, **kwargs: [],
+    )
+
+    image = Image.new("RGB", (400, 300), "white")
+    draw = ImageDraw.Draw(image)
+    for y in [60, 100, 140, 180, 220]:
+        draw.line((40, y, 360, y), fill="black", width=2)
+    for x in [40, 140, 260, 360]:
+        draw.line((x, 60, x, 220), fill="black", width=2)
+
+    document = tesseract_adapter.analyze_pages_with_tesseract(
+        [image],
+        Path("fattura.pdf"),
+        enable_crop_ocr=False,
+    )
+
+    assert document.pages[0].detected_table_regions == []
+
+
+def test_tesseract_adapter_detects_table_regions_during_crop_fallback(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(tesseract_adapter, "_configure_tesseract_command", lambda: None)
+    monkeypatch.setattr(
+        tesseract_adapter,
+        "_validate_tesseract_profile",
+        lambda _profile: None,
+    )
+    monkeypatch.setattr(
+        tesseract_adapter,
+        "_validate_tesseract_languages",
+        lambda _lang, ocr_profile=None: None,
+    )
+    monkeypatch.setattr(
+        tesseract_adapter,
+        "_tokens_from_image_region",
+        lambda *args, **kwargs: [],
+    )
+
+    image = Image.new("RGB", (400, 300), "white")
+    draw = ImageDraw.Draw(image)
+    for y in [60, 100, 140, 180, 220]:
+        draw.line((40, y, 360, y), fill="black", width=2)
+    for x in [40, 140, 260, 360]:
+        draw.line((x, 60, x, 220), fill="black", width=2)
+
+    document = tesseract_adapter.analyze_pages_with_tesseract(
+        [image],
+        Path("fattura.pdf"),
+        enable_crop_ocr=True,
+    )
+
+    assert len(document.pages[0].detected_table_regions) == 1
+    assert len(document.pages[0].detected_table_cell_regions) == 12
+
+
+def test_tesseract_adapter_ignores_table_band_ocr_regions_by_default(
+    monkeypatch,
+) -> None:
+    table_crop_bbox = BoundingBox(x1=100, y1=200, x2=360, y2=280)
+
+    monkeypatch.setattr(
+        tesseract_adapter,
+        "_low_token_density_regions",
+        lambda _image, _tokens: [],
+    )
+    monkeypatch.setattr(
+        tesseract_adapter,
+        "detect_table_regions_cells_and_ocr_regions",
+        lambda _image, tokens=None: (
+            [],
+            [],
+            [
+                OcrHoleRegion(
+                    bbox=table_crop_bbox,
+                    reason="table_vertical_band",
+                    ink_density=0.1,
+                    token_density=0,
+                    token_count=0,
+                )
+            ],
+        ),
+    )
+
+    def fake_tokens_from_image_region(*args, **kwargs):
+        if kwargs.get("config") == "--psm 6":
+            return [OcrToken("TABELLA", BoundingBox(10, 20, 70, 40), 0.92)]
+
+        return []
+
+    monkeypatch.setattr(
+        tesseract_adapter,
+        "_tokens_from_image_region",
+        fake_tokens_from_image_region,
+    )
+
+    tokens, ocr_hole_regions, detected_table_regions, detected_table_cell_regions = (
+        tesseract_adapter._tokens_from_invoice_detail_regions(
+            Image.new("RGB", (500, 500), "white"),
+            lang="ita",
+            ocr_profile="fast",
+            full_page_tokens=[],
+        )
+    )
+
+    assert ocr_hole_regions == []
+    assert detected_table_regions == []
+    assert detected_table_cell_regions == []
+    assert tokens == []
+
+
+def test_tesseract_adapter_ocr_uses_masked_table_column_regions(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    def fake_tokens_from_image_region(image, **kwargs):
+        calls.append((image.size, kwargs.get("config")))
+        return [OcrToken("C.IVA", BoundingBox(3, 4, 30, 14), 0.91)]
+
+    monkeypatch.setattr(
+        tesseract_adapter,
+        "_tokens_from_image_region",
+        fake_tokens_from_image_region,
+    )
+
+    cells = [
+        DetectedTableCellRegion(
+            bbox=BoundingBox(100, y1, 180, y2),
+            table_index=0,
+            row_index=row,
+            column_index=0,
+            polygon=[
+                Point(100, y1),
+                Point(180, y1),
+                Point(180, y2),
+                Point(100, y2),
+            ],
+        )
+        for row, (y1, y2) in enumerate([(50, 80), (80, 110), (110, 140)])
+    ]
+
+    tokens, regions = tesseract_adapter._tokens_from_table_column_regions(
+        image=Image.new("RGB", (300, 220), "white"),
+        cell_regions=cells,
+        full_page_tokens=[],
+        lang="ita",
+        ocr_profile="fast",
+    )
+
+    assert calls == [((84, 94), "--psm 12")]
+    assert tokens == [
+        OcrToken(
+            "C.IVA",
+            BoundingBox(101, 52, 128, 62),
+            0.91,
+            source="table_column_masked_psm12",
+            source_id="table_column_masked_psm12:98:48:182:142",
+        )
+    ]
+    assert regions[0].bbox == BoundingBox(98, 48, 182, 142)
+    assert regions[0].reason == "table_column_masked_psm12"
+
+
 def test_tesseract_data_to_tokens_converts_words_and_boxes() -> None:
     data = {
         "text": ["", "Totale", "123,45", "bad"],

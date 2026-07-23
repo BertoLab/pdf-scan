@@ -10,6 +10,7 @@ from estrattore.fiscal_validation import (
     is_valid_italian_tax_code,
     is_valid_italian_vat_number,
     normalize_italian_tax_code,
+    normalize_italian_tax_code_with_anchored_ocr_correction,
 )
 from estrattore.model import BoundingBox, DocumentPage, DocumentRepresentation, OcrToken
 from estrattore.ocr_normalization import normalize_fiscal_anchor_text
@@ -17,6 +18,9 @@ from estrattore.ocr_normalization import normalize_fiscal_anchor_text
 
 MIN_FUZZY_ANCHOR_SIMILARITY = 0.88
 SHORT_ANCHOR_MAX_LEN = 4
+SAME_ROW_MIN_VERTICAL_OVERLAP_RATIO = 0.45
+SAME_ROW_MAX_HORIZONTAL_GAP_N = 0.12
+SAME_ROW_VERTICAL_DELTA_WEIGHT = 0.25
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,11 @@ def find_fiscal_identifier_candidates(
     for page in document.pages:
         for token in page.tokens:
             normalized_value = normalize_italian_tax_code(token.text)
+            nearby_tokens = _nearby_tokens(page, token)
+            if normalized_value is None and _has_strong_tax_code_anchor(nearby_tokens):
+                normalized_value = normalize_italian_tax_code_with_anchored_ocr_correction(
+                    token.text
+                )
             if normalized_value is None:
                 continue
 
@@ -64,7 +73,6 @@ def find_fiscal_identifier_candidates(
             if not is_valid_vat and not is_valid_tax_code:
                 continue
 
-            nearby_tokens = _nearby_tokens(page, token)
             score = _score_fiscal_identifier(
                 normalized_value=normalized_value,
                 is_valid_vat_number=is_valid_vat,
@@ -692,6 +700,13 @@ def _base_target_score(
     return best_anchor_score
 
 
+def _has_strong_tax_code_anchor(nearby_tokens: list["_NearbyToken"]) -> bool:
+    nearby_text = _normalize_context_text(
+        " ".join(nearby.token.text for nearby in nearby_tokens)
+    )
+    return any(match.score >= 100.0 for match in _tax_code_anchor_matches(nearby_text))
+
+
 def _format_anchor_matches(matches: list[_AnchorMatch]) -> str:
     return "|".join(match.label for match in matches)
 
@@ -749,13 +764,7 @@ def _nearby_tokens(
         is_near_x = abs(other_center_x - token_center_x) <= x_radius
         is_near_y = abs(other_center_y - token_center_y) <= y_radius
         if is_near_x and is_near_y:
-            distance = _normalized_distance(
-                page=page,
-                first_x=token_center_x,
-                first_y=token_center_y,
-                second_x=other_center_x,
-                second_y=other_center_y,
-            )
+            distance = _fiscal_context_distance_n(page, token.bbox, other.bbox)
             if distance <= max_distance_n:
                 nearby.append(_NearbyToken(token=other, distance_n=distance))
 
@@ -768,6 +777,48 @@ def _nearby_tokens(
         closest_tokens,
         key=lambda item: (item.token.bbox.y1, item.token.bbox.x1),
     )
+
+
+def _fiscal_context_distance_n(
+    page: DocumentPage,
+    value_bbox: BoundingBox,
+    context_bbox: BoundingBox,
+) -> float:
+    if _looks_like_same_visual_row(value_bbox, context_bbox):
+        horizontal_gap_n = _horizontal_gap(value_bbox, context_bbox) / page.width
+        if horizontal_gap_n <= SAME_ROW_MAX_HORIZONTAL_GAP_N:
+            vertical_delta_n = (
+                abs(_bbox_center_y(value_bbox) - _bbox_center_y(context_bbox))
+                / page.height
+            )
+            return (
+                horizontal_gap_n
+                + vertical_delta_n * SAME_ROW_VERTICAL_DELTA_WEIGHT
+            )
+
+    return _bbox_distance_n(page, value_bbox, context_bbox)
+
+
+def _looks_like_same_visual_row(first: BoundingBox, second: BoundingBox) -> bool:
+    return _vertical_overlap_ratio(first, second) >= SAME_ROW_MIN_VERTICAL_OVERLAP_RATIO
+
+
+def _vertical_overlap_ratio(first: BoundingBox, second: BoundingBox) -> float:
+    overlap = max(0, min(first.y2, second.y2) - max(first.y1, second.y1))
+    shortest_height = max(1, min(first.y2 - first.y1, second.y2 - second.y1))
+    return overlap / shortest_height
+
+
+def _horizontal_gap(first: BoundingBox, second: BoundingBox) -> int:
+    if first.x2 < second.x1:
+        return second.x1 - first.x2
+    if second.x2 < first.x1:
+        return first.x1 - second.x2
+    return 0
+
+
+def _bbox_center_y(bbox: BoundingBox) -> float:
+    return (bbox.y1 + bbox.y2) / 2
 
 
 def _dominant_context_tokens(

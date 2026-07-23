@@ -1,0 +1,5 @@
+﻿source_file,page,target,label_text,value_text,normalized_value,score,selected_as_field,x1,y1,x2,y2,label_x1,label_y1,label_x2,label_y2,value_x1,value_y1,value_x2,value_y2
+data/input/2025/batch_2025_1/pdf_2025_10.pdf,1,totale_fattura,Totale documento,"108,50",108.50,148.16,True,1143,1594,1305,1777,1143,1594,1290,1611,1243,1757,1305,1777
+data/input/2025/batch_2025_1/pdf_2025_10.pdf,1,totale_netto_fattura,Importo scadenza,"128,03",128.03,173.32,True,526,1938,671,2054,526,1938,671,1956,603,2034,667,2054
+data/input/2025/batch_2025_1/pdf_2025_10.pdf,3,ritenuta,Ritenuta d'acconto,"4,80",4.80,155.17,True,1136,1102,1528,1128,1136,1102,1340,1124,1473,1105,1528,1128
+data/input/2025/batch_2025_1/pdf_2025_10.pdf,3,totale_netto_fattura,Netto da pagare,"127,20",127.20,155.85,True,1154,1155,1528,1183,1154,1155,1335,1183,1460,1157,1528,1182

@@ -1,6 +1,8 @@
 import argparse
 import json
 from pathlib import Path
+from decimal import Decimal, InvalidOperation
+import re
 import shutil
 import stat
 from time import perf_counter
@@ -45,6 +47,7 @@ from estrattore.issuer_name_extraction import (
 from estrattore.io import load_scan
 from estrattore.model import BoundingBox, DocumentRepresentation, PerceptionBackend
 from estrattore.perception import analyze_pages
+from estrattore.registry import DEFAULT_REGISTRY_CACHE_PATH, load_registry_cache
 from estrattore.tesseract_adapter import (
     DEFAULT_TESSERACT_LANG,
     DEFAULT_TESSERACT_PROFILE,
@@ -64,11 +67,22 @@ from estrattore.vat_extraction import (
 
 SUPPORTED_SUFFIXES = {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 VIEWER_SAMPLE_ROOT = Path("apps") / "viewer" / "public" / "sample"
+MONEY_TOKEN_PATTERN = re.compile(
+    r"-?\d{1,3}(?:\.\d{3})*,\d{2}|-?\d+,\d{2}|-?\d+\.\d{2}"
+)
 FALLBACK_MISSING_TARGET_THRESHOLD = 4
 FALLBACK_AVG_OCR_CONFIDENCE_THRESHOLD = 0.82
 FALLBACK_LOW_OCR_CONFIDENCE_RATIO_THRESHOLD = 0.22
 LOW_OCR_CONFIDENCE_THRESHOLD = 0.75
 QUALITY_FALLBACK_MODES = {"none", "best-crop", "crop-only"}
+
+
+def natural_sort_key(value: str | Path) -> list[int | str]:
+    text = value.name if isinstance(value, Path) else str(value)
+    return [
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", text)
+    ]
 
 
 class DebugTimer:
@@ -188,6 +202,19 @@ def debug_words_file(
             ocr_lang=effective_ocr_lang,
             extraction=extraction,
             quality_fallback_mode=quality_fallback_mode,
+        )
+        fallback_extraction = (
+            _extract_debug_candidates(document)
+            if fallback_events
+            else extraction
+        )
+        fallback_events.extend(
+            _apply_empty_economic_summary_ocr_fallback(
+                document=document,
+                images=images,
+                ocr_lang=effective_ocr_lang,
+                extraction=fallback_extraction,
+            )
         )
         timer.mark(
             f"quality_fallback mode={quality_fallback_mode} "
@@ -314,8 +341,20 @@ def clean_viewer_sample_root(sample_root: Path = VIEWER_SAMPLE_ROOT) -> None:
 
         if entry.is_dir():
             shutil.rmtree(entry, onerror=_make_writable_and_retry)
-        elif entry.name == "viewer_index.json":
+        elif entry.name in {"viewer_index.json", "viewer_batches.json"}:
             entry.unlink()
+
+
+def clean_viewer_sample_batch(batch_id: str, sample_root: Path = VIEWER_SAMPLE_ROOT) -> None:
+    sample_root.mkdir(parents=True, exist_ok=True)
+    resolved_sample_root = sample_root.resolve()
+    batch_dir = sample_root / batch_id
+    resolved_batch_dir = batch_dir.resolve()
+    if not resolved_batch_dir.is_relative_to(resolved_sample_root):
+        raise RuntimeError(f"Refusing to delete outside sample root: {batch_dir}")
+
+    if batch_dir.exists():
+        shutil.rmtree(batch_dir, onerror=_make_writable_and_retry)
 
 
 def _make_writable_and_retry(function, path, _exc_info) -> None:
@@ -448,6 +487,83 @@ def _apply_quality_ocr_fallbacks(
     return events
 
 
+def _apply_empty_economic_summary_ocr_fallback(
+    document: DocumentRepresentation,
+    images,
+    ocr_lang: str,
+    extraction: dict,
+) -> list[dict]:
+    if ocr_lang != DEFAULT_TESSERACT_LANG:
+        return []
+
+    page_numbers = _pages_with_accounting_text_but_no_economic_fields(
+        document=document,
+        extraction=extraction,
+    )
+    if not page_numbers:
+        return []
+
+    _replace_pages_with_tesseract_profile(
+        document=document,
+        images=images,
+        page_numbers=page_numbers,
+        ocr_lang=ocr_lang,
+        ocr_profile=DEFAULT_TESSERACT_PROFILE,
+        enable_crop_ocr=True,
+        force_crop_ocr=True,
+    )
+    return [
+        {
+            "stage": "fast_forced_crop",
+            "profile": "fast",
+            "crop": True,
+            "page": page_number,
+            "reason": "accounting_text_without_economic_fields",
+        }
+        for page_number in page_numbers
+    ]
+
+
+def _pages_with_accounting_text_but_no_economic_fields(
+    document: DocumentRepresentation,
+    extraction: dict,
+) -> list[int]:
+    pages_with_fields = {
+        candidate.page
+        for candidate in extraction["economic_summary_field_candidates"]
+    }
+    return [
+        page.page_number
+        for page in document.pages
+        if page.page_number not in pages_with_fields
+        and _page_has_accounting_summary_text(page)
+    ]
+
+
+def _page_has_accounting_summary_text(page) -> bool:
+    normalized = " ".join(
+        _normalize_accounting_text(span.text)
+        for span in page.spans
+    )
+    accounting_phrases = [
+        "netto a pagare",
+        "ritenuta d acconto",
+        "ritenuta previdenziale",
+        "totale documento",
+        "totale fattura",
+        "totale imponibile",
+        "totale imposta",
+        "importo da pagare",
+    ]
+    return any(phrase in normalized for phrase in accounting_phrases)
+
+
+def _normalize_accounting_text(text: str) -> str:
+    return " ".join(
+        "".join(char.lower() if char.isalnum() else " " for char in text).split()
+    )
+
+
 def _quality_fallback_candidates(
     document: DocumentRepresentation,
     output_dir: Path,
@@ -560,6 +676,7 @@ def _replace_pages_with_tesseract_profile(
     ocr_lang: str,
     ocr_profile: str,
     enable_crop_ocr: bool,
+    force_crop_ocr: bool = False,
 ) -> None:
     if not page_numbers:
         return
@@ -572,6 +689,7 @@ def _replace_pages_with_tesseract_profile(
             lang=ocr_lang,
             ocr_profile=ocr_profile,
             enable_crop_ocr=enable_crop_ocr,
+            force_crop_ocr=force_crop_ocr,
             first_page_number=page_number,
         )
         replacements[page_number] = replacement_document.pages[0]
@@ -673,6 +791,7 @@ def save_viewer_manifest(
         "invoices": build_viewer_invoices(
             page_manifests,
             first_invoice_number=first_invoice_number,
+            registry_cache=_load_optional_registry_cache(),
         ),
     }
     output_path.write_text(
@@ -680,6 +799,17 @@ def save_viewer_manifest(
         encoding="utf-8",
     )
     return output_path
+
+
+def _load_optional_registry_cache():
+    if not DEFAULT_REGISTRY_CACHE_PATH.exists():
+        return None
+
+    try:
+        return load_registry_cache(DEFAULT_REGISTRY_CACHE_PATH)
+    except Exception as error:
+        print(f"[registry] cache anagrafica ignorata: {error}")
+        return None
 
 
 def _viewer_page_manifest(
@@ -709,6 +839,8 @@ def _viewer_page_manifest(
                 "text": token.text,
                 "confidence": token.confidence,
                 "bbox": _bbox_dict(token.bbox),
+                **({"source": token.source} if token.source else {}),
+                **({"source_id": token.source_id} if token.source_id else {}),
             }
             for token in page.tokens
         ],
@@ -731,6 +863,29 @@ def _viewer_page_manifest(
             }
             for region in page.ocr_hole_regions
         ],
+
+        "detected_table_regions": [
+            {
+                "bbox": _bbox_dict(region.bbox),
+                "horizontal_line_count": region.horizontal_line_count,
+                "vertical_line_count": region.vertical_line_count,
+            }
+            for region in page.detected_table_regions
+        ],
+
+        "detected_table_cell_regions": [
+            {
+                "bbox": _bbox_dict(region.bbox),
+                "polygon": [
+                    {"x": point.x, "y": point.y} for point in region.polygon
+                ],
+                "table_index": region.table_index,
+                "row_index": region.row_index,
+                "column_index": region.column_index,
+            }
+            for region in page.detected_table_cell_regions
+        ],
+
         "targets": _viewer_targets(
             page=page,
             selected_vat=selected_vat,
@@ -741,6 +896,7 @@ def _viewer_page_manifest(
             condominium_candidates=condominium_candidates,
             economic_summary_regions=economic_summary_regions,
             economic_summary_field_candidates=economic_summary_field_candidates,
+            economic_summary_resolved_rows=economic_summary_resolved_rows,
         ),
         "candidate_tables": {
             "vat": [
@@ -801,6 +957,7 @@ def _viewer_targets(
     condominium_candidates: list[CondominiumCandidate],
     economic_summary_regions: list[EconomicSummaryRegionCandidate],
     economic_summary_field_candidates: list[EconomicSummaryFieldCandidate],
+    economic_summary_resolved_rows: list[EconomicSummaryResolvedRow],
 ) -> list[dict]:
     targets = []
 
@@ -922,14 +1079,142 @@ def _viewer_targets(
                 page=page,
                 kind=f"economic_summary.{candidate.target}.value",
                 label="",
-                bbox=_bbox_with_height(candidate.value_bbox, candidate.bbox),
+                bbox=candidate.value_bbox,
                 value=candidate.value_text,
                 score=candidate.score,
                 role="value",
             )
         )
 
+    for row in economic_summary_resolved_rows:
+        _append_economic_resolved_target(
+            targets,
+            page=page,
+            row=row,
+            kind="economic_summary.totale_fattura.value",
+            value=row.totale_fattura_value,
+            source=row.totale_fattura_source,
+        )
+        _append_economic_resolved_target(
+            targets,
+            page=page,
+            row=row,
+            kind="economic_summary.totale_netto_fattura.value",
+            value=row.totale_netto_fattura_value,
+            source=row.totale_netto_fattura_source,
+        )
+
     return targets
+
+
+def _append_economic_resolved_target(
+    targets: list[dict],
+    page,
+    row: EconomicSummaryResolvedRow,
+    kind: str,
+    value: str,
+    source: str,
+) -> None:
+    if not value:
+        return
+    if source == "direct":
+        return
+
+    targets.append(
+        _target_manifest(
+            page=page,
+            kind=kind,
+            label=kind,
+            bbox=_resolved_value_bbox(page, row, value) or row.bbox,
+            value=value,
+            score=220 if row.math_check == "ok" else 120,
+            confidence_sensitive=False,
+            role="calculated" if source.startswith("calculated_") else "resolved",
+        )
+    )
+
+
+def _resolved_value_bbox(
+    page,
+    row: EconomicSummaryResolvedRow,
+    value: str,
+) -> BoundingBox | None:
+    expected_value = _manifest_money_decimal(value)
+    if expected_value is None:
+        return None
+
+    matching_tokens = [
+        token
+        for token in page.tokens
+        if _manifest_money_decimal(token.text) == expected_value
+    ]
+    if not matching_tokens:
+        return None
+
+    return max(
+        matching_tokens,
+        key=lambda token: (
+            _bbox_center_inside(row.bbox, token.bbox),
+            _economic_value_token_anchor_score(page, token),
+            -_bbox_distance(row.bbox, token.bbox),
+            token.confidence or 0,
+        ),
+    ).bbox
+
+
+def _manifest_money_decimal(value: str) -> Decimal | None:
+    match = MONEY_TOKEN_PATTERN.search(value.strip())
+    if not match:
+        return None
+
+    text = match.group(0)
+    if "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    try:
+        return abs(Decimal(text).quantize(Decimal("0.01")))
+    except InvalidOperation:
+        return None
+
+
+def _economic_value_token_anchor_score(page, token) -> int:
+    token_center_y = (token.bbox.y1 + token.bbox.y2) / 2
+    score = 0
+    for span in page.spans:
+        span_center_y = (span.bbox.y1 + span.bbox.y2) / 2
+        if abs(span_center_y - token_center_y) > max(28, page.height * 0.018):
+            continue
+
+        normalized = span.text.lower()
+        if any(
+            anchor in normalized
+            for anchor in [
+                "importo scadenza",
+                "netto",
+                "pagare",
+                "dovuto",
+                "totale documento",
+                "ritenuta",
+            ]
+        ):
+            score += 2
+        if span.bbox.x2 <= token.bbox.x1 + page.width * 0.04:
+            score += 1
+
+    return score
+
+
+def _bbox_center_inside(outer_bbox: BoundingBox, inner_bbox: BoundingBox) -> bool:
+    center_x = (inner_bbox.x1 + inner_bbox.x2) / 2
+    center_y = (inner_bbox.y1 + inner_bbox.y2) / 2
+    return outer_bbox.x1 <= center_x <= outer_bbox.x2 and outer_bbox.y1 <= center_y <= outer_bbox.y2
+
+
+def _bbox_distance(left: BoundingBox, right: BoundingBox) -> float:
+    left_center_x = (left.x1 + left.x2) / 2
+    left_center_y = (left.y1 + left.y2) / 2
+    right_center_x = (right.x1 + right.x2) / 2
+    right_center_y = (right.y1 + right.y2) / 2
+    return ((left_center_x - right_center_x) ** 2 + (left_center_y - right_center_y) ** 2) ** 0.5
 
 
 def _append_selected_target(
@@ -1333,7 +1618,7 @@ def _economic_summary_field_highlights_by_page(
             )
             highlights_by_page.setdefault(candidate.page, []).append(
                 DebugHighlight(
-                    bbox=_bbox_with_height(candidate.value_bbox, candidate.bbox),
+                    bbox=candidate.value_bbox,
                     label="",
                 )
             )
@@ -1421,23 +1706,35 @@ def _update_viewer_sample_index(output_dir: Path) -> Path | None:
     if not relative_output_dir.parts:
         return None
 
-    index_path = sample_root / "viewer_index.json"
+    if len(relative_output_dir.parts) >= 2:
+        batch_id = relative_output_dir.parts[0]
+        document_id = Path(*relative_output_dir.parts[1:]).as_posix()
+        index_path = sample_root / batch_id / "viewer_index.json"
+        base_path = f"/sample/{batch_id}/{document_id}"
+        _update_viewer_batch_index(batch_id=batch_id, sample_root=sample_root)
+    else:
+        document_id = relative_output_dir.as_posix()
+        index_path = sample_root / "viewer_index.json"
+        base_path = f"/sample/{document_id}"
+
     if index_path.exists():
         index = json.loads(index_path.read_text(encoding="utf-8"))
     else:
         index = {"documents": []}
 
-    document_id = relative_output_dir.as_posix()
-    base_path = f"/sample/{document_id}"
     documents = [
         document
         for document in index.get("documents", [])
         if document.get("id") != document_id
         and document.get("base_path") != base_path
-        and (sample_root / str(document.get("id", "")) / "viewer_manifest.json").exists()
+        and _viewer_manifest_path_exists(
+            sample_root=sample_root,
+            index_path=index_path,
+            document=document,
+        )
     ]
     documents.append({"id": document_id, "base_path": base_path})
-    documents.sort(key=lambda document: document["id"])
+    documents.sort(key=lambda document: natural_sort_key(str(document["id"])))
     index["documents"] = documents
 
     index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1446,6 +1743,46 @@ def _update_viewer_sample_index(output_dir: Path) -> Path | None:
         encoding="utf-8",
     )
     return index_path
+
+
+def _update_viewer_batch_index(batch_id: str, sample_root: Path) -> None:
+    index_path = sample_root / "viewer_batches.json"
+    if index_path.exists():
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    else:
+        index = {"batches": []}
+
+    base_path = f"/sample/{batch_id}"
+    batches = [
+        batch
+        for batch in index.get("batches", [])
+        if batch.get("id") != batch_id and batch.get("base_path") != base_path
+    ]
+    batches.append(
+        {
+            "id": batch_id,
+            "label": batch_id.replace("_", " "),
+            "base_path": base_path,
+        }
+    )
+    batches.sort(key=lambda batch: batch["id"])
+    index["batches"] = batches
+    index_path.write_text(
+        json.dumps(index, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _viewer_manifest_path_exists(
+    sample_root: Path,
+    index_path: Path,
+    document: dict,
+) -> bool:
+    base_path = str(document.get("base_path", ""))
+    if base_path.startswith("/sample/"):
+        return (sample_root / base_path.removeprefix("/sample/") / "viewer_manifest.json").exists()
+
+    return (index_path.parent / str(document.get("id", "")) / "viewer_manifest.json").exists()
 
 
 def is_supported_input_file(file_path: Path) -> bool:

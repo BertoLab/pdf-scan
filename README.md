@@ -207,11 +207,200 @@ estrattore-scan-fatture/
 |   |-- debug/               # Output di ispezione OCR/layout
 |   `-- logs/                # Log e report di processo
 |-- scripts/
-|   |-- dev_run.py           # Script di sviluppo
-|   `-- debug_words.py       # Salva token OCR e bounding box
+|   |-- dev_run.py                # Script di sviluppo
+|   |-- debug_words.py            # Salva token OCR e bounding box
+|   |-- debug_words_batch.py      # Genera manifest viewer per una cartella batch
+|   |-- process_year_batches.py   # Wrapper per processare batch per anno/range
+|   `-- batch_rename_pdfs.py      # Rinomina PDF e li divide in cartelle batch
 |-- tests/                   # Test automatici
 |-- pyproject.toml
 `-- README.md
+```
+
+## Comandi Operativi Per Batch
+
+La pipeline di lavoro e separata in due fasi:
+
+1. generazione dei manifest OCR/debug;
+2. visualizzazione/revisione dei manifest gia generati.
+
+Il viewer non processa PDF direttamente. Legge solo i manifest presenti in
+`apps/viewer/public/sample`.
+
+### Preparare PDF in batch da 10
+
+Dato un folder con PDF sparsi, questo script chiede l'anno, rinomina i PDF in
+modo progressivo e crea cartelle batch da 10 file:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\batch_rename_pdfs.py "C:\percorso\cartella_pdf"
+```
+
+Esempio con anno passato da comando:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\batch_rename_pdfs.py "C:\percorso\cartella_pdf" --year 2025
+```
+
+Per vedere cosa farebbe senza modificare i file:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\batch_rename_pdfs.py "C:\percorso\cartella_pdf" --year 2025 --dry-run
+```
+
+Output atteso:
+
+```text
+pdf_2025_1.pdf ... pdf_2025_10.pdf  -> batch_2025_1/
+pdf_2025_11.pdf ... pdf_2025_20.pdf -> batch_2025_2/
+```
+
+### Generare manifest per un singolo batch
+
+Per processare una cartella batch gia pronta:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\debug_words_batch.py data\input\2025\batch_2025_1
+```
+
+Lo script genera:
+
+```text
+apps/viewer/public/sample/batch_2025_1/
+|-- viewer_index.json
+|-- pdf_2025_1/
+|   |-- viewer_manifest.json
+|   `-- page-001-boxes.png
+`-- pdf_2025_2/
+    `-- viewer_manifest.json
+```
+
+Aggiorna anche:
+
+```text
+apps/viewer/public/sample/viewer_batches.json
+```
+
+Il viewer usa questo file per mostrare il menu dei batch disponibili.
+
+### Generare manifest per anno e numero batch
+
+Per non scrivere ogni volta il path completo si puo usare il wrapper per anno:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\process_year_batches.py --year 2025 --batch 1
+```
+
+Questo processa:
+
+```text
+data/input/2025/batch_2025_1
+```
+
+### Generare manifest per un range di batch
+
+Per processare piu batch consecutivi:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\process_year_batches.py --year 2025 --batch-range 1-10
+```
+
+Lo script processa in ordine:
+
+```text
+batch_2025_1
+batch_2025_2
+...
+batch_2025_10
+```
+
+### Rigenerare un solo file dentro un batch
+
+Durante il debug conviene spesso rigenerare un solo PDF invece dell'intero batch.
+`--file-index` indica la posizione del file dentro la cartella batch, usando
+l'ordine alfabetico dei PDF. E un indice 1-based: `1` significa il primo file
+del batch, non la prima fattura progressiva globale.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\process_year_batches.py --year 2025 --batch 1 --file-index 1
+```
+
+Esempio: in `data/input/2025/batch_2025_1`, `--file-index 1` rigenera il primo
+PDF della cartella batch e aggiorna solo il suo `viewer_manifest.json`.
+
+Uso guidato, senza parametri:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\process_year_batches.py
+```
+
+### Visualizzare i batch generati
+
+Il viewer si avvia separatamente:
+
+```powershell
+cd apps\viewer
+npm run dev
+```
+
+Poi aprire l'URL stampato da Vite.
+
+Nel viewer:
+
+- il menu `Batch` mostra i batch gia elaborati;
+- selezionando un batch vengono caricati solo i manifest di quel batch;
+- il viewer non rielabora i PDF.
+
+Per questo motivo, se un batch non appare nel menu, significa che non e ancora
+stato processato oppure che `viewer_batches.json` non e stato aggiornato.
+
+### Avviare l'app locale
+
+La forma locale dell'app non richiede due terminali: un unico launcher Python
+controlla la build del frontend, avvia il backend locale e serve il viewer.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_app.py
+```
+
+L'app apre:
+
+```text
+http://127.0.0.1:8765
+```
+
+Il backend anagrafica e incluso nello stesso processo locale.
+
+Per forzare la rigenerazione della build React:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_app.py --rebuild
+```
+
+Per sviluppo frontend puro si puo ancora usare Vite, ma in quel caso il backend
+locale va avviato a parte:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\registry_api.py
+cd apps\viewer
+npm run dev
+```
+
+### Importare l'anagrafica clienti
+
+Nel viewer, il pulsante `Anagrafica clienti` apre la finestra di gestione
+anagrafica. Il tasto `Aggiungi anagrafica` accetta un file `.xlsx` con le
+colonne dell'export anagrafica atteso. Se il file e valido, il backend
+sostituisce l'unica anagrafica attiva:
+
+```text
+data/registry/input/elenco_anagrafiche.xlsx
+```
+
+e rigenera:
+
+```text
+data/registry/cache/anagrafica_registry.json
 ```
 
 ## Milestone Consigliate

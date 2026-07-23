@@ -1,0 +1,311 @@
+﻿source_file,page,span_id,line_id,page_span_index,text,x1,y1,x2,y2,num_tokens
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,1,1,1,«ws,133,136,207,160,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,2,1,2,©,329,127,331,130,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,3,1,3,— PALLINI SPURGHI S.N.C DI PALLINI ENRICO & C.___,369,101,1487,175,9
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,4,2,4,[O PALLI N Î,133,140,366,242,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,5,2,5,via DELL'INDUSTRIA 1070- 58022 FOLLONICA (GR),405,157,890,218,6
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,6,3,6,DE,153,171,228,241,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,7,4,7,P U R 6 H li,234,212,367,248,6
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,8,4,8,e-mail: pallinispurghi@gmail.com,405,224,684,242,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,9,5,9,www.pallinispurghi.com,139,248,366,267,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,10,5,10,C.F P.Iva 01740120538,405,248,615,264,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,11,6,11,Fattura nr.,1040,357,1159,377,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,12,6,12,27,1232,357,1259,377,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,13,6,13,del,1333,356,1367,377,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,14,6,14,:20/01/2025,1401,356,1532,378,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,15,7,15,"COND. VIA BOVIO,70 clo AMM. OIKOS",117,449,582,491,6
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,16,7,16,AMM.0IKOS,849,466,1005,487,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,17,8,17,"Via Bovio, 70",116,500,272,524,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,18,8,18,"Via Bicocchi,90.",849,499,1037,523,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,19,9,19,58022,117,533,189,554,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,20,9,20,Follonica,206,533,311,554,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,21,9,21,(GR),327,532,384,559,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,22,9,22,58022,851,532,924,553,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,23,9,23,Follonica,940,532,1045,553,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,24,9,24,(GR),1062,532,1118,560,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,25,10,25,Cod. Fisc. 90009720534,117,631,406,652,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,26,11,26,Codice,116,702,192,720,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,27,11,27,Descrizione,270,698,401,730,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,28,11,28,Quantità,961,698,1051,730,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,29,11,29,Prezzo,1119,702,1195,719,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,30,11,30,Sconto,1237,702,1313,720,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,31,11,31,Importo,1378,702,1465,724,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,32,11,32,Iva,1505,703,1534,720,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,33,12,33,_,257,729,259,731,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,34,13,34,"| Rif, Fattura pro-forma 213 del 19/09/2024:",257,734,743,763,7
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,35,13,35,|,931,736,934,761,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,36,13,36,I,1237,728,1239,762,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,37,13,37,Î,1312,728,1313,765,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,38,13,38,Lo],1477,729,1548,762,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,39,14,39,(INTERVENTO DEL 21.08.24,257,764,581,794,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,40,14,40,|,932,769,934,787,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,41,14,41,I,1072,767,1074,794,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,42,14,42,I,1237,769,1238,772,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,43,14,43,|,1312,766,1313,777,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,44,14,44,|,1477,768,1479,794,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,45,14,45,I,1547,763,1548,792,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,46,15,46,| INTERVENTO DI STASATURA LINEA DI SCARICO ACQUE |,257,828,934,866,9
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,47,15,47,1,1014,836,1021,854,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,48,15,48,|,1073,825,1074,858,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,49,15,49,"€350,00)",1133,832,1239,859,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,50,15,50,|,1312,828,1314,863,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,51,15,51,"€350, 00/",1373,823,1479,872,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,52,15,52,10|,1515,828,1548,864,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,53,16,53,|,106,863,107,891,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,54,16,54,"NERE, CON SONDA AD ALTA PRESSIONE PIU'",257,866,800,895,7
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,55,16,55,|,932,868,934,884,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,56,16,56,|,1072,869,1074,875,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,57,16,57,i,1237,867,1239,894,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,58,16,58,i,1312,864,1314,895,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,59,16,59,|,1477,865,1479,892,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,60,16,60,|,1547,865,1549,896,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,61,17,61,i,106,896,107,926,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,62,17,62,i DISINCROSTAZIONE SIFONE DA SAPONI E LAVAGGIO,257,897,887,922,7
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,63,17,63,|,932,895,934,926,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,64,17,64,I,1072,895,1074,927,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,65,17,65,i,1237,898,1239,915,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,66,17,66,|,1312,896,1314,927,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,67,17,67,|,1477,893,1479,924,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,68,17,68,|,1547,897,1549,925,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,69,18,69,I,106,927,107,960,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,70,18,70,‘CON DISINFETTAZIONE,257,926,540,949,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,71,18,71,i,932,943,934,950,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,72,18,72,i,1237,923,1239,941,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,73,18,73,i,1312,930,1314,955,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,74,18,74,I,1477,925,1479,966,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,75,18,75,|,1547,926,1549,952,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,76,19,76,j,106,1007,107,1017,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,77,19,77,i,932,1006,934,1010,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,78,19,78,|,1073,1006,1074,1009,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,79,19,79,i,1237,1011,1239,1018,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,80,19,80,i,1312,1002,1314,1015,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,81,19,81,I,1477,1002,1479,1011,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,82,19,82,i,1547,1001,1549,1013,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,83,20,83,| Copia della fattura elettronica disponibile nella Sua area,257,1059,896,1084,9
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,84,20,84,I,1237,1049,1239,1087,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,85,20,85,I,1312,1053,1314,1090,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,86,21,86,i riservata dell'Agenzia delle Entrate,257,1091,651,1115,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,87,21,87,|,932,1091,934,1103,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,88,21,88,|,1073,1090,1074,1094,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,89,21,89,|,1237,1088,1239,1120,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,90,21,90,I,1312,1091,1314,1118,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,91,22,91,|,257,1125,258,1135,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,92,22,92,I,1073,1127,1074,1130,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,93,22,93,|,1237,1122,1239,1140,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,94,22,94,|,1313,1119,1314,1141,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,95,23,95,i,1238,1168,1314,1193,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,96,24,96,|,1238,1224,1239,1237,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,97,24,97,I,1313,1226,1314,1230,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,98,25,98,I,1238,1239,1239,1260,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,99,26,99,Iva,115,1783,145,1800,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,100,26,100,Imponibile,655,1778,772,1807,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,101,26,101,Imposta,846,1782,935,1803,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,102,26,102,ota,1004,1789,1029,1797,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,103,27,103,10:,117,1821,147,1840,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,104,27,104,Imponibile 10%,167,1820,338,1845,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,105,27,105,"€ 350,00",684,1820,784,1842,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,106,27,106,"€35,00",856,1820,941,1842,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,107,27,107,Tot. imponibile,988,1816,1153,1841,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,108,27,108,"€350,00",1437,1817,1536,1839,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,109,28,109,Tot. Iva,988,1847,1066,1866,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,110,28,110,"€35,00",1452,1848,1536,1870,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,111,29,111,Tot. documento,988,1895,1169,1914,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,112,29,112,"€385,00",1438,1896,1536,1919,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,113,30,113,"Rit. acconto 4% su €350,00",989,1925,1303,1948,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,114,30,114,"€ -14,00",1444,1927,1536,1949,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,115,31,115,SALDATO CON BONIFICO,115,1993,411,2013,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,116,31,116,20/01/2025,654,1992,782,2012,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,117,31,117,"€ 371,00",842,1992,941,2015,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,118,32,118,Tot. dovuto,988,2084,1166,2109,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,119,32,119,"€ 371,00",1409,2084,1536,2115,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,120,33,120,Al sensi del D.Lgs. 195/2003 VI informiama che i Vs. dati saranno utilizzati esclusivamente per i fini connessi ai rapporti commerciali tra dì noi in essere.,496,2195,1545,2221,26
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,121,34,121,Pag. Li,106,2214,172,2246,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,122,34,122,"Contributo CONAI assolto ove dovuto - Vi preghiamo di controllare i Vs. dali anagrafici, ta P. IVA e il Cod. Fiscale. Non ci ritentamo responsabili di eventuali errori.",423,2220,1545,2246,28
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,123,35,1,Pag. 1/1,1480,57,1546,74,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,124,36,2,MONTE,232,102,430,147,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,125,37,3,Dettaglio bonifico,1272,133,1562,167,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,126,38,4,DEI PASCHI,240,144,516,182,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,127,39,5,DI SIENA,240,188,456,226,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,128,40,6,BANCA DAL,241,232,388,252,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,129,40,7,1472,410,232,457,252,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,130,41,8,Dati bonifico,88,392,251,414,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,131,41,9,Importi in EURO (€),1422,397,1569,414,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,132,42,10,Stato del bonifico,100,472,302,491,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,133,42,11,Inoltrato,1480,470,1566,487,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,134,43,12,Canale di regolamento,100,520,333,543,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,135,43,13,Sepa,1518,516,1566,538,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,136,44,14,ID transazione (CRO),101,567,313,588,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,137,44,15,A1003561135010304872240722401IT,1195,562,1567,579,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,138,45,16,Divisa,101,616,160,634,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,139,45,17,EUR,1527,610,1567,626,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,140,46,18,Data di addebito,102,661,271,679,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,141,46,19,17/01/2025,1453,657,1567,675,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,142,47,20,Data di accredito,102,707,274,726,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,143,47,21,20/01/2025,1452,705,1567,722,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,144,48,22,Paese di destinazione,102,802,324,820,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,145,48,23,ITALY,1514,803,1569,819,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,146,49,24,Causale,101,851,180,869,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,147,49,25,Pagamento pro forma n.213 del 19-09-24,1146,848,1567,870,6
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,148,50,26,Importo,103,948,184,970,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,149,50,27,"371,00",1502,945,1569,963,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,150,51,28,Commissioni,102,995,234,1013,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,151,51,29,"0,56",1527,989,1569,1008,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,152,52,30,Importo totale,103,1041,250,1065,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,153,52,31,"371,56",1503,1040,1569,1059,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,154,53,32,Dati ordinante,90,1118,274,1141,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,155,54,33,IBAN,103,1202,152,1220,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,156,54,34,1T65V0103072240000002372941,1236,1195,1566,1213,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,157,55,35,Conto numero,103,1245,252,1263,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,158,55,36,23729,1508,1241,1570,1258,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,159,56,37,Di,104,1292,122,1310,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,160,56,38,CONDOMINIO VIA BOVIO 66 74,1249,1286,1569,1304,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,161,57,39,Dati beneficiario,91,1363,303,1385,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,162,58,40,Beneficiario,104,1446,227,1464,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,163,58,41,PALLINI SPURGHI SNC DI PALLINI ENRICO,1148,1443,1572,1461,6
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,164,59,42,IBAN,104,1493,152,1510,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,165,59,43,1T8570637072240000010002170,1240,1490,1572,1507,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,166,60,44,Codice BIC,104,1540,212,1558,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,167,60,45,CRVOIT3IVKKK,1432,1536,1572,1553,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,168,61,46,Banca,105,1588,165,1605,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,169,61,47,CASSA DI RISPARMIO DI VOLTERRA SPA,1171,1583,1573,1600,6
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,2,170,62,48,Data 17/01/25 Ora 18:24,109,2208,360,2226,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,171,63,1,FATTURA,1243,207,1455,250,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,172,64,2,New Service,222,212,564,312,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,173,65,3,—,621,309,624,311,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,174,66,4,Fattura nr. 7/2025,1240,327,1455,350,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,175,67,5,NEW SERVICE DI GENTILI FEDERICA,147,364,757,405,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,176,67,6,Data: 10/01/2025,1251,364,1455,386,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,177,68,7,"Via Alessandro Blasetti, 2",147,414,443,439,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,178,69,8,All'attenzione di,1269,432,1455,455,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,179,70,9,58022 Follonica (GR),148,447,387,472,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,180,71,10,condominio via Bovio 70,1176,470,1457,495,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,181,72,11,Italia,149,482,207,503,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,182,73,12,Bovio,1397,509,1457,529,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,183,74,13,P.IVA: 01414100535,150,542,377,566,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,184,74,14,58022,1220,543,1285,563,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,185,74,15,.,1368,541,1371,544,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,186,75,16,Follonica (GR),1296,536,1457,601,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,187,76,17,CF: GNTFRC69RA5G687W,149,573,440,597,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,188,76,18,ala,1418,582,1459,597,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,189,77,19,CF: 90009720534,1265,615,1459,636,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,190,78,20,MAIL: federicanewservice@tiscali.it,149,633,569,660,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,191,79,21,Pulizia del vostro condominio in via Bovio n° 70 mese di Dicembre 2024,158,903,1038,939,13
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,192,79,22,"€ 177,50",1356,897,1459,922,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,193,80,23,Bollo in fattura,158,960,342,984,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,194,81,24,Imponibile,1063,990,1209,1037,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,195,82,25,WUBLUNDOG,41,986,57,1081,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,196,83,26,Marca da bollo,1003,1054,1210,1082,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,197,83,27,"€ 2,00",1376,1051,1461,1081,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,198,84,28,sa,42,1078,49,1087,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,199,85,29,OTEISUSS,37,1100,56,1182,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,200,86,30,OI,43,1187,56,1220,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,201,87,31,MI24,44,1226,60,1271,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,202,87,32,MODALITÀ DI,157,1232,291,1259,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,203,87,33,BONIFICO BANCARIO POSTE ITALIANE,358,1229,748,1255,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,204,88,34,I,44,1273,56,1281,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,205,88,35,PAGAMENTO,159,1261,288,1298,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,206,88,36,IT64N0760114300000088163332,359,1259,691,1284,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,207,89,37,NEW SERVICE DI GENTILI FEDERICA,359,1287,725,1313,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,208,90,38,"179,50 € DA CORRISPONDERE ENTRO IL 09/02/2025",359,1314,898,1345,7
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,209,91,39,Esenzioni IVA:,147,1388,315,1413,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,210,92,40,non soggetta a IVA ai sensi dell’art.,427,1416,862,1449,7
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,211,92,41,"1, commi 54-89, Legge n.",879,1412,1186,1441,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,212,92,42,190/2014 e succ.,1203,1409,1403,1432,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,213,93,43,"€ 177,50 - Operazione",147,1424,418,1453,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,214,94,44,modifiche/integrazioni,149,1460,431,1489,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,215,95,45,"€ 2,00 - Escluso Art.15",148,1497,424,1527,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,3,216,96,46,Copia del documento elettronico disponibile nella Sua area riservata dell'Agenzia delle Entrate,149,1559,1238,1599,12
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,217,97,1,Nor Sence,228,211,573,283,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,218,97,2,FATTURA,1258,221,1472,262,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,219,98,3,Fattura nr. 202/2024,1225,343,1471,364,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,220,99,4,NEW SERVICE DI GENTILI FEDERICA,150,371,763,402,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,221,99,5,Data: 09/12/2024,1263,382,1470,402,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,222,100,6,"Via Alessandro Blasetti, 2",149,416,449,440,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,223,101,7,58022 Foltonica {GR),150,448,391,472,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,224,101,8,All'attenzione di,1281,451,1470,471,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,225,102,9,Italia,150,480,208,499,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,226,102,10,condominio via Bovio 70,1186,489,1472,510,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,227,103,11,Bovio,1410,528,1471,548,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,228,104,12,P.IVA: Jtagne 01414100535 2,150,544,380,564,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,229,105,13,58022 ollonica Follonica,1230,560,1410,580,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,230,105,14,(GR,1431,560,1461,580,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,231,106,15,CF: GNTFRC69RA5G687W,149,576,444,596,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,232,106,16,(GR),1422,561,1471,602,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,233,107,17,Italia,1414,599,1470,618,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,234,108,18,MAIL: federicanewservice@tiscali.it,148,640,569,662,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,235,108,19,CF: 90009720534,1274,637,1471,656,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,236,109,20,I,1640,780,1643,809,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,237,110,21,i,1640,805,1643,823,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,238,111,22,i Ì,1640,821,1644,846,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,239,112,23,È,469,899,482,906,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,240,112,24,—-,960,896,987,909,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,241,113,25,Pulizia del vostro condo minio in via Bovio n° 70 mese di Novembre 2024,153,921,1049,944,14
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,242,113,26,"€ 177,50",1364,924,1467,950,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,243,114,27,Bollo in fattura,153,966,339,988,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,244,114,28,"€ 2,00",1392,970,1467,995,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,245,115,29,= mpon se,1019,1014,1222,1060,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,246,115,30,"€ 179, so",1278,988,1467,1064,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,247,116,31,Marca da bollo,1005,1079,1212,1105,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,248,116,32,"€ 2,00",1382,1081,1467,1110,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,249,117,33,MODALITÀ DI,149,1240,283,1264,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,250,117,34,BONIFICO BANCARIO POSTE ITALIANE,353,1245,742,1266,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,251,118,35,PAGAMENTO,149,1269,280,1303,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,252,118,36,IT64N0760114300000088163332,353,1274,684,1294,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,253,119,37,NEW SERVICE DI GENTILI FEDERICA,352,1302,718,1323,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,254,120,38,"179,50 € DA CORRISPONDERE ENTRO IL 08/01/2025",353,1331,894,1355,7
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,255,121,39,Esenzioni IVA:,135,1396,306,1418,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,256,122,40,"€ 177,50 - Operazione non soggetta a IVA ai sensi dell'art.",135,1433,857,1461,11
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,257,122,41,"1, commi 54-89, Legge n.",873,1436,1182,1463,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,258,122,42,190/2014 e succ.,1200,1429,1402,1467,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,259,123,43,modifiche/integrazioni,136,1470,423,1497,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,260,124,44,"€ 2,00 » Escluso Art.15",134,1507,415,1533,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,4,261,125,45,Copia del documento elettronico disponibile nella Sua area riservata dell'Agenzia delle Entrate,135,1581,1232,1610,12
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,262,126,1,Pag. 1/1,1479,57,1545,74,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,263,127,2,>,193,111,216,132,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,264,127,3,MONTE,239,98,429,135,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,265,128,4,—,1494,134,1522,138,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,266,129,5,Dettaglio bonifico,1271,133,1561,167,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,267,130,6,DEI PASCHI,239,141,514,178,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,268,131,7,DI SIENA,239,185,454,222,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,269,132,8,BANCA DAL 1472,239,229,455,249,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,270,133,9,Dati bonifico,87,388,249,410,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,271,133,10,Importi in EURO (€),1420,397,1567,414,4
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,272,134,11,Stato del bonifico,98,469,300,487,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,273,134,12,Inoltrato,1478,470,1564,487,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,274,135,13,Canale di regolamento,98,516,330,539,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,275,135,14,Sepa,1516,516,1564,538,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,276,136,15,ID transazione (CRO),99,564,310,584,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,277,136,16,A1003204889010304872240722401T,1192,562,1565,579,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,278,137,17,Divisa,99,612,157,630,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,279,137,18,EUR,1525,610,1564,627,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,280,138,19,Data di addebito,99,657,268,675,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,281,138,20,16/01/2025,1450,657,1564,675,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,282,139,21,Data di accredito,99,704,271,722,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,283,139,22,17/01/2025,1450,705,1565,722,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,284,140,23,Paese di destinazione,99,798,320,816,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,285,140,24,ITALY,1511,803,1565,819,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,286,141,25,Causale,98,847,177,865,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,287,141,26,Pagamento fatt. n.202 del 09-12-24 e n.7 del 10-01-25,1016,847,1564,869,9
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,288,142,27,Importo,99,944,180,966,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,289,142,28,"359,00",1499,945,1566,963,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,290,143,29,Commissioni,98,991,230,1009,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,291,143,30,"0,56",1523,989,1565,1008,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,292,144,31,Importo totale,99,1037,246,1061,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,293,144,32,"359,56",1499,1040,1566,1060,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,294,145,33,Dati ordinante,86,1114,269,1137,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,295,146,34,IBAN,99,1198,147,1216,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,296,146,35,1T65V0103072240000002372941,1232,1195,1561,1213,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,297,147,36,Conto numero,98,1241,247,1259,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,298,147,37,23729,1504,1241,1565,1258,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,299,148,38,Di,99,1288,118,1306,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,300,148,39,CONDOMINIO VIA BOVIO 66 74,1244,1285,1564,1304,5
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,301,149,40,Dati beneficiario,86,1358,298,1381,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,302,150,41,Beneficiario,99,1442,222,1459,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,303,150,42,Gentili Federica,1408,1443,1566,1460,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,304,151,43,IBAN,99,1489,147,1506,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,305,151,44,IT64N0760114300000088163332,1231,1489,1566,1507,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,306,152,45,Codice BIC,98,1536,207,1555,2
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,307,152,46,BPPIITRRXXX,1437,1536,1566,1553,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,308,153,47,Banca,99,1584,159,1600,1
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,309,153,48,POSTE ITALIANE SPA,1357,1582,1567,1600,3
+data/input/2025/batch_2025_1/pdf_2025_9.pdf,5,310,154,49,Data 16/01/25 Ora 11:36,102,2204,353,2222,4

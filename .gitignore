@@ -24,6 +24,8 @@ data/input/*
 data/processed/*
 data/rejected/*
 data/crops/*
+data/registry/input/*
+data/registry/cache/*
 outputs/batches/*
 outputs/debug/*
 outputs/*.csv
@@ -37,6 +39,8 @@ vendor/tesseract/*
 !data/processed/.gitkeep
 !data/rejected/.gitkeep
 !data/crops/.gitkeep
+!data/registry/input/.gitkeep
+!data/registry/cache/.gitkeep
 !outputs/batches/.gitkeep
 !outputs/debug/.gitkeep
 !outputs/logs/.gitkeep

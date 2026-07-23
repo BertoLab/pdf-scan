@@ -1,6 +1,9 @@
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
 
+from estrattore.registry import RegistryCache
+from estrattore.registry_enrichment import enrich_invoice_fields_from_registry
+
 
 INVOICE_FIELD_DEFINITIONS = [
     ("nome_emittente", "Nome emittente"),
@@ -22,6 +25,7 @@ MIN_INVOICE_START_CHANGED_SIGNAL_COUNT = 3
 def build_viewer_invoices(
     page_manifests: list[dict],
     first_invoice_number: int = 1,
+    registry_cache: RegistryCache | None = None,
 ) -> list[dict]:
     invoices = []
     current_invoice_pages = []
@@ -43,7 +47,13 @@ def build_viewer_invoices(
 
         if starts_invoice and current_invoice_pages:
             invoice_number = first_invoice_number + len(invoices)
-            invoices.append(_viewer_invoice(invoice_number, current_invoice_pages))
+            invoices.append(
+                _viewer_invoice(
+                    invoice_number,
+                    current_invoice_pages,
+                    registry_cache=registry_cache,
+                )
+            )
             current_invoice_pages = []
             current_invoice_signature = {}
             current_invoice_has_payment_summary = False
@@ -65,7 +75,13 @@ def build_viewer_invoices(
 
     if current_invoice_pages:
         invoice_number = first_invoice_number + len(invoices)
-        invoices.append(_viewer_invoice(invoice_number, current_invoice_pages))
+        invoices.append(
+            _viewer_invoice(
+                invoice_number,
+                current_invoice_pages,
+                registry_cache=registry_cache,
+            )
+        )
 
     _link_shared_payment_dates(invoices, page_manifests)
     return invoices
@@ -308,12 +324,19 @@ def _merge_invoice_signatures(
     return merged_signature
 
 
-def _viewer_invoice(invoice_index: int, page_manifests: list[dict]) -> dict:
+def _viewer_invoice(
+    invoice_index: int,
+    page_manifests: list[dict],
+    registry_cache: RegistryCache | None = None,
+) -> dict:
     return {
         "invoice_id": f"invoice-{invoice_index:03d}",
         "title": f"Fattura {invoice_index:03d}",
         "page_numbers": [page["page"] for page in page_manifests],
-        "fields": _viewer_invoice_fields(page_manifests),
+        "fields": enrich_invoice_fields_from_registry(
+            _viewer_invoice_fields(page_manifests),
+            registry_cache,
+        ),
     }
 
 

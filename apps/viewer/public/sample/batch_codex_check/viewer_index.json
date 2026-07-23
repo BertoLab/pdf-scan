@@ -1,0 +1,16 @@
+{
+  "documents": [
+    {
+      "id": "20250203162928830",
+      "base_path": "/sample/batch_codex_check/20250203162928830"
+    },
+    {
+      "id": "20250203163221123",
+      "base_path": "/sample/batch_codex_check/20250203163221123"
+    },
+    {
+      "id": "20250203163609336",
+      "base_path": "/sample/batch_codex_check/20250203163609336"
+    }
+  ]
+}

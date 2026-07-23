@@ -5,9 +5,12 @@ from time import perf_counter
 
 from debug_words import (
     QUALITY_FALLBACK_MODES,
+    VIEWER_SAMPLE_ROOT,
+    clean_viewer_sample_batch,
     clean_viewer_sample_root,
     debug_words_file,
     is_supported_input_file,
+    natural_sort_key,
 )
 
 
@@ -72,7 +75,20 @@ def main() -> None:
     parser.add_argument(
         "--no-clean-sample",
         action="store_true",
-        help="Do not delete previous viewer sample folders before generating output.",
+        help="Do not delete the previous viewer sample output before generating output.",
+    )
+    parser.add_argument(
+        "--clean-all-sample",
+        action="store_true",
+        help="Delete every viewer sample batch before generating output.",
+    )
+    parser.add_argument(
+        "--batch-id",
+        default=None,
+        help=(
+            "Viewer batch id. Defaults to the input folder name, for example "
+            "`batch_2025_1`."
+        ),
     )
     args = parser.parse_args()
 
@@ -81,14 +97,26 @@ def main() -> None:
         raise SystemExit(f"Input directory does not exist: {input_dir}")
 
     input_files = sorted(
-        file_path for file_path in input_dir.iterdir() if is_supported_input_file(file_path)
+        (
+            file_path
+            for file_path in input_dir.iterdir()
+            if is_supported_input_file(file_path)
+        ),
+        key=natural_sort_key,
     )
     if not input_files:
         raise SystemExit(f"No supported input files found in: {input_dir}")
 
+    batch_id = args.batch_id or input_dir.name
+    batch_output_root = VIEWER_SAMPLE_ROOT / batch_id
+
     if not args.no_clean_sample:
-        print("Cleaning viewer sample folders...")
-        clean_viewer_sample_root()
+        if args.clean_all_sample:
+            print("Cleaning all viewer sample folders...")
+            clean_viewer_sample_root()
+        else:
+            print(f"Cleaning viewer sample batch: {batch_id}")
+            clean_viewer_sample_batch(batch_id)
 
     processed = 0
     failed = 0
@@ -104,6 +132,7 @@ def main() -> None:
                     file_path=file_path,
                     ocr_lang=args.ocr_lang,
                     first_invoice_number=next_invoice_number,
+                    batch_output_root=batch_output_root,
                 )
                 next_invoice_number += invoice_count
             else:
@@ -114,9 +143,13 @@ def main() -> None:
                 )
                 saved_paths = debug_words_file(
                     file_path,
+                    output_dir=_output_dir_for_file(
+                        batch_output_root,
+                        file_path,
+                        suffix=args.output_suffix,
+                    ),
                     first_invoice_number=next_invoice_number,
                     ocr_lang=args.ocr_lang,
-                    output_suffix=args.output_suffix,
                     quality_fallback_mode=quality_fallback_mode,
                 )
         except Exception as error:
@@ -139,14 +172,19 @@ def _debug_words_comparison_suite(
     file_path: Path,
     ocr_lang: str | None,
     first_invoice_number: int,
+    batch_output_root: Path | None = None,
 ) -> tuple[list[Path], int]:
     no_fallback_variant = COMPARISON_VARIANTS[0]
     print(f"  variant: {no_fallback_variant['label']}")
     no_fallback_paths = debug_words_file(
         file_path,
+        output_dir=_output_dir_for_file(
+            batch_output_root,
+            file_path,
+            suffix=no_fallback_variant["output_suffix"],
+        ),
         first_invoice_number=first_invoice_number,
         ocr_lang=ocr_lang,
-        output_suffix=no_fallback_variant["output_suffix"],
         quality_fallback_mode=no_fallback_variant["quality_fallback_mode"],
     )
     all_saved_paths = [*no_fallback_paths]
@@ -161,14 +199,32 @@ def _debug_words_comparison_suite(
         print(f"  variant: {label}")
         saved_paths = debug_words_file(
             file_path,
+            output_dir=_output_dir_for_file(
+                batch_output_root,
+                file_path,
+                suffix=variant["output_suffix"],
+            ),
             first_invoice_number=first_invoice_number,
             ocr_lang=ocr_lang,
-            output_suffix=variant["output_suffix"],
             quality_fallback_mode=variant["quality_fallback_mode"],
         )
         all_saved_paths.extend(saved_paths)
 
     return all_saved_paths, invoice_count
+
+
+def _output_dir_for_file(
+    batch_output_root: Path | None,
+    file_path: Path,
+    suffix: str | None = None,
+) -> Path | None:
+    if batch_output_root is None:
+        return None
+
+    directory_name = file_path.stem
+    if suffix:
+        directory_name = f"{directory_name}{suffix}"
+    return batch_output_root / directory_name
 
 
 def _manifest_has_fallback_candidates(saved_paths: list[Path]) -> bool:

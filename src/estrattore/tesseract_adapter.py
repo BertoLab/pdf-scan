@@ -1,14 +1,17 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
+from collections import defaultdict
 from pathlib import Path
 import shutil
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from estrattore.model import (
     BoundingBox,
+    DetectedTableCellRegion,
+    DetectedTableRegion,
     DocumentPage,
     DocumentRepresentation,
     OcrHoleRegion,
@@ -16,9 +19,15 @@ from estrattore.model import (
     PerceptionBackend,
 )
 from estrattore.text_layout import add_lines_to_document, add_spans_to_document
+from estrattore.table_region_detection import (
+    detect_table_regions_cells_and_ocr_regions,
+)
 
 
 MIN_FULL_PAGE_TOKENS_BEFORE_HOLE_OCR = 180
+MAX_TABLE_COLUMN_OCR_REGIONS = 8
+MIN_TABLE_COLUMN_CELLS = 3
+FORCED_FULL_PAGE_CROP_SOURCE = "forced_full_page_crop_psm6"
 DEFAULT_TESSERACT_LANG = "ita"
 DEFAULT_TESSERACT_PROFILE = "fast"
 TESSERACT_PROFILES = {"fast", "best"}
@@ -30,6 +39,7 @@ def analyze_pages_with_tesseract(
     lang: str = DEFAULT_TESSERACT_LANG,
     ocr_profile: str = DEFAULT_TESSERACT_PROFILE,
     enable_crop_ocr: bool = True,
+    force_crop_ocr: bool = False,
     first_page_number: int = 1,
 ) -> DocumentRepresentation:
     _configure_tesseract_command()
@@ -38,17 +48,25 @@ def analyze_pages_with_tesseract(
     pages = []
 
     for page_number, image in enumerate(images, start=first_page_number):
-        tokens, ocr_hole_regions = _tokens_and_hole_regions_from_image(
+        (
+            tokens,
+            ocr_hole_regions,
+            detected_table_regions,
+            detected_table_cell_regions,
+        ) = _tokens_and_regions_from_image(
             image,
             lang=lang,
             ocr_profile=ocr_profile,
             enable_crop_ocr=enable_crop_ocr,
+            force_crop_ocr=force_crop_ocr,
         )
         page = DocumentPage(
             page_number=page_number,
             width=image.width,
             height=image.height,
             ocr_hole_regions=ocr_hole_regions,
+            detected_table_regions=detected_table_regions,
+            detected_table_cell_regions=detected_table_cell_regions,
         )
         page.tokens.extend(tokens)
         pages.append(page)
@@ -65,7 +83,12 @@ def analyze_pages_with_tesseract(
 
 
 def _tokens_from_image(image: Image.Image, lang: str) -> list[OcrToken]:
-    tokens, _ocr_hole_regions = _tokens_and_hole_regions_from_image(
+    (
+        tokens,
+        _ocr_hole_regions,
+        _detected_table_regions,
+        _detected_table_cell_regions,
+    ) = _tokens_and_regions_from_image(
         image,
         lang=lang,
         ocr_profile=DEFAULT_TESSERACT_PROFILE,
@@ -74,29 +97,43 @@ def _tokens_from_image(image: Image.Image, lang: str) -> list[OcrToken]:
     return tokens
 
 
-def _tokens_and_hole_regions_from_image(
+def _tokens_and_regions_from_image(
     image: Image.Image,
     lang: str,
     ocr_profile: str,
     enable_crop_ocr: bool,
-) -> tuple[list[OcrToken], list[OcrHoleRegion]]:
+    force_crop_ocr: bool = False,
+) -> tuple[
+    list[OcrToken],
+    list[OcrHoleRegion],
+    list[DetectedTableRegion],
+    list[DetectedTableCellRegion],
+]:
     full_page_tokens = _tokens_from_image_region(
         image,
         lang=lang,
         ocr_profile=ocr_profile,
     )
     if not enable_crop_ocr:
-        return full_page_tokens, []
+        return full_page_tokens, [], [], []
 
-    detail_tokens, ocr_hole_regions = _tokens_from_invoice_detail_regions(
+    (
+        detail_tokens,
+        ocr_hole_regions,
+        detected_table_regions,
+        detected_table_cell_regions,
+    ) = _tokens_from_invoice_detail_regions(
         image,
         lang=lang,
         ocr_profile=ocr_profile,
         full_page_tokens=full_page_tokens,
+        force_crop_ocr=force_crop_ocr,
     )
     return (
         deduplicate_overlapping_tokens([*full_page_tokens, *detail_tokens]),
         ocr_hole_regions,
+        detected_table_regions,
+        detected_table_cell_regions,
     )
 
 
@@ -144,7 +181,13 @@ def _tokens_from_invoice_detail_regions(
     lang: str,
     ocr_profile: str,
     full_page_tokens: list[OcrToken],
-) -> tuple[list[OcrToken], list[OcrHoleRegion]]:
+    force_crop_ocr: bool = False,
+) -> tuple[
+    list[OcrToken],
+    list[OcrHoleRegion],
+    list[DetectedTableRegion],
+    list[DetectedTableCellRegion],
+]:
     """Run a second OCR pass on regions where full-page OCR likely left holes.
 
     The normal full-page OCR remains the primary source, but some scanned invoices
@@ -161,23 +204,197 @@ def _tokens_from_invoice_detail_regions(
     full-page pass. Adjacent suspicious cells are merged into crop boxes. Each crop
     is OCRed as a uniform text block (`--psm 6`), then its bounding boxes are
     translated back into page coordinates and merged with the full-page tokens.
+    When the page also has line-based table regions, we derive additional OCR
+    crop bands from those regions. The first useful refinement is vertical bands:
+    on tabular invoices, totals and withholding values often live in a narrow
+    right-side block, so a whole-table crop is too noisy while a vertical band can
+    isolate the relevant evidence without going all the way to per-cell OCR.
     This gives downstream extractors more raw evidence without replacing the
     original OCR result or hardcoding a supplier-specific layout.
     """
-    if len(full_page_tokens) >= MIN_FULL_PAGE_TOKENS_BEFORE_HOLE_OCR:
-        return [], []
+    if len(full_page_tokens) >= MIN_FULL_PAGE_TOKENS_BEFORE_HOLE_OCR and not force_crop_ocr:
+        return [], [], [], []
 
     detail_tokens: list[OcrToken] = []
-    ocr_hole_regions = _low_token_density_regions(image, full_page_tokens)
-    for region in ocr_hole_regions:
-        crop = image.crop(
-            (
-                region.bbox.x1,
-                region.bbox.y1,
-                region.bbox.x2,
-                region.bbox.y2,
+    (
+    detected_table_regions,
+        detected_table_cell_regions,
+        _table_ocr_regions,
+    ) = detect_table_regions_cells_and_ocr_regions(image, tokens=full_page_tokens)
+    ocr_hole_regions = [
+        *(
+            [_forced_full_page_crop_region(image, full_page_tokens)]
+            if force_crop_ocr
+            else []
+        ),
+        *_low_token_density_regions(image, full_page_tokens),
+    ]
+    detail_tokens.extend(
+        _tokens_from_page_regions(
+            image,
+            regions=[region.bbox for region in ocr_hole_regions],
+            lang=lang,
+            ocr_profile=ocr_profile,
+            source=FORCED_FULL_PAGE_CROP_SOURCE if force_crop_ocr else None,
+        )
+    )
+    table_column_tokens, table_column_regions = _tokens_from_table_column_regions(
+        image=image,
+        cell_regions=detected_table_cell_regions,
+        full_page_tokens=full_page_tokens,
+        lang=lang,
+        ocr_profile=ocr_profile,
+    )
+    detail_tokens.extend(table_column_tokens)
+    ocr_hole_regions.extend(table_column_regions)
+
+    return (
+        detail_tokens,
+        ocr_hole_regions,
+        detected_table_regions,
+        detected_table_cell_regions,
+    )
+
+
+def _tokens_from_table_column_regions(
+    image: Image.Image,
+    cell_regions: list[DetectedTableCellRegion],
+    full_page_tokens: list[OcrToken],
+    lang: str,
+    ocr_profile: str,
+) -> tuple[list[OcrToken], list[OcrHoleRegion]]:
+    detail_tokens: list[OcrToken] = []
+    ocr_regions: list[OcrHoleRegion] = []
+
+    for cells in _table_column_cell_groups(cell_regions):
+        crop, bbox = _masked_table_cells_crop(image, cells)
+        source = "table_column_masked_psm12"
+        source_id = f"{source}:{bbox.x1}:{bbox.y1}:{bbox.x2}:{bbox.y2}"
+        crop_tokens = _tokens_from_image_region(
+            crop,
+            lang=lang,
+            ocr_profile=ocr_profile,
+            config="--psm 12",
+        )
+        detail_tokens.extend(
+            _offset_tokens(
+                crop_tokens,
+                x_offset=bbox.x1,
+                y_offset=bbox.y1,
+                source=source,
+                source_id=source_id,
             )
         )
+        token_area, token_count = _token_stats_inside(
+            full_page_tokens,
+            x1=bbox.x1,
+            y1=bbox.y1,
+            x2=bbox.x2,
+            y2=bbox.y2,
+        )
+        area = max(1, (bbox.x2 - bbox.x1) * (bbox.y2 - bbox.y1))
+        ocr_regions.append(
+            OcrHoleRegion(
+                bbox=bbox,
+                reason=source,
+                ink_density=round(_dark_pixel_density(crop.convert("L")), 6),
+                token_density=round(token_area / area, 6),
+                token_count=token_count,
+            )
+        )
+
+    return detail_tokens, ocr_regions
+
+
+def _table_column_cell_groups(
+    cell_regions: list[DetectedTableCellRegion],
+) -> list[list[DetectedTableCellRegion]]:
+    by_column: dict[tuple[int, int], list[DetectedTableCellRegion]] = defaultdict(list)
+    for cell in cell_regions:
+        if not cell.polygon:
+            continue
+        by_column[(cell.table_index, cell.column_index)].append(cell)
+
+    groups = [
+        sorted(cells, key=lambda cell: cell.row_index)
+        for cells in by_column.values()
+        if len(cells) >= MIN_TABLE_COLUMN_CELLS
+    ]
+    groups = sorted(
+        groups,
+        key=lambda cells: _bbox_area(_bbox_union([cell.bbox for cell in cells])),
+        reverse=True,
+    )
+    return groups[:MAX_TABLE_COLUMN_OCR_REGIONS]
+
+
+def _masked_table_cells_crop(
+    image: Image.Image,
+    cells: list[DetectedTableCellRegion],
+) -> tuple[Image.Image, BoundingBox]:
+    bbox = _pad_bbox(_bbox_union([cell.bbox for cell in cells]), image.size, padding=2)
+    crop = Image.new("RGB", (bbox.x2 - bbox.x1, bbox.y2 - bbox.y1), "white")
+    mask = Image.new("L", crop.size, 0)
+    draw = ImageDraw.Draw(mask)
+
+    for cell in cells:
+        points = [(point.x - bbox.x1, point.y - bbox.y1) for point in cell.polygon]
+        if len(points) >= 3:
+            draw.polygon(points, fill=255)
+            continue
+
+        draw.rectangle(
+            (
+                cell.bbox.x1 - bbox.x1,
+                cell.bbox.y1 - bbox.y1,
+                cell.bbox.x2 - bbox.x1,
+                cell.bbox.y2 - bbox.y1,
+            ),
+            fill=255,
+        )
+
+    crop.paste(image.crop((bbox.x1, bbox.y1, bbox.x2, bbox.y2)), (0, 0), mask)
+    return crop, bbox
+
+
+def _bbox_union(boxes: list[BoundingBox]) -> BoundingBox:
+    return BoundingBox(
+        x1=min(box.x1 for box in boxes),
+        y1=min(box.y1 for box in boxes),
+        x2=max(box.x2 for box in boxes),
+        y2=max(box.y2 for box in boxes),
+    )
+
+
+def _pad_bbox(
+    bbox: BoundingBox,
+    image_size: tuple[int, int],
+    padding: int,
+) -> BoundingBox:
+    width, height = image_size
+    return BoundingBox(
+        x1=max(0, bbox.x1 - padding),
+        y1=max(0, bbox.y1 - padding),
+        x2=min(width, bbox.x2 + padding),
+        y2=min(height, bbox.y2 + padding),
+    )
+
+
+def _bbox_area(bbox: BoundingBox) -> int:
+    return max(0, bbox.x2 - bbox.x1) * max(0, bbox.y2 - bbox.y1)
+
+
+def _tokens_from_page_regions(
+    image: Image.Image,
+    regions: list[BoundingBox],
+    lang: str,
+    ocr_profile: str,
+    source: str | None = None,
+) -> list[OcrToken]:
+    detail_tokens: list[OcrToken] = []
+
+    for region in regions:
+        crop = image.crop((region.x1, region.y1, region.x2, region.y2))
         crop_tokens = _tokens_from_image_region(
             crop,
             lang=lang,
@@ -187,12 +404,40 @@ def _tokens_from_invoice_detail_regions(
         detail_tokens.extend(
             _offset_tokens(
                 crop_tokens,
-                x_offset=region.bbox.x1,
-                y_offset=region.bbox.y1,
+                x_offset=region.x1,
+                y_offset=region.y1,
+                source=source,
+                source_id=(
+                    f"{source}:{region.x1}:{region.y1}:{region.x2}:{region.y2}"
+                    if source
+                    else None
+                ),
             )
         )
 
-    return detail_tokens, ocr_hole_regions
+    return detail_tokens
+
+
+def _forced_full_page_crop_region(
+    image: Image.Image,
+    tokens: list[OcrToken],
+) -> OcrHoleRegion:
+    bbox = BoundingBox(0, 0, image.width, image.height)
+    token_area, token_count = _token_stats_inside(
+        tokens,
+        x1=bbox.x1,
+        y1=bbox.y1,
+        x2=bbox.x2,
+        y2=bbox.y2,
+    )
+    area = max(1, image.width * image.height)
+    return OcrHoleRegion(
+        bbox=bbox,
+        reason=FORCED_FULL_PAGE_CROP_SOURCE,
+        ink_density=round(_dark_pixel_density(image.convert("L")), 6),
+        token_density=round(token_area / area, 6),
+        token_count=token_count,
+    )
 
 
 def _low_token_density_regions(
@@ -375,6 +620,8 @@ def _offset_tokens(
     tokens: list[OcrToken],
     x_offset: int,
     y_offset: int,
+    source: str | None = None,
+    source_id: str | None = None,
 ) -> list[OcrToken]:
     return [
         OcrToken(
@@ -386,6 +633,8 @@ def _offset_tokens(
                 y2=token.bbox.y2 + y_offset,
             ),
             confidence=token.confidence,
+            source=source or token.source,
+            source_id=source_id or token.source_id,
         )
         for token in tokens
     ]

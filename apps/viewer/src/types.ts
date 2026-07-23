@@ -5,6 +5,11 @@ export type BoundingBox = {
   y2: number
 }
 
+export type Point = {
+  x: number
+  y: number
+}
+
 export type ViewerToken = {
   text: string
   confidence: number | null
@@ -24,6 +29,20 @@ export type OcrHoleRegion = {
   ink_density: number
   token_density: number
   token_count: number
+}
+
+export type DetectedTableRegion = {
+  bbox: BoundingBox
+  horizontal_line_count: number
+  vertical_line_count: number
+}
+
+export type DetectedTableCellRegion = {
+  bbox: BoundingBox
+  polygon?: Point[]
+  table_index: number
+  row_index: number
+  column_index: number
 }
 
 export type ViewerTarget = {
@@ -48,6 +67,8 @@ export type ViewerPage = {
   spans: ViewerSpan[]
   ocr_hole_regions?: OcrHoleRegion[]
   targets: ViewerTarget[]
+  detected_table_regions?: DetectedTableRegion[]
+  detected_table_cell_regions?: DetectedTableCellRegion[]
 }
 
 export type ViewerManifest = {
@@ -70,6 +91,16 @@ export type ViewerDocumentIndex = {
   documents: ViewerDocumentIndexEntry[]
 }
 
+export type ViewerBatchIndexEntry = {
+  id: string
+  label: string
+  base_path: string
+}
+
+export type ViewerBatchIndex = {
+  batches: ViewerBatchIndexEntry[]
+}
+
 export type InvoiceField = {
   kind: string
   label: string
@@ -79,6 +110,9 @@ export type InvoiceField = {
   page?: number | null
   bbox?: BoundingBox | null
   role?: string | null
+  registry_id?: string | null
+  registry_source_row?: number | null
+  registry_match_group?: string | null
 }
 
 export type InvoicePage = {
@@ -89,6 +123,8 @@ export type InvoicePage = {
   tokens?: ViewerToken[]
   ocr_hole_regions?: OcrHoleRegion[]
   targets?: ViewerTarget[]
+  detected_table_regions?: DetectedTableRegion[]
+  detected_table_cell_regions?: DetectedTableCellRegion[]
 }
 
 export type ViewerManifestInvoice = {

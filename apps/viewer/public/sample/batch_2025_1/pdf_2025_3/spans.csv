@@ -1,0 +1,193 @@
+﻿source_file,page,span_id,line_id,page_span_index,text,x1,y1,x2,y2,num_tokens
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,1,1,1,[FATTURA,824,88,949,119,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,2,1,2,1166/2024,1092,96,1197,114,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,3,1,3,DATA _ 30/09/2024,1219,93,1422,125,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,4,1,4,PAG,1444,98,1493,117,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,5,2,5,L,274,137,343,165,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,6,3,6,CONSULT,250,167,576,209,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,7,4,7,INTESTATARIO FATTURA,94,306,267,318,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,8,5,8,CONDOMINIO VIA ATENE 19/27,93,332,432,352,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,9,6,9,VIA ATENE 19/27,92,359,275,378,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,10,7,10,58022 FOLLONICA GR,93,387,334,405,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,11,8,11,SPEDIZIONE FATTURA,833,443,990,455,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,12,9,12,CONDOMINIO VIA ATENE 19/27,833,467,1170,487,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,13,10,13,CODICE FISCALE,91,505,210,517,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,14,10,14,PARTITA IVA,403,507,489,519,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,15,10,15,COD.CU.,613,509,674,520,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,16,10,16,VIA ATENE 19/27,832,494,1013,513,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,17,11,17,90006070537,91,522,228,540,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,18,11,18,5089,613,526,661,543,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,19,11,19,58022 FOLLONICA GR,832,521,1069,540,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,20,12,20,PAGAMENTO,90,562,182,573,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,21,13,21,RIMESSA DIRETTA,91,579,296,598,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,22,14,22,BANCA D'APPOGGIO,90,618,234,630,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,23,15,23,Unicredit Banca 1 - IBAN: IT75W0200872241000040720653,91,635,697,657,6
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,24,16,24,__ DESCRIZIONE,76,699,187,731,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,25,16,25,QTA,923,706,957,717,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,26,16,26,PREZZO,1002,706,1060,718,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,27,16,27,so.,1189,708,1212,719,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,28,16,28,IMPORTO,1291,708,1357,720,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,29,16,29,"coD, ma]",1477,695,1563,747,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,30,17,30,Campione Nr. 20245686 del 20/09/2024 -,88,749,552,773,6
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,31,17,31,Descrizione del campione:,569,753,859,778,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,32,17,32,a,1217,737,1290,791,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,33,18,33,È,1451,739,1507,813,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,34,19,34,Acqua potabile deposito,87,778,353,803,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,35,20,35,"Committente: Condominio Via Atene, 19/27 - Follonica",87,806,687,831,7
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,36,21,36,Campionato da: Tecnico Bio Consult S.r.l.,87,834,547,858,6
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,37,22,37,"Metodo di campionamento: APAT CNR IRSA 1030 Man 29 2003 (*),",87,863,837,892,11
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,38,23,38,"APAT CNR IRSA 6010 Man 29 2003 (*), ISO 19458:2006 (*)",85,891,751,920,11
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,39,24,39,"Luogo di campionamento: Condominio Via Atene, 19/27 - Follonica",86,919,826,945,9
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,40,25,40,Data di campionamento: 20/09/2024,86,948,486,972,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,41,26,41,Data di ricevimento: 20/09/2024,86,976,436,997,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,42,27,42,Ora di campionamento: 11:00 - Ora di ricevimento: 13:03,85,1004,713,1030,9
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,43,28,43,"Temperatura al campionamento: 25,0°C",84,1032,527,1058,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,44,29,44,"Temperatura di ricevimento: 10,7°C",84,1061,476,1086,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,45,30,45,Verbale di campionamento n°: 20245686,84,1089,535,1114,5
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,46,30,46,"105,00",1091,1097,1164,1119,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,47,30,47,"105,00",1380,1099,1453,1122,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,48,30,48,22,1521,1101,1547,1120,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,49,31,49,CODICE,73,1879,130,1907,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,50,31,50,DESCRIZIONE,185,1879,282,1907,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,51,31,51,%,740,1890,752,1901,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,52,31,52,IMPONIBILE,796,1891,878,1902,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,53,31,53,[iuposta,1003,1883,1079,1905,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,54,31,54,TOTALE IMPONIBILE,1265,1895,1406,1907,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,55,32,55,22 | tva detraibile 22%,140,1916,362,1947,5
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,56,32,56,22,750,1923,775,1940,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,57,32,57,"105,00",928,1925,994,1945,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,58,32,58,"23,10",1158,1927,1213,1946,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,59,32,59,"105,00",1474,1914,1541,1935,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,60,33,60,TOTALE IMPOSTA,1265,1952,1388,1964,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,61,34,61,"23,10",1485,1972,1540,1992,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,62,35,62,TOTALE FATTURA EURO,1265,2008,1434,2021,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,63,36,63,"128,10",1473,2028,1540,2049,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,64,37,64,RITENUTA 4%,1264,2065,1359,2077,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,65,38,65,"-4,20",1489,2085,1539,2105,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,66,39,66,SCADENZARIO,70,2129,176,2141,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,67,39,67,TOTALE NETTO FATTURA EURO,1263,2122,1486,2135,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,68,40,68,01/10/2024,70,2146,183,2164,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,69,40,69,"123,90",199,2147,265,2167,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,70,40,70,"123,90",1459,2149,1539,2173,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,71,41,71,Bioconsult s.r.l.,120,2203,286,2223,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,72,41,72,"- Sede legale e operativa: Via Isonzo, 8 - 58022 Follonica (GR)",303,2204,1000,2233,12
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,73,41,73,Tel 056649020,1022,2209,1187,2229,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,74,41,74,P.I. 01303760530,1211,2211,1405,2231,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,75,41,75,Email:,1428,2213,1495,2232,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,76,42,76,box@bioconsult-srl.com,70,2230,335,2255,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,77,42,77,www.bioconsult-srl.com,357,2233,618,2252,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,78,42,78,Iscrizione n. 050 all' elenco dei Laboratori della Regione Toscana secondo la L.R.,636,2234,1537,2262,13
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,1,79,43,79,9/2006,767,2262,843,2282,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,80,44,1,Pag.,94,62,141,85,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,81,44,2,1,161,62,168,81,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,82,44,3,dif,210,62,245,86,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,83,45,4,Data:,93,95,149,114,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,84,45,5,14.01.2025,177,95,297,114,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,85,45,6,INTESA SANPAOLO S.P.A.,1256,100,1563,121,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,86,46,7,Dettaglio Presentazione,93,131,353,156,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,87,46,8,Bonifico Europeo Unico,1306,136,1564,161,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,88,47,9,Nome Flusso:,92,205,242,225,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,89,47,10,W0259720916698862500000094,394,206,760,226,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,90,47,11,Data/Ora:,1011,209,1115,229,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,91,47,12,14.01.2025 17:25:14,1254,211,1483,231,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,92,48,13,Conta ordinante:,91,239,272,258,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,93,48,14,1T87B0306972249100000007751-EUR-VIA ATENE 19/27 CONDOMINIO,395,240,1202,263,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,94,49,15,Ragione Sociale:,92,275,276,298,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,95,49,16,VIA ATENE 19/27 CONDOMINIO,394,276,763,296,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,96,49,17,Codice SIA/CUC:,1011,279,1198,299,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,97,49,18,B9M28/-,1253,281,1348,300,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,98,50,19,Canale:,91,304,174,337,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,99,50,20,w,394,309,417,328,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,100,50,21,Stato:,1007,308,1072,341,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,101,50,22,Inoltrata,1253,314,1349,333,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,102,51,23,Tipologia:,90,340,196,373,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,103,51,24,Credit transfer,394,345,563,365,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,104,51,25,Data esecuzione:,1011,348,1198,368,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,105,51,26,14.01.2025,1253,350,1376,369,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,106,52,27,Totale:,90,376,163,410,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,107,52,28,"123,90 EUR",395,381,527,404,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,108,52,29,Num.Disp.:,1011,380,1129,414,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,109,52,30,1,1253,386,1261,404,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,110,53,31,Modalità pagam:,91,419,271,443,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,111,53,32,TRA - Disposizioni di Bonifico SEPA con Esito a,393,420,958,444,9
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,112,54,33,Ordinante,394,449,508,468,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,113,55,34,Esito XML,90,547,208,566,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,114,56,35,Tipo messaggio,88,580,262,604,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,115,56,36,-,374,591,381,595,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,116,56,37,Causale Esito:,1007,584,1163,604,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,117,56,38,”,1249,596,1256,600,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,118,57,39,Nome Flusso orig,89,616,281,640,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,119,57,40,.,374,627,381,631,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,120,57,41,Data Esito:,1007,620,1125,639,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,121,57,42,”,1249,632,1256,636,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,122,58,43,Data/ora ult msg,89,649,268,674,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,123,58,44,.,373,660,380,665,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,124,59,45,Motivazione,88,678,219,712,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,125,59,46,-,373,694,380,698,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,126,60,47,Esito Disposizione di Pagamento:,88,752,483,777,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,127,61,48,C.R.0./Codice di riferimento:,87,788,402,808,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,128,61,49,»,446,800,453,804,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,129,61,50,Data Esito:,1006,793,1124,812,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,130,61,51,“,1284,801,1291,806,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,131,62,52,Num.Assegno:,87,817,247,850,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,132,62,53,-,446,833,453,837,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,133,62,54,Data Emissione,1006,826,1177,845,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,134,62,55,-,1284,837,1291,841,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,135,63,56,Data Ordine:,87,854,225,874,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,136,63,57,-,446,866,453,870,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,137,63,58,Data di addebito:,1006,859,1190,879,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,138,63,59,-,1284,870,1291,875,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,139,64,60,Imp.Commissioni:,87,884,281,917,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,140,64,61,"""",446,899,453,904,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,141,64,62,Imp.Spese:,1006,888,1127,921,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,142,64,63,-,1284,904,1291,908,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,143,65,64,Imp.Penali:,87,917,208,950,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,144,65,65,-,445,933,453,937,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,145,66,66,Storni e Segnalazioni Ulteriori:,88,955,447,979,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,146,67,67,Anomalia Segnalata:,85,988,312,1013,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,147,67,68,-,445,1000,452,1004,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,148,68,69,Dati Disposizione:,88,1021,300,1046,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,149,69,70,Data creazione,85,1057,250,1078,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,150,69,71,14.01.2025,445,1059,566,1079,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,151,69,72,Importo da trasferire,897,1061,1118,1086,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,152,69,73,"123,90 EUR",1176,1063,1309,1086,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,153,70,74,Data esecuzione,85,1094,268,1114,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,154,70,75,"14,01,2025",445,1095,566,1115,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,155,71,76,Tipo di bonifico,83,1127,250,1151,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,156,71,77,Credit Transfer,444,1128,620,1148,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,157,71,78,Finalità del pagamento:,897,1130,1151,1156,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,158,71,79,CASH - Pagamento Generico,1175,1132,1515,1157,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,159,72,80,Tipo commissioni,83,1163,274,1187,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,160,72,81,SLEV - Ognuno paga la sua parte,444,1164,833,1190,7
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,161,72,82,Modalità pagamento,896,1166,1119,1192,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,162,72,83,TRA - Disposizioni di Bonifico,1174,1164,1528,1198,5
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,163,73,84,Urgente,84,1257,170,1282,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,164,73,85,NO,443,1258,478,1278,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,165,74,86,Bonifico Istantaneo,83,1291,293,1311,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,166,74,87,NO,443,1292,478,1312,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,167,75,88,Beneficiario,83,1361,211,1380,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,168,75,89,BIOCONSULT S.R.L.,443,1362,681,1382,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,169,76,90,Italia,445,1396,499,1415,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,170,77,91,identificativo fiscale,82,1427,296,1447,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,171,77,92,IT - 01303760530,442,1429,635,1448,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,172,78,93,Persana fisica,82,1461,236,1480,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,173,79,94,Conta beneficiario,81,1497,280,1516,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,174,79,95,1T75W0200872241000040720653,442,1498,817,1518,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,175,79,96,Codice SWIFT,899,1500,1060,1520,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,176,79,97,UNGCRITM1G17,1177,1502,1350,1522,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,177,80,98,Tipo codice CBI,80,1530,254,1554,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,178,80,99,Altri,440,1532,488,1551,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,179,80,100,Codice,899,1528,975,1562,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,180,80,101,0fd3e2d10a42f523,1176,1535,1387,1556,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,181,81,102,Destinatario esito,81,1566,271,1586,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,182,82,103,CUC,80,1599,132,1619,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,183,82,104,Sia,899,1603,933,1621,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,184,82,105,-,1176,1615,1183,1619,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,185,83,106,Identificativo End to End,80,1660,346,1681,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,186,83,107,31121621B9M2817368718717570.1621126,440,1662,927,1683,1
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,187,84,108,Altri Addebiti - Finanziamento,78,1736,403,1756,4
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,188,84,109,Data scadenza,893,1739,1056,1759,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,189,85,110,Informazioni aggiuntive (max,79,1772,396,1796,3
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,190,85,111,Pagamento fattura n.1166 del 30/09/2024,439,1773,915,1797,5
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,191,86,112,140 caratteri),79,1800,224,1825,2
+data/input/2025/batch_2025_1/pdf_2025_3.pdf,2,192,87,113,rem _—______—_—_ _—_+— —_m,76,1856,1561,1884,4
