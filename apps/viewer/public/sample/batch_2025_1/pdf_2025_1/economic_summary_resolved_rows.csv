@@ -1,5 +1,0 @@
-﻿source_file,page,totale_imponibile_text,totale_imponibile_value,totale_fattura_text,totale_fattura_value,totale_fattura_source,ritenuta_label_text,ritenuta_text,ritenuta_value,ritenuta_percentuale,ritenuta_source,totale_netto_fattura_text,totale_netto_fattura_value,totale_netto_fattura_source,math_check,notes,x1,y1,x2,y2
-data/input/2025/batch_2025_1/pdf_2025_1.pdf,1,,,"85,79",85.79,direct,Ritenuta,"2,81",-2.81,,direct,"82,98",82.98,direct,ok,netto_matches_totale_minus_ritenuta,191,1586,1608,2103
-data/input/2025/batch_2025_1/pdf_2025_1.pdf,2,,,,,,,,,,,220.00,220.00,direct,uncertain,,871,1847,1557,2139
-data/input/2025/batch_2025_1/pdf_2025_1.pdf,3,,,"56,22",56.22,direct,RITENUTA D'ACCONTO,"1,84",-1.84,,direct,"54,38",54.38,direct,ok,netto_matches_totale_minus_ritenuta,1073,1921,1584,2144
-data/input/2025/batch_2025_1/pdf_2025_1.pdf,4,,,"54,37",54.37,direct,RITENUTA D'ACCONTO,"1,84",-1.84,,direct,"54,37",54.37,direct,uncertain,netto_mismatch_totale_minus_ritenuta,1072,1921,1583,2143

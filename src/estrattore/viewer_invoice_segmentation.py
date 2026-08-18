@@ -6,16 +6,16 @@ from estrattore.registry_enrichment import enrich_invoice_fields_from_registry
 
 
 INVOICE_FIELD_DEFINITIONS = [
-    ("nome_emittente", "Nome emittente"),
-    ("condominio", "Condominio"),
-    ("codice_fiscale", "C.F. Condominio"),
     ("codice_fiscale_emittente", "Codice fiscale emittente"),
+    ("nome_emittente", "Nome emittente"),
     ("p_iva", "P.IVA"),
+    ("codice_fiscale", "C.F. Condominio"),
+    ("condominio", "Condominio"),
     ("numero_fattura", "Numero fattura"),
     ("data_fattura", "Data fattura"),
     ("pagata_il", "Pagata il"),
     ("economic_summary.totale_fattura.value", "Totale fattura"),
-    ("economic_summary.ritenuta_percentuale", "Ritenuta"),
+    ("economic_summary.ritenuta.value", "Ritenuta"),
     ("economic_summary.totale_netto_fattura.value", "Totale netto fattura"),
 ]
 MIN_INVOICE_START_SIGNAL_COUNT = 5
@@ -505,8 +505,8 @@ def _best_invoice_field_target(
     targets: list[dict],
     kind: str,
 ) -> dict | None:
-    if kind == "economic_summary.ritenuta_percentuale":
-        return _best_ritenuta_percentuale_target(page_manifests)
+    if kind == "economic_summary.ritenuta.value":
+        return _best_ritenuta_value_target(page_manifests, targets)
 
     if kind == "data_fattura":
         return _best_invoice_date_target(page_manifests, targets)
@@ -593,6 +593,8 @@ def _invoice_date_candidate_priority(candidate: dict) -> int:
     negative_context = candidate.get("negative_context", "")
     if "entro" in negative_context:
         return -1
+    if "riferimento normativo" in negative_context:
+        return -1
 
     if "del" in anchor_context and "fattura" in anchor_context:
         return 3
@@ -674,6 +676,51 @@ def _best_net_total_target(targets: list[dict]) -> dict | None:
     )
 
 
+def _best_ritenuta_value_target(
+    page_manifests: list[dict],
+    targets: list[dict],
+) -> dict | None:
+    direct_targets = [
+        target
+        for target in targets
+        if target["kind"] == "economic_summary.ritenuta.value"
+    ]
+    if direct_targets:
+        return max(direct_targets, key=lambda target: target["score"], default=None)
+
+    candidates = []
+    for page_manifest in page_manifests:
+        resolved_rows = page_manifest.get("candidate_tables", {}).get(
+            "economic_summary_resolved_rows",
+            [],
+        )
+        for row in resolved_rows:
+            ritenuta_value = _manifest_money_value(str(row.get("ritenuta_value", "")))
+            if ritenuta_value is None:
+                continue
+
+            matching_token = _money_token_matching_value(
+                page_manifest,
+                abs(ritenuta_value),
+            )
+            if matching_token is None:
+                continue
+
+            candidates.append(
+                {
+                    "kind": "economic_summary.ritenuta.value",
+                    "value": _format_manifest_money(abs(ritenuta_value)),
+                    "score": 90,
+                    "ocr_confidence": matching_token.get("confidence"),
+                    "page": page_manifest.get("page"),
+                    "bbox": matching_token.get("bbox"),
+                    "role": "value",
+                }
+            )
+
+    return max(candidates, key=lambda target: target["score"], default=None)
+
+
 def _expected_net_total_from_targets(targets: list[dict]) -> Decimal | None:
     total_invoice = _best_money_target(
         targets,
@@ -708,6 +755,20 @@ def _best_money_target(targets: list[dict], kind: str) -> Decimal | None:
         key=lambda item: item[0].get("score", 0),
     )
     return value
+
+
+def _money_token_matching_value(page_manifest: dict, expected_value: Decimal) -> dict | None:
+    candidates = [
+        token
+        for token in page_manifest.get("tokens", [])
+        if _manifest_money_value(token.get("text", "")) is not None
+        and abs(_money(_manifest_money_value(token.get("text", "")))) == _money(expected_value)
+    ]
+    return max(candidates, key=lambda token: token.get("confidence") or 0, default=None)
+
+
+def _format_manifest_money(value: Decimal) -> str:
+    return f"{_money(value):.2f}".replace(".", ",")
 
 
 def _target_money_matches(target: dict, expected_value: Decimal) -> bool:
@@ -842,38 +903,6 @@ def _normalize_invoice_date_link_text(text: str) -> str:
     return re.sub(r"[^0-9A-Za-z]+", "", text).upper()
 
 
-def _best_ritenuta_percentuale_target(page_manifests: list[dict]) -> dict | None:
-    candidates = []
-    for page_manifest in page_manifests:
-        resolved_rows = page_manifest.get("candidate_tables", {}).get(
-            "economic_summary_resolved_rows",
-            [],
-        )
-        ritenuta_target = _best_target(page_manifest, "economic_summary.ritenuta.value")
-        for row in resolved_rows:
-            value = row.get("ritenuta_percentuale", "")
-            if not value:
-                continue
-
-            candidates.append(
-                {
-                    "kind": "economic_summary.ritenuta_percentuale",
-                    "value": value,
-                    "score": ritenuta_target["score"] if ritenuta_target else 0,
-                    "ocr_confidence": (
-                        ritenuta_target.get("ocr_confidence")
-                        if ritenuta_target
-                        else None
-                    ),
-                    "page": ritenuta_target.get("page") if ritenuta_target else None,
-                    "bbox": ritenuta_target.get("bbox") if ritenuta_target else None,
-                    "role": ritenuta_target.get("role") if ritenuta_target else None,
-                }
-            )
-
-    return max(candidates, key=lambda target: target["score"], default=None)
-
-
 def _matching_target(
     targets: list[dict],
     kind: str,
@@ -917,8 +946,11 @@ def _same_bbox(left: dict | None, right: dict | None) -> bool:
 
 
 def _invoice_field_value_from_page(page_manifest: dict, kind: str) -> str | None:
-    if kind == "economic_summary.ritenuta_percentuale":
-        target = _best_ritenuta_percentuale_target([page_manifest])
+    if kind == "economic_summary.ritenuta.value":
+        target = _best_ritenuta_value_target(
+            [page_manifest],
+            page_manifest.get("targets", []),
+        )
         return target["value"] if target else None
 
     return _best_target_value(page_manifest, kind)

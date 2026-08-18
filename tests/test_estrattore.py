@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from openpyxl import Workbook
+from openpyxl import load_workbook
 from PIL import Image, ImageDraw
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -14,6 +15,7 @@ from debug_words import (
     is_supported_input_file,
     save_viewer_manifest,
 )
+import registry_api
 from estrattore.condominium_extraction import find_condominium_candidates
 from estrattore import debug_output
 from estrattore.debug_output import (
@@ -84,6 +86,7 @@ from estrattore.registry import (
     normalize_registry_name,
     read_registry_records_from_excel,
     save_registry_cache,
+    save_registry_cache_excel,
 )
 from estrattore.registry_enrichment import enrich_invoice_fields_from_registry
 from estrattore import tesseract_adapter
@@ -406,6 +409,131 @@ def test_save_and_load_registry_cache_roundtrip() -> None:
     assert loaded == cache
 
 
+def test_registry_api_save_accepts_new_manual_record(monkeypatch) -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="data/registry/input/anagrafica.xlsx",
+        records=[
+            RegistryRecord(
+                registry_id="00014365",
+                source_row=13,
+                codice_anagrafica="00014365",
+                nominativo="OTIS SERVIZI S.R.L.",
+                normalized_name="OTIS SERVIZI SRL",
+                codice_fiscale_raw="01729590032",
+                codice_fiscale="01729590032",
+                partita_iva_raw="01729590032",
+                partita_iva="01729590032",
+                tipologia="Altro soggetto",
+                warnings=[],
+            )
+        ],
+    )
+    output_dir = Path("outputs") / "pytest-tmp" / "registry_tests"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "anagrafica_registry_manual.json"
+    save_registry_cache(cache, output_path)
+    monkeypatch.setattr(registry_api, "DEFAULT_REGISTRY_CACHE_PATH", output_path)
+
+    saved = registry_api._save_registry_records_payload(
+        {
+            "records": [
+                {
+                    "registry_id": "new_frontend",
+                    "source_row": -1,
+                    "codice_anagrafica": "",
+                    "nominativo": "NUOVO CONDOMINIO",
+                    "codice_fiscale": "80012345678",
+                    "partita_iva": "",
+                    "tipologia": "Condominio",
+                },
+                {
+                    "registry_id": "00014365",
+                    "source_row": 13,
+                    "codice_anagrafica": "00014365",
+                    "nominativo": "OTIS SERVIZI S.R.L.",
+                    "codice_fiscale": "01729590032",
+                    "partita_iva": "01729590032",
+                    "tipologia": "Altro soggetto",
+                },
+            ]
+        }
+    )
+
+    assert [record.nominativo for record in saved.records] == [
+        "NUOVO CONDOMINIO",
+        "OTIS SERVIZI S.R.L.",
+    ]
+    assert saved.records[0].registry_id == "manual_000014"
+    assert saved.records[0].source_row == 14
+    assert saved.records[0].codice_fiscale == "80012345678"
+
+
+def test_registry_app_excel_export_is_reimportable() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="data/registry/input/anagrafica.xlsx",
+        records=[
+            RegistryRecord(
+                registry_id="manual_000014",
+                source_row=14,
+                codice_anagrafica=None,
+                nominativo="NUOVO CONDOMINIO",
+                normalized_name="NUOVO CONDOMINIO",
+                codice_fiscale_raw="80012345678",
+                codice_fiscale="80012345678",
+                partita_iva_raw="",
+                partita_iva=None,
+                tipologia="Condominio",
+                warnings=[],
+            ),
+            RegistryRecord(
+                registry_id="00014365",
+                source_row=13,
+                codice_anagrafica="00014365",
+                nominativo="OTIS SERVIZI S.R.L.",
+                normalized_name="OTIS SERVIZI SRL",
+                codice_fiscale_raw="01729590032",
+                codice_fiscale="01729590032",
+                partita_iva_raw="01729590032",
+                partita_iva="01729590032",
+                tipologia="Altro soggetto",
+                utente="GIORGIO",
+                warnings=[],
+            ),
+        ],
+    )
+    output_dir = Path("outputs") / "pytest-tmp" / "registry_tests"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "anagrafica_estrattore_scan.xlsx"
+
+    save_registry_cache_excel(cache, output_path)
+    workbook = load_workbook(output_path, read_only=True, data_only=True)
+    worksheet = workbook[workbook.sheetnames[0]]
+    assert [cell.value for cell in worksheet[1]] == [
+        "codice_anagrafica",
+        "nominativo",
+        "codice_fiscale",
+        "partita_iva",
+        "tipologia",
+        "ultima_modifica",
+        "utente",
+    ]
+    workbook.close()
+
+    records = read_registry_records_from_excel(output_path)
+
+    assert [record.registry_id for record in records] == [
+        "row-2",
+        "00014365",
+    ]
+    assert records[0].source_row == 2
+    assert records[0].nominativo == "NUOVO CONDOMINIO"
+    assert records[0].codice_fiscale == "80012345678"
+    assert records[1].codice_anagrafica == "00014365"
+    assert records[1].utente == "GIORGIO"
+
+
 def test_registry_name_normalization_extracts_fiscal_identifiers_from_nominativo() -> None:
     codice_fiscale, partita_iva = extract_registry_fiscal_identifiers(
         "P.IVA 01729590032"
@@ -437,8 +565,8 @@ def test_registry_cleaning_merges_fiscal_identifier_only_name_with_complete_row(
             RegistryRecord(
                 registry_id="complete",
                 source_row=14,
-                codice_anagrafica="00014365",
-                nominativo="00014365 OTIS SERVIZI S.R.L.",
+                codice_anagrafica=None,
+                nominativo="OTIS SERVIZI S.R.L.",
                 normalized_name="OTIS SERVIZI SRL",
                 codice_fiscale_raw="01729590032",
                 codice_fiscale="01729590032",
@@ -462,11 +590,12 @@ def test_registry_cleaning_merges_fiscal_identifier_only_name_with_complete_row(
 
     assert len(result.cache.records) == 1
     assert result.cache.records[0].normalized_name == "OTIS SERVIZI SRL"
+    assert result.cache.records[0].codice_anagrafica is None
     assert result.report["deleted_count"] == 1
     assert result.report["groups"][0]["deleted_records"][0]["source_row"] == 13
 
 
-def test_registry_cleaning_keeps_different_registry_codes_as_conflict() -> None:
+def test_registry_cleaning_merges_different_registry_codes_when_only_one_has_vat() -> None:
     cache = RegistryCache(
         schema_version=1,
         source_file="registry.json",
@@ -510,11 +639,164 @@ def test_registry_cleaning_keeps_different_registry_codes_as_conflict() -> None:
     )
     duplicate_report_path.unlink(missing_ok=True)
 
+    assert len(result.cache.records) == 1
+    assert result.cache.records[0].registry_id == "00004108"
+    assert result.cache.records[0].codice_anagrafica == "00004108"
+    assert result.report["merged_count"] == 1
+    assert result.report["conflict_count"] == 0
+    assert result.report["deleted_count"] == 1
+    assert result.report["groups"][0]["source_rows"] == [10448, 1359]
+
+
+def test_registry_cleaning_does_not_merge_unselected_merge_group() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="registry.json",
+        records=[
+            RegistryRecord(
+                registry_id="00016328",
+                source_row=10448,
+                codice_anagrafica="00016328",
+                nominativo="00016328 FASTER SAILING TEAM",
+                normalized_name="FASTER SAILING TEAM",
+                codice_fiscale_raw="07270490480",
+                codice_fiscale="07270490480",
+                partita_iva_raw="",
+                partita_iva=None,
+                tipologia="Altro soggetto",
+                warnings=[],
+            ),
+            RegistryRecord(
+                registry_id="00004108",
+                source_row=1359,
+                codice_anagrafica="00004108",
+                nominativo="00004108 ASSOCIAZIONE FASTER SAILING TEAM",
+                normalized_name="ASSOCIAZIONE FASTER SAILING TEAM",
+                codice_fiscale_raw="07270490480",
+                codice_fiscale="07270490480",
+                partita_iva_raw="06861930487",
+                partita_iva="06861930487",
+                tipologia="Altro soggetto",
+                warnings=[],
+            ),
+        ],
+    )
+    duplicate_report_path = (
+        Path("outputs") / "pytest-tmp" / "registry_duplicate_report.json"
+    )
+    duplicate_report_path.unlink(missing_ok=True)
+
+    result = clean_registry_cache_duplicates(
+        cache,
+        duplicate_report_path=duplicate_report_path,
+        selected_merge_group_keys=set(),
+    )
+    duplicate_report_path.unlink(missing_ok=True)
+
     assert len(result.cache.records) == 2
     assert result.report["merged_count"] == 0
     assert result.report["conflict_count"] == 1
     assert result.report["deleted_count"] == 0
-    assert result.report["groups"][0]["source_rows"] == [10448, 1359]
+
+
+def test_registry_cleaning_keeps_different_registry_codes_as_conflict_when_both_have_vat() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="registry.json",
+        records=[
+            RegistryRecord(
+                registry_id="00016328",
+                source_row=10448,
+                codice_anagrafica="00016328",
+                nominativo="00016328 FASTER SAILING TEAM",
+                normalized_name="FASTER SAILING TEAM",
+                codice_fiscale_raw="07270490480",
+                codice_fiscale="07270490480",
+                partita_iva_raw="07270490480",
+                partita_iva="07270490480",
+                tipologia="Altro soggetto",
+                warnings=[],
+            ),
+            RegistryRecord(
+                registry_id="00004108",
+                source_row=1359,
+                codice_anagrafica="00004108",
+                nominativo="00004108 ASSOCIAZIONE FASTER SAILING TEAM",
+                normalized_name="ASSOCIAZIONE FASTER SAILING TEAM",
+                codice_fiscale_raw="07270490480",
+                codice_fiscale="07270490480",
+                partita_iva_raw="07270490480",
+                partita_iva="07270490480",
+                tipologia="Altro soggetto",
+                warnings=[],
+            ),
+        ],
+    )
+    duplicate_report_path = (
+        Path("outputs") / "pytest-tmp" / "registry_duplicate_report.json"
+    )
+    duplicate_report_path.unlink(missing_ok=True)
+
+    result = clean_registry_cache_duplicates(
+        cache,
+        duplicate_report_path=duplicate_report_path,
+    )
+    duplicate_report_path.unlink(missing_ok=True)
+
+    assert len(result.cache.records) == 2
+    assert result.report["merged_count"] == 0
+    assert result.report["conflict_count"] == 1
+    assert result.report["deleted_count"] == 0
+
+
+def test_registry_cleaning_merges_same_registry_code_and_keeps_selected_code() -> None:
+    cache = RegistryCache(
+        schema_version=1,
+        source_file="registry.json",
+        records=[
+            RegistryRecord(
+                registry_id="empty-name",
+                source_row=31,
+                codice_anagrafica="00010249",
+                nominativo="00010249 ****",
+                normalized_name="",
+                codice_fiscale_raw="01966390492",
+                codice_fiscale="01966390492",
+                partita_iva_raw="",
+                partita_iva=None,
+                tipologia="Altro soggetto",
+                warnings=[],
+            ),
+            RegistryRecord(
+                registry_id="complete",
+                source_row=9989,
+                codice_anagrafica="00010249",
+                nominativo="00010249 ETRURIA 21 S.R.L.",
+                normalized_name="ETRURIA 21 SRL",
+                codice_fiscale_raw="01966390492",
+                codice_fiscale="01966390492",
+                partita_iva_raw="01966390492",
+                partita_iva="01966390492",
+                tipologia="Altro soggetto",
+                warnings=[],
+            ),
+        ],
+    )
+    duplicate_report_path = (
+        Path("outputs") / "pytest-tmp" / "registry_duplicate_report.json"
+    )
+    duplicate_report_path.unlink(missing_ok=True)
+
+    result = clean_registry_cache_duplicates(
+        cache,
+        duplicate_report_path=duplicate_report_path,
+    )
+    duplicate_report_path.unlink(missing_ok=True)
+
+    assert len(result.cache.records) == 1
+    assert result.cache.records[0].registry_id == "complete"
+    assert result.cache.records[0].codice_anagrafica == "00010249"
+    assert result.report["merged_count"] == 1
 
 
 def test_registry_enrichment_completes_missing_fields_from_exact_vat_match() -> None:
@@ -2033,6 +2315,37 @@ def test_find_invoice_date_candidates_penalizes_entro_il_due_date() -> None:
     assert by_raw_text["30/04/2024"].score < by_raw_text["08/04/2024"].score
 
 
+def test_find_invoice_date_candidates_penalizes_legal_reference_date() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1600,
+                height=2200,
+                tokens=[
+                    OcrToken("DATA", BoundingBox(390, 653, 440, 674)),
+                    OcrToken("DOCUMENTO", BoundingBox(450, 653, 560, 674)),
+                    OcrToken("06/01/2025", BoundingBox(570, 653, 705, 674)),
+                    OcrToken("Contribuenti", BoundingBox(260, 1777, 370, 1791)),
+                    OcrToken("forfetari", BoundingBox(378, 1777, 442, 1791)),
+                    OcrToken("L.190", BoundingBox(448, 1777, 492, 1791)),
+                    OcrToken("del", BoundingBox(498, 1777, 528, 1791)),
+                    OcrToken("23/12/2014", BoundingBox(536, 1777, 633, 1791)),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_invoice_date_candidates(document)
+    by_raw_text = {candidate.raw_text: candidate for candidate in candidates}
+
+    assert by_raw_text["06/01/2025"].selected_as_data_fattura is True
+    assert by_raw_text["23/12/2014"].selected_as_data_fattura is False
+    assert by_raw_text["23/12/2014"].negative_context == "riferimento normativo"
+    assert by_raw_text["23/12/2014"].score < by_raw_text["06/01/2025"].score
+
+
 def test_find_invoice_date_candidates_treats_billing_period_as_positive_context() -> None:
     document = DocumentRepresentation(
         source_file=Path("fattura.pdf"),
@@ -2516,17 +2829,17 @@ def test_save_viewer_manifest_writes_stable_overlay_contract() -> None:
     assert invoice["invoice_id"] == "invoice-001"
     assert invoice["page_numbers"] == [1]
     assert "condominio" in invoice_field_kinds
-    assert "economic_summary.ritenuta_percentuale" in invoice_field_kinds
-    ritenuta_percentuale_field = next(
+    assert "economic_summary.ritenuta.value" in invoice_field_kinds
+    ritenuta_field = next(
         field
         for field in invoice["fields"]
-        if field["kind"] == "economic_summary.ritenuta_percentuale"
+        if field["kind"] == "economic_summary.ritenuta.value"
     )
-    assert ritenuta_percentuale_field["value"] == "4%"
-    assert ritenuta_percentuale_field["page"] == 1
-    assert ritenuta_percentuale_field["role"] == "value"
-    assert ritenuta_percentuale_field["bbox"]
-    assert ritenuta_percentuale_field["ocr_confidence"] == 0.55
+    assert ritenuta_field["value"] == "-4,20"
+    assert ritenuta_field["page"] == 1
+    assert ritenuta_field["role"] == "value"
+    assert ritenuta_field["bbox"]
+    assert ritenuta_field["ocr_confidence"] == 0.55
     assert data_fattura_field["value"] == "2024-09-30"
     assert data_fattura_field["ocr_confidence"] == 0.61
     assert page["image"] == "page-001-boxes.png"
@@ -2943,6 +3256,44 @@ def test_viewer_invoice_date_prefers_date_after_current_invoice_number() -> None
 
     fields = {field["kind"]: field for field in invoices[0]["fields"]}
     assert fields["data_fattura"]["value"] == "2024-06-20"
+
+
+def test_viewer_invoice_date_ignores_legal_reference_date() -> None:
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [],
+            "tokens": [],
+            "targets": [
+                {"kind": "numero_fattura", "value": "4/A", "score": 180},
+            ],
+            "candidate_tables": {
+                "invoice_dates": [
+                    {
+                        "raw_text": "06/01/2025",
+                        "normalized_value": "2025-01-06",
+                        "score": 170.0,
+                        "anchor_context": "data",
+                        "negative_context": "",
+                        "bbox": {"x1": 390, "y1": 653, "x2": 525, "y2": 674},
+                    },
+                    {
+                        "raw_text": "23/12/2014",
+                        "normalized_value": "2014-12-23",
+                        "score": 130.0,
+                        "anchor_context": "del|numero_fattura",
+                        "negative_context": "riferimento normativo",
+                        "bbox": {"x1": 443, "y1": 1777, "x2": 540, "y2": 1791},
+                    },
+                ]
+            },
+        }
+    ]
+
+    invoices = build_viewer_invoices(page_manifests)
+
+    fields = {field["kind"]: field for field in invoices[0]["fields"]}
+    assert fields["data_fattura"]["value"] == "2025-01-06"
 
 
 def test_viewer_invoices_extracts_paid_date_from_bank_context() -> None:

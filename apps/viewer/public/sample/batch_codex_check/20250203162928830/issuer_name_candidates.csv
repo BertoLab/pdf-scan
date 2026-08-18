@@ -1,6 +1,0 @@
-﻿source_file,page,raw_text,normalized_value,accuracy,occurrence_count,score,selected_as_nome_emittente,x1,y1,x2,y2
-data/input/20250203162928830.pdf,1,Campionato da: Tecnico Bio Consult S.r.l.,CAMPIONATO DA TECNICO BIO CONSULT SRL,0.8967,1,189.67,False,87,834,547,858
-data/input/20250203162928830.pdf,1,Bioconsult s.r.l.,BIOCONSULT SRL,0.455,2,245.5,False,120,2203,286,2223
-data/input/20250203162928830.pdf,1,box@bioconsult-srl.com,BOX BIOCONSULT SRL,0.6,1,160.0,False,70,2230,335,2255
-data/input/20250203162928830.pdf,1,www.bioconsult-srl.com,WWW BIOCONSULT SRL,0.58,1,158.0,False,357,2233,618,2252
-data/input/20250203162928830.pdf,2,BIOCONSULT S.R.L.,BIOCONSULT SRL,0.88,2,288.0,True,443,1362,681,1382

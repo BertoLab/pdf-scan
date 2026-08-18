@@ -1,4 +1,0 @@
-﻿source_file,page,raw_text,normalized_value,accuracy,occurrence_count,score,selected_as_nome_emittente,x1,y1,x2,y2
-data/input/20250203163221123.pdf,1,OTIS Servizi S.r.l.,OTIS SERVIZI SRL,0.9433,3,394.33,True,139,2137,317,2156
-data/input/20250203163221123.pdf,3,"OTIS Servizi S.r.l,",OTIS SERVIZI SRL,0.83,3,383.0,False,131,2157,310,2175
-data/input/20250203163221123.pdf,5,OTIS SERVIZI S.R.L.,OTIS SERVIZI SRL,0.9033,3,390.33,False,465,1334,691,1353

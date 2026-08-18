@@ -209,6 +209,8 @@ def _score_invoice_date(
         score -= 90
     elif negative_context == "entro":
         score -= 70
+    elif negative_context == "riferimento normativo":
+        score -= 120
 
     return round(max(0, score), 2)
 
@@ -264,7 +266,35 @@ def _negative_date_context(nearby_tokens: list[_NearbyToken]) -> str:
     if "entro" in words:
         return "entro"
 
+    if _has_legal_reference_context(words):
+        return "riferimento normativo"
+
     return ""
+
+
+def _has_legal_reference_context(words: list[str]) -> bool:
+    legal_markers = {
+        "legge",
+        "art",
+        "articolo",
+        "comma",
+        "contribuenti",
+        "forfetari",
+        "forfettari",
+    }
+    compact_words = {re.sub(r"[^0-9a-zA-Z]+", "", word) for word in words}
+    has_law_number = any(word.startswith("l") and word[1:].isdigit() for word in compact_words)
+    has_split_law_number = any(
+        left == "l" and right.isdigit()
+        for left, right in zip(words, words[1:])
+    )
+    return (
+        has_law_number
+        or has_split_law_number
+        or bool(legal_markers.intersection(words))
+        or _has_adjacent_words(words, "contribuenti", "forfetari")
+        or _has_adjacent_words(words, "contribuenti", "forfettari")
+    )
 
 
 def _looks_like_invoice_number_reference(text: str) -> bool:

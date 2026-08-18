@@ -1,2 +1,0 @@
-﻿source_file,page,totale_imponibile_text,totale_imponibile_value,totale_fattura_text,totale_fattura_value,totale_fattura_source,ritenuta_label_text,ritenuta_text,ritenuta_value,ritenuta_percentuale,ritenuta_source,totale_netto_fattura_text,totale_netto_fattura_value,totale_netto_fattura_source,math_check,notes,x1,y1,x2,y2
-data/input/2025/batch_2025_1/pdf_2025_9.pdf,1,"350,00",350.00,"385,00",385.00,direct,"Rit. acconto 4% su €350,00","-14,00",-14.00,4%,direct,"371,00",371.00,direct,ok,ritenuta_matches_imponibile_percent|netto_matches_totale_minus_ritenuta,969,1795,1555,2136

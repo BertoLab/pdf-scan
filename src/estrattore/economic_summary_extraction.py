@@ -476,6 +476,16 @@ def _resolve_economic_summary_row(
     ritenuta_source = "direct" if ritenuta_abs is not None else ""
     selected_percent = percent_hint
 
+    if ritenuta_abs is None:
+        derived_from_net = _derive_ritenuta_from_totale_netto(
+            totale_fattura,
+            totale_netto,
+        )
+        if derived_from_net is not None:
+            ritenuta_abs = derived_from_net
+            ritenuta_source = "derived_from_totale_fattura_minus_netto"
+            notes.append("ritenuta_derived_from_totale_netto")
+
     if totale_imponibile is not None:
         matched_percent = _percent_matching_ritenuta(
             totale_imponibile,

@@ -1,6 +1,0 @@
-﻿source_file,page,target,label_text,value_text,normalized_value,score,selected_as_field,x1,y1,x2,y2,label_x1,label_y1,label_x2,label_y2,value_x1,value_y1,value_x2,value_y2
-data/input/2025/batch_2025_1/pdf_2025_8.pdf,1,totale_imponibile,TOTALE IMPONIBILE,"65,00",65.00,169.82,True,1287,1892,1565,1930,1287,1892,1429,1904,1510,1910,1565,1930
-data/input/2025/batch_2025_1/pdf_2025_8.pdf,1,totale_imposta,TOTALE IMPOSTA,"14,30",14.30,169.69,True,1287,1949,1565,1987,1287,1949,1412,1961,1511,1967,1565,1987
-data/input/2025/batch_2025_1/pdf_2025_8.pdf,1,totale_fattura,TOTALE FATTURA EURO,"79,30",79.30,169.82,True,1288,2006,1565,2044,1288,2006,1459,2018,1511,2024,1565,2044
-data/input/2025/batch_2025_1/pdf_2025_8.pdf,1,ritenuta,RITENUTA 4%,"-2,60",-2.60,169.27,True,1288,2063,1565,2101,1288,2063,1384,2074,1515,2081,1565,2101
-data/input/2025/batch_2025_1/pdf_2025_8.pdf,1,totale_netto_fattura,TOTALE NETTO FATTURA EURO,"76,70",76.70,170.72,True,1288,2120,1565,2168,1288,2120,1513,2131,1500,2145,1565,2168

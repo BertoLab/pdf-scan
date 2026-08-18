@@ -1,0 +1,13 @@
+{
+  "name": "estrattore-ui-checks",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "check": "node checks/capture-change-screenshots.mjs",
+    "clean": "node checks/clean-screenshots.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.54.0"
+  }
+}

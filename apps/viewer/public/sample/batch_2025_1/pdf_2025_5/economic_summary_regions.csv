@@ -1,3 +1,0 @@
-﻿source_file,page,score,selected_as_economic_summary,anchor_context,amount_count,amount_context,x1,y1,x2,y2
-data/input/2025/batch_2025_1/pdf_2025_5.pdf,1,210.0,True,totale_imponibile|totale_imposta|totale_fattura|ritenuta|totale_netto_fattura,6,"443,00|97,46|540,46|443,00|-17,72|522,74",987,1764,1546,2153
-data/input/2025/batch_2025_1/pdf_2025_5.pdf,3,110.0,True,totale_imponibile|totale_imponibile|ritenuta,7,"90,00|90,00|9,00|0,00|90,00|9,00|3,60",300,1678,1562,2103

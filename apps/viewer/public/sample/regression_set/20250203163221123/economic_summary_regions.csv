@@ -1,5 +1,0 @@
-﻿source_file,page,score,selected_as_economic_summary,anchor_context,amount_count,amount_context,x1,y1,x2,y2
-data/input/20250203163221123.pdf,1,97.0,True,totale_netto_fattura|ritenuta|totale_netto_fattura|ritenuta,4,"100,70|3,80|100,70|667,32",88,959,1599,1758
-data/input/20250203163221123.pdf,2,132.0,True,totale_netto_fattura|totale_imponibile|totale_imposta,4,"22.05|100,70|95,00|104,50",838,357,1563,2100
-data/input/20250203163221123.pdf,3,97.0,True,totale_netto_fattura|ritenuta|totale_netto_fattura|ritenuta,4,"643,08|24,24|643,08|667,32",83,990,1578,1777
-data/input/20250203163221123.pdf,7,210.0,True,totale_imponibile|totale_imposta|totale_fattura|ritenuta|totale_netto_fattura,6,"103,00|10,30|113,30|103,00|4,12|109,18",980,1741,1520,2116

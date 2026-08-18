@@ -85,6 +85,7 @@ export type ViewerManifest = {
 export type ViewerDocumentIndexEntry = {
   id: string
   base_path: string
+  review_invoice_ids?: string[]
 }
 
 export type ViewerDocumentIndex = {
@@ -95,10 +96,56 @@ export type ViewerBatchIndexEntry = {
   id: string
   label: string
   base_path: string
+  invoice_count?: number
 }
 
 export type ViewerBatchIndex = {
   batches: ViewerBatchIndexEntry[]
+}
+
+export type ImportedBatchDocument = {
+  document_id: string
+  original_file_name: string
+  stored_file_name: string
+  relative_path: string
+  size_bytes: number
+  status: string
+}
+
+export type ImportedBatch = {
+  batch_id: string
+  label: string
+  source_label?: string
+  created_at: string
+  document_count: number
+  documents: ImportedBatchDocument[]
+}
+
+export type ImportedBatchListPayload = {
+  ok: boolean
+  batch_count: number
+  batches: ImportedBatch[]
+}
+
+export type ImportedBatchImportPayload = {
+  ok: boolean
+  batch: ImportedBatch
+  batch_count: number
+}
+
+export type PendingImportSource = {
+  source_id: string
+  kind: 'files' | 'folder'
+  label: string
+  document_count: number
+  duplicate_key: string
+}
+
+export type PendingImportSourcePayload = {
+  ok: boolean
+  cancelled?: boolean
+  message?: string
+  source?: PendingImportSource
 }
 
 export type InvoiceField = {
@@ -113,6 +160,7 @@ export type InvoiceField = {
   registry_id?: string | null
   registry_source_row?: number | null
   registry_match_group?: string | null
+  registry_replaced_value?: string | null
 }
 
 export type InvoicePage = {
@@ -136,6 +184,7 @@ export type ViewerManifestInvoice = {
 
 export type ViewerInvoice = {
   invoiceId: string
+  manifestInvoiceId?: string
   title: string
   documentId?: string
   variantLabel?: string
@@ -144,6 +193,7 @@ export type ViewerInvoice = {
   ocrProfile?: string | null
   fallbackOcrEventCount?: number
   basePath?: string
+  pageNumbers?: number[]
   pages: InvoicePage[]
   fields: InvoiceField[]
 }

@@ -377,6 +377,12 @@ Per forzare la rigenerazione della build React:
 .\.venv\Scripts\python.exe scripts\run_app.py --rebuild
 ```
 
+Per provare l'app con una cartella dati isolata:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_app.py --data-dir .\runtime-beta-test --rebuild
+```
+
 Per sviluppo frontend puro si puo ancora usare Vite, ma in quel caso il backend
 locale va avviato a parte:
 

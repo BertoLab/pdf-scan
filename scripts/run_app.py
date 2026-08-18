@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import socket
 import subprocess
@@ -11,26 +12,31 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.local_app import VIEWER_DIST_PATH, serve_local_app
-from scripts.registry_api import HOST, PORT
-
-
-VIEWER_SOURCE_PATH = Path("apps") / "viewer" / "src"
-VIEWER_PUBLIC_PATH = Path("apps") / "viewer" / "public"
-VIEWER_PACKAGE_PATH = Path("apps") / "viewer" / "package.json"
-VIEWER_PACKAGE_LOCK_PATH = Path("apps") / "viewer" / "package-lock.json"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
+DATA_DIR_ENV_VAR = "ESTRATTORE_SCAN_DATA_DIR"
+VIEWER_DIST_PATH = PROJECT_ROOT / "apps" / "viewer" / "dist"
+VIEWER_SOURCE_PATH = PROJECT_ROOT / "apps" / "viewer" / "src"
+VIEWER_PUBLIC_PATH = PROJECT_ROOT / "apps" / "viewer" / "public"
+VIEWER_PACKAGE_PATH = PROJECT_ROOT / "apps" / "viewer" / "package.json"
+VIEWER_PACKAGE_LOCK_PATH = PROJECT_ROOT / "apps" / "viewer" / "package-lock.json"
 
 
 def main() -> None:
     args = _parse_args()
+    if args.data_dir:
+        os.environ[DATA_DIR_ENV_VAR] = str(args.data_dir.expanduser().resolve())
+
     if args.rebuild or _viewer_build_is_missing_or_stale():
         _build_viewer()
     else:
         print("Build viewer aggiornata")
 
-    port = _find_available_port(PORT)
-    if port != PORT:
-        print(f"Porta {PORT} occupata, uso http://{HOST}:{port}")
+    from scripts.local_app import serve_local_app
+
+    port = _find_available_port(args.port)
+    if port != args.port:
+        print(f"Porta {args.port} occupata, uso http://{DEFAULT_HOST}:{port}")
     serve_local_app(open_browser=not args.no_browser, port=port)
 
 
@@ -45,6 +51,20 @@ def _parse_args() -> argparse.Namespace:
         "--no-browser",
         action="store_true",
         help="Non aprire automaticamente il browser",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        help=(
+            "Cartella dati persistente da usare al posto di LOCALAPPDATA. "
+            "Utile per test, beta portabile e diagnostica."
+        ),
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"Porta locale preferita. Default: {DEFAULT_PORT}",
     )
     return parser.parse_args()
 
@@ -103,7 +123,7 @@ def _find_available_port(preferred_port: int) -> int:
 def _port_is_available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.2)
-        return probe.connect_ex((HOST, port)) != 0
+        return probe.connect_ex((DEFAULT_HOST, port)) != 0
 
 
 def _resolve_npm_command() -> str:

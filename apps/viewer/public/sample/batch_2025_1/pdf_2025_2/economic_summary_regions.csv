@@ -1,3 +1,0 @@
-﻿source_file,page,score,selected_as_economic_summary,anchor_context,amount_count,amount_context,x1,y1,x2,y2
-data/input/2025/batch_2025_1/pdf_2025_2.pdf,1,115.0,True,totale_fattura|totale_netto_fattura,6,"65,00|14,30|79,30|2,60|65,00|76,70",973,1084,1511,1309
-data/input/2025/batch_2025_1/pdf_2025_2.pdf,2,150.0,True,totale_fattura|ritenuta|ritenuta|totale_netto_fattura,6,"18,91|15,50|0,62|15,50|22,00|18,29",194,1588,1613,2107

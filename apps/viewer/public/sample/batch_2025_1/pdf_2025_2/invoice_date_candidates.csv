@@ -1,5 +1,0 @@
-﻿source_file,page,raw_text,normalized_value,score,selected_as_data_fattura,anchor_context,negative_context,nearby_text,x1,y1,x2,y2
-data/input/2025/batch_2025_1/pdf_2025_2.pdf,1,31/12/2024,2024-12-31,170.0,True,data|fattura|numero_fattura,,Fattura 810/2024 nr. Data: All'attenzione di Condominio Giugno Via 2 n46,1377,360,1496,379
-data/input/2025/batch_2025_1/pdf_2025_2.pdf,1,31/12/2024,2024-12-31,0,False,,entro il,"Totale dovuto DI € CORRISPONDERE 76,70 DA ENTRO IL PAGAMENTO Coordinate Bancarie BCC Castagneto Carducci filiale Bagno Gavorrano di di",754,1375,860,1392
-data/input/2025/batch_2025_1/pdf_2025_2.pdf,2,18/12/2024,2024-12-18,170.0,True,data|numero_fattura,,"90013820536 fiscale: ) x 61 94/CV Ni doo. IBANIT25D0103072240000002726803 Data doc. P, ci) Prezzo Importo Sconti e magg.",1465,888,1600,909
-data/input/2025/batch_2025_1/pdf_2025_2.pdf,2,18/12/2024,2024-12-18,70.0,False,,,"LS (Tipo pagamento Scadenza Importo scadenza Cod. I.V.A. 22 Bonifico 18,29",301,2064,409,2081

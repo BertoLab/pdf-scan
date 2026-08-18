@@ -1,4 +1,0 @@
-﻿source_file,page,target,label_text,value_text,normalized_value,score,selected_as_field,x1,y1,x2,y2,label_x1,label_y1,label_x2,label_y2,value_x1,value_y1,value_x2,value_y2
-data/input/2025/batch_2025_1/pdf_2025_6.pdf,1,totale_fattura,Totale documento,"264,74",264.74,146.77,True,1160,1590,1567,1610,1160,1590,1313,1605,1500,1590,1567,1610
-data/input/2025/batch_2025_1/pdf_2025_6.pdf,1,ritenuta,Ritenuta,"8,68",8.68,191.0,True,1509,1723,1578,1774,1509,1723,1578,1738,1528,1755,1569,1774
-data/input/2025/batch_2025_1/pdf_2025_6.pdf,1,totale_netto_fattura,Importo scadenza,"256,06",256.06,173.23,True,529,1959,678,2075,529,1959,678,1978,610,2055,676,2075

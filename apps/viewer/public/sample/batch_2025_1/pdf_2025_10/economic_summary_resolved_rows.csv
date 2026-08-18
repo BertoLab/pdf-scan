@@ -1,3 +1,0 @@
-﻿source_file,page,totale_imponibile_text,totale_imponibile_value,totale_fattura_text,totale_fattura_value,totale_fattura_source,ritenuta_label_text,ritenuta_text,ritenuta_value,ritenuta_percentuale,ritenuta_source,totale_netto_fattura_text,totale_netto_fattura_value,totale_netto_fattura_source,math_check,notes,x1,y1,x2,y2
-data/input/2025/batch_2025_1/pdf_2025_10.pdf,1,,,"108,50",108.50,direct,,,,,,"128,03",128.03,direct,uncertain,ritenuta_percent_default_4,200,259,1606,2075
-data/input/2025/batch_2025_1/pdf_2025_10.pdf,3,,,,,,Ritenuta d'acconto,"4,80",-4.80,4%,direct,"127,20",127.20,direct,uncertain,ritenuta_percent_default_4,1117,1041,1547,1204
