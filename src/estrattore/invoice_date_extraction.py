@@ -48,13 +48,22 @@ def find_invoice_date_candidates(
 
     for page in document.pages:
         for token in page.tokens:
+            row_tokens = _same_row_tokens(page, token)
             normalized_value = normalize_invoice_date(token.text)
+            if normalized_value is None:
+                normalized_value = _normalize_compact_issue_date(
+                    token.text,
+                    row_tokens,
+                )
             if normalized_value is None:
                 continue
 
             nearby_tokens = _nearby_tokens(page, token)
-            anchor_matches = _invoice_date_anchor_matches(nearby_tokens)
-            negative_context = _negative_date_context(nearby_tokens)
+            row_anchor_matches = _invoice_date_anchor_matches(row_tokens)
+            anchor_matches = row_anchor_matches or _invoice_date_anchor_matches(
+                nearby_tokens
+            )
+            negative_context = _negative_date_context(row_tokens)
             candidates.append(
                 InvoiceDateCandidate(
                     page=page.page_number,
@@ -172,6 +181,25 @@ def normalize_invoice_date(text: str) -> str | None:
     return parsed.isoformat()
 
 
+def _normalize_compact_issue_date(
+    text: str,
+    row_tokens: list[_NearbyToken],
+) -> str | None:
+    """Recover DDMM-YYYY only when its row explicitly identifies an issue date."""
+    row_words = _normalized_context_words(row_tokens)
+    if not _has_issue_date_anchor(row_words):
+        return None
+
+    cleaned = re.sub(r"^[^0-9]+|[^0-9]+$", "", text.strip())
+    match = re.fullmatch(r"(\d{2})(\d{2})[./-](\d{2}|\d{4})", cleaned)
+    if match is None:
+        return None
+
+    return normalize_invoice_date(
+        f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    )
+
+
 def _mark_selected_targets(
     candidates: list[InvoiceDateCandidate],
 ) -> list[InvoiceDateCandidate]:
@@ -211,6 +239,10 @@ def _score_invoice_date(
         score -= 70
     elif negative_context == "riferimento normativo":
         score -= 120
+    elif negative_context == "periodo fatturazione":
+        score -= 90
+    elif negative_context == "data pagamento":
+        score -= 120
 
     return round(max(0, score), 2)
 
@@ -224,6 +256,8 @@ def _invoice_date_anchor_matches(
     matches = _anchor_matches(
         nearby_text,
         anchors=[
+            "data documento",
+            "data doc",
             "data fattura",
             "fattura data",
             "periodo di fatturazione",
@@ -255,21 +289,59 @@ def _has_billing_period_context(words: list[str]) -> bool:
     )
 
 
-def _negative_date_context(nearby_tokens: list[_NearbyToken]) -> str:
-    nearby_text = _normalize_context_text(
-        " ".join(nearby.token.text for nearby in nearby_tokens)
-    )
-    words = nearby_text.split()
-    if _has_adjacent_words(words, "entro", "il"):
+def _negative_date_context(row_tokens: list[_NearbyToken]) -> str:
+    words = _normalized_context_words(row_tokens)
+    has_del = "del" in words
+    if _has_due_date_context(words) and not has_del:
         return "entro il"
 
-    if "entro" in words:
-        return "entro"
+    if _has_payment_execution_context(words):
+        return "data pagamento"
 
     if _has_legal_reference_context(words):
         return "riferimento normativo"
 
+    if _has_billing_period_context(words):
+        return "periodo fatturazione"
+
     return ""
+
+
+def _normalized_context_words(tokens: list[_NearbyToken]) -> list[str]:
+    return _normalize_context_text(
+        " ".join(nearby.token.text for nearby in tokens)
+    ).split()
+
+
+def _has_issue_date_anchor(words: list[str]) -> bool:
+    return (
+        "del" in words
+        or _has_adjacent_words(words, "data", "documento")
+        or _has_adjacent_words(words, "data", "fattura")
+        or _has_adjacent_words(words, "fattura", "data")
+    )
+
+
+def _has_due_date_context(words: list[str]) -> bool:
+    if _has_adjacent_words(words, "entro", "il") or "entroil" in words:
+        return True
+
+    for index in range(len(words)):
+        for width in (1, 2):
+            compact = "".join(words[index : index + width])
+            if not 6 <= len(compact) <= 8:
+                continue
+            if SequenceMatcher(None, compact, "entroil").ratio() >= 0.70:
+                return True
+    return False
+
+
+def _has_payment_execution_context(words: list[str]) -> bool:
+    return (
+        _has_adjacent_words(words, "data", "esecuzione")
+        or _has_adjacent_words(words, "data", "addebito")
+        or _has_words_in_order(words, ["data", "di", "addebito"])
+    )
 
 
 def _has_legal_reference_context(words: list[str]) -> bool:
@@ -354,6 +426,60 @@ def _nearby_tokens(
     )
 
 
+def _same_row_tokens(
+    page: DocumentPage,
+    token: OcrToken,
+    x_radius: float | None = None,
+) -> list[_NearbyToken]:
+    """Return horizontally relevant tokens whose vertical glyph bands overlap."""
+    x_radius = x_radius if x_radius is not None else page.width * 0.45
+    token_center_x = (token.bbox.x1 + token.bbox.x2) / 2
+    token_center_y = (token.bbox.y1 + token.bbox.y2) / 2
+    token_height = max(1.0, token.bbox.y2 - token.bbox.y1)
+    row_tokens: list[_NearbyToken] = []
+
+    for other in page.tokens:
+        if other is token:
+            continue
+
+        other_center_x = (other.bbox.x1 + other.bbox.x2) / 2
+        if abs(other_center_x - token_center_x) > x_radius:
+            continue
+
+        other_center_y = (other.bbox.y1 + other.bbox.y2) / 2
+        other_height = max(1.0, other.bbox.y2 - other.bbox.y1)
+        overlap = max(
+            0.0,
+            min(token.bbox.y2, other.bbox.y2)
+            - max(token.bbox.y1, other.bbox.y1),
+        )
+        overlap_ratio = overlap / min(token_height, other_height)
+        center_tolerance = max(4.0, min(token_height, other_height) * 0.75)
+        if (
+            overlap_ratio < 0.35
+            and abs(other_center_y - token_center_y) > center_tolerance
+        ):
+            continue
+
+        row_tokens.append(
+            _NearbyToken(
+                token=other,
+                distance_n=_normalized_distance(
+                    page=page,
+                    first_x=token_center_x,
+                    first_y=token_center_y,
+                    second_x=other_center_x,
+                    second_y=other_center_y,
+                ),
+            )
+        )
+
+    return sorted(
+        row_tokens,
+        key=lambda item: (item.token.bbox.x1, item.token.bbox.y1),
+    )
+
+
 def _normalized_distance(
     page: DocumentPage,
     first_x: float,
@@ -412,10 +538,13 @@ def _min_similarity_for_anchor(anchor: str) -> float:
 
 def _anchor_score(anchor: str, similarity: float) -> float:
     if anchor == "del":
-        return similarity * 30
+        return similarity * 60
 
     if anchor == "fattura":
         return similarity * 60
+
+    if anchor in {"periodo di fatturazione", "periodo fatturazione"}:
+        return similarity * 35
 
     return similarity * 100
 

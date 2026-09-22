@@ -8,6 +8,7 @@ build/
 *.egg
 .pytest_cache/
 .pytest-tmp/
+*-test-manual/
 
 # Virtual environments
 venv/

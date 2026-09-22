@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from itertools import combinations
 from pathlib import Path
 import re
 
@@ -21,6 +22,7 @@ MIN_SELECTED_SCORE = 120.0
 MIN_CANDIDATE_TOKEN_HEIGHT = 4
 MIN_CANDIDATE_TOKEN_WIDTH = 4
 MIN_CANDIDATE_TOKEN_AREA = 24
+BASE_CANDIDATE_SCORE = 50.0
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,7 @@ class InvoiceNumberCandidate:
     score: float
     selected_as_numero_fattura: bool
     anchor_context: str
+    anchor_quality: int
     date_context: str
     excluded_reason: str
     nearby_text: str
@@ -44,6 +47,8 @@ class _AnchorMatch:
     score: float
     exact: bool
     distance_n: float
+    spatial_relation: str
+    geometry_score: float
 
 
 @dataclass(frozen=True)
@@ -53,6 +58,8 @@ class _NearbyWord:
     distance_n: float
     y1: int
     x1: int
+    y2: int
+    x2: int
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,7 @@ def find_invoice_number_candidates(
 
             nearby_tokens = _nearby_tokens(page, token)
             anchor_matches = _invoice_number_anchor_matches(token, nearby_tokens)
+            anchor_quality = _anchor_match_quality(anchor_matches)
             date_context = _invoice_date_context(nearby_tokens)
             excluded_reason = _excluded_reason(
                 page=page,
@@ -98,12 +106,12 @@ def find_invoice_number_candidates(
                     format_kind=format_kind,
                     bbox=token.bbox,
                     score=_score_invoice_number(
-                        format_kind,
                         anchor_matches,
                         date_context=date_context,
                     ),
                     selected_as_numero_fattura=False,
                     anchor_context=_format_anchor_matches(anchor_matches),
+                    anchor_quality=anchor_quality,
                     date_context=date_context,
                     excluded_reason=excluded_reason,
                     nearby_text=" ".join(
@@ -122,11 +130,20 @@ def select_invoice_number_target_per_page(
     selected: dict[int, InvoiceNumberCandidate] = {}
 
     for page in sorted({candidate.page for candidate in candidates}):
-        page_candidates = [
+        eligible_page_candidates = [
             candidate
             for candidate in candidates
-            if candidate.page == page and candidate.score >= min_score
+            if candidate.page == page
+            and candidate.score >= min_score
             and candidate.excluded_reason == ""
+        ]
+        dominated_fragments, composition_evidence = _fragment_composition_evidence(
+            eligible_page_candidates
+        )
+        page_candidates = [
+            candidate
+            for candidate in eligible_page_candidates
+            if candidate not in dominated_fragments
         ]
         if not page_candidates:
             continue
@@ -134,6 +151,11 @@ def select_invoice_number_target_per_page(
         selected[page] = max(
             page_candidates,
             key=lambda candidate: (
+                composition_evidence.get(
+                    candidate,
+                    (candidate.anchor_quality, candidate.score),
+                ),
+                candidate.anchor_quality,
                 candidate.score,
                 -candidate.bbox.y1,
                 -candidate.bbox.x1,
@@ -141,6 +163,93 @@ def select_invoice_number_target_per_page(
         )
 
     return selected
+
+
+def _fragment_composition_evidence(
+    candidates: list[InvoiceNumberCandidate],
+) -> tuple[
+    set[InvoiceNumberCandidate],
+    dict[InvoiceNumberCandidate, tuple[int, float]],
+]:
+    dominated: set[InvoiceNumberCandidate] = set()
+    evidence: dict[InvoiceNumberCandidate, tuple[int, float]] = {}
+
+    for complete in candidates:
+        fragments = [
+            candidate
+            for candidate in candidates
+            if candidate != complete
+            and _is_strictly_inside_candidate(candidate, complete)
+        ]
+        for fragment_count in range(2, min(4, len(fragments)) + 1):
+            for fragment_group in combinations(fragments, fragment_count):
+                ordered = sorted(fragment_group, key=lambda candidate: candidate.bbox.x1)
+                if not _fragments_reconstruct_complete_candidate(ordered, complete):
+                    continue
+                dominated.update(ordered)
+                evidence[complete] = max(
+                    evidence.get(
+                        complete,
+                        (complete.anchor_quality, complete.score),
+                    ),
+                    *(
+                        (fragment.anchor_quality, fragment.score)
+                        for fragment in ordered
+                    ),
+                )
+                break
+            else:
+                continue
+            break
+
+    return dominated, evidence
+
+
+def _is_strictly_inside_candidate(
+    fragment: InvoiceNumberCandidate,
+    complete: InvoiceNumberCandidate,
+) -> bool:
+    fragment_width = fragment.bbox.x2 - fragment.bbox.x1
+    complete_width = complete.bbox.x2 - complete.bbox.x1
+    if fragment_width >= complete_width:
+        return False
+
+    tolerance = max(2, round((complete.bbox.y2 - complete.bbox.y1) * 0.15))
+    return (
+        fragment.bbox.x1 >= complete.bbox.x1 - tolerance
+        and fragment.bbox.x2 <= complete.bbox.x2 + tolerance
+        and fragment.bbox.y1 >= complete.bbox.y1 - tolerance
+        and fragment.bbox.y2 <= complete.bbox.y2 + tolerance
+    )
+
+
+def _fragments_reconstruct_complete_candidate(
+    fragments: list[InvoiceNumberCandidate],
+    complete: InvoiceNumberCandidate,
+) -> bool:
+    if "".join(fragment.normalized_value for fragment in fragments) != complete.normalized_value:
+        return False
+
+    complete_height = max(1, complete.bbox.y2 - complete.bbox.y1)
+    edge_tolerance = max(3, round(complete_height * 0.25))
+    if (
+        abs(fragments[0].bbox.x1 - complete.bbox.x1) > edge_tolerance
+        or abs(fragments[-1].bbox.x2 - complete.bbox.x2) > edge_tolerance
+    ):
+        return False
+
+    max_gap = max(4, round(complete_height * 0.5))
+    for left, right in zip(fragments, fragments[1:]):
+        gap = right.bbox.x1 - left.bbox.x2
+        if gap < -edge_tolerance or gap > max_gap:
+            return False
+
+        left_center_y = (left.bbox.y1 + left.bbox.y2) / 2
+        right_center_y = (right.bbox.y1 + right.bbox.y2) / 2
+        if abs(left_center_y - right_center_y) > complete_height * 0.35:
+            return False
+
+    return True
 
 
 def save_invoice_number_candidates_csv(
@@ -216,6 +325,7 @@ def _mark_selected_targets(
                 score=candidate.score,
                 selected_as_numero_fattura=selected.get(candidate.page) == candidate,
                 anchor_context=candidate.anchor_context,
+                anchor_quality=candidate.anchor_quality,
                 date_context=candidate.date_context,
                 excluded_reason=candidate.excluded_reason,
                 nearby_text=candidate.nearby_text,
@@ -281,29 +391,15 @@ def _looks_like_date(value: str) -> bool:
 
 
 def _score_invoice_number(
-    format_kind: str,
     anchor_matches: list[_AnchorMatch],
     date_context: str,
 ) -> float:
     date_bonus = 24.0 if date_context else 0.0
     if not anchor_matches:
-        return _format_score(format_kind) + date_bonus
+        return BASE_CANDIDATE_SCORE + date_bonus
 
     anchor_score = min(sum(match.score for match in anchor_matches), 135.0)
-    return round(_format_score(format_kind) + anchor_score + date_bonus, 2)
-
-
-def _format_score(format_kind: str) -> float:
-    if format_kind == "slash_progressivo":
-        return 70.0
-
-    if format_kind == "slash_alfanumerico":
-        return 75.0
-
-    if format_kind == "progressivo_numerico":
-        return 35.0
-
-    return 60.0
+    return round(BASE_CANDIDATE_SCORE + anchor_score + date_bonus, 2)
 
 
 def _has_implausible_invoice_number_bbox(token: OcrToken) -> bool:
@@ -485,6 +581,8 @@ def _nearby_words(nearby_tokens: list[_NearbyToken]) -> list[_NearbyWord]:
                     distance_n=nearby.distance_n,
                     y1=nearby.token.bbox.y1,
                     x1=nearby.token.bbox.x1,
+                    y2=nearby.token.bbox.y2,
+                    x2=nearby.token.bbox.x2,
                 )
             )
 
@@ -503,17 +601,19 @@ def _anchor_matches(
     matches = []
 
     for anchor in anchors:
-        best_similarity, exact, distance, anchor_is_before_candidate = _best_anchor_similarity(
-            candidate_token,
-            nearby_words,
-            anchor,
-        )
+        (
+            best_similarity,
+            exact,
+            distance,
+            spatial_relation,
+            geometry_score,
+        ) = _best_anchor_similarity(candidate_token, nearby_words, anchor)
         if best_similarity >= _min_similarity_for_anchor(anchor):
             proximity_score = _proximity_adjusted_score(
                 anchor=anchor,
                 similarity=best_similarity,
-                distance_n=distance,
-                anchor_is_before_candidate=anchor_is_before_candidate,
+                exact=exact,
+                geometry_score=geometry_score,
             )
             if proximity_score <= 0:
                 continue
@@ -523,50 +623,200 @@ def _anchor_matches(
                     score=round(proximity_score, 2),
                     exact=exact,
                     distance_n=distance,
+                    spatial_relation=spatial_relation,
+                    geometry_score=geometry_score,
                 )
             )
 
     return matches
 
 
+def _anchor_match_quality(matches: list[_AnchorMatch]) -> int:
+    if not matches:
+        return 0
+
+    best_quality = 0
+    for match in matches:
+        word_count = len(match.label.split())
+        is_specific_anchor = word_count >= 2
+        if match.exact and is_specific_anchor:
+            best_quality = max(best_quality, 4)
+        elif is_specific_anchor:
+            best_quality = max(best_quality, 2)
+        elif match.exact:
+            best_quality = max(best_quality, 1)
+
+    return best_quality
+
+
 def _best_anchor_similarity(
     candidate_token: OcrToken,
     nearby_words: list[_NearbyWord],
     anchor: str,
-) -> tuple[float, bool, float, bool]:
+) -> tuple[float, bool, float, str, float]:
     anchor_words = anchor.split()
     if len(nearby_words) < len(anchor_words):
-        return 0.0, False, 1.0, False
+        return 0.0, False, 1.0, "", 0.0
 
     best_similarity = 0.0
     best_exact = False
     best_distance = 1.0
-    best_anchor_is_before_candidate = False
+    best_spatial_relation = ""
+    best_geometry_score = 0.0
     for index in range(len(nearby_words) - len(anchor_words) + 1):
         window_words = nearby_words[index : index + len(anchor_words)]
         window = " ".join(word.word for word in window_words)
         similarity = SequenceMatcher(None, window, anchor).ratio()
         distance = min(word.distance_n for word in window_words)
-        exact = window == anchor
-        candidate_height = candidate_token.bbox.y2 - candidate_token.bbox.y1
-        same_visual_line = abs(
-            min(word.y1 for word in window_words) - candidate_token.bbox.y1
-        ) <= max(28, candidate_height * 1.25)
-        anchor_is_before_candidate = (
-            max(word.x1 for word in window_words) < candidate_token.bbox.x1
-            and same_visual_line
+        spatial_relation, geometry_score = _anchor_geometry(
+            candidate_token,
+            window_words,
+            distance_n=distance,
         )
-        if (similarity, exact, -distance) > (
-            best_similarity,
+        exact = window == anchor
+        if (exact, similarity, geometry_score, -distance) > (
             best_exact,
+            best_similarity,
+            best_geometry_score,
             -best_distance,
         ):
             best_similarity = similarity
             best_exact = exact
             best_distance = distance
-            best_anchor_is_before_candidate = anchor_is_before_candidate
+            best_spatial_relation = spatial_relation
+            best_geometry_score = geometry_score
 
-    return best_similarity, best_exact, best_distance, best_anchor_is_before_candidate
+    return (
+        best_similarity,
+        best_exact,
+        best_distance,
+        best_spatial_relation,
+        best_geometry_score,
+    )
+
+
+def _anchor_geometry(
+    candidate_token: OcrToken,
+    anchor_words: list[_NearbyWord],
+    distance_n: float,
+) -> tuple[str, float]:
+    if not anchor_words:
+        return "", 0.0
+
+    anchor_x1 = min(word.x1 for word in anchor_words)
+    anchor_y1 = min(word.y1 for word in anchor_words)
+    anchor_x2 = max(word.x2 for word in anchor_words)
+    anchor_y2 = max(word.y2 for word in anchor_words)
+    candidate = candidate_token.bbox
+
+    anchor_height = max(1, anchor_y2 - anchor_y1)
+    candidate_height = max(1, candidate.y2 - candidate.y1)
+    anchor_center_x = (anchor_x1 + anchor_x2) / 2
+    anchor_center_y = (anchor_y1 + anchor_y2) / 2
+    candidate_center_x = (candidate.x1 + candidate.x2) / 2
+    candidate_center_y = (candidate.y1 + candidate.y2) / 2
+
+    vertical_projection_gap = _interval_gap(
+        anchor_y1,
+        anchor_y2,
+        candidate.y1,
+        candidate.y2,
+    )
+    row_tolerance = max(3.0, min(anchor_height, candidate_height) * 0.35)
+    same_row = vertical_projection_gap <= row_tolerance
+
+    if same_row and candidate_center_x >= anchor_center_x:
+        relation = "same_row_after"
+        axis_alignment = _projection_alignment(
+            anchor_y1,
+            anchor_y2,
+            candidate.y1,
+            candidate.y2,
+        )
+        direction_score = 1.0
+        alignment_evidence = axis_alignment
+    elif same_row:
+        relation = "same_row_before"
+        axis_alignment = _projection_alignment(
+            anchor_y1,
+            anchor_y2,
+            candidate.y1,
+            candidate.y2,
+        )
+        direction_score = 0.15
+        alignment_evidence = axis_alignment * 0.15
+    elif candidate_center_y > anchor_center_y:
+        relation = "below"
+        axis_alignment = _projection_alignment(
+            anchor_x1,
+            anchor_x2,
+            candidate.x1,
+            candidate.x2,
+        )
+        direction_score = 0.9
+        alignment_evidence = 0.2 + axis_alignment * 0.8
+    else:
+        relation = "above"
+        axis_alignment = _projection_alignment(
+            anchor_x1,
+            anchor_x2,
+            candidate.x1,
+            candidate.x2,
+        )
+        direction_score = 0.1
+        alignment_evidence = axis_alignment * 0.15
+
+    proximity_score = max(0.0, 1.0 - min(distance_n / 0.28, 1.0))
+    phrase_coherence = _anchor_phrase_row_coherence(anchor_words)
+    if relation in {"same_row_after", "below"}:
+        geometry_score = (
+            0.08
+            + proximity_score * 0.25
+            + alignment_evidence * 0.52
+            + direction_score * 0.15
+        )
+    else:
+        geometry_score = (
+            0.03
+            + proximity_score * 0.10
+            + alignment_evidence * 0.20
+            + direction_score * 0.05
+        )
+    geometry_score *= 0.35 + phrase_coherence * 0.65
+    return relation, round(min(max(geometry_score, 0.0), 1.0), 4)
+
+
+def _projection_alignment(
+    first_start: int,
+    first_end: int,
+    second_start: int,
+    second_end: int,
+) -> float:
+    gap = _interval_gap(first_start, first_end, second_start, second_end)
+    first_size = max(1, first_end - first_start)
+    second_size = max(1, second_end - second_start)
+    scale = max(4.0, min(first_size, second_size) * 0.5)
+    return max(0.0, 1.0 - gap / (scale * 2.0))
+
+
+def _interval_gap(
+    first_start: int,
+    first_end: int,
+    second_start: int,
+    second_end: int,
+) -> float:
+    return float(max(first_start - second_end, second_start - first_end, 0))
+
+
+def _anchor_phrase_row_coherence(words: list[_NearbyWord]) -> float:
+    if len(words) <= 1:
+        return 1.0
+
+    heights = [max(1, word.y2 - word.y1) for word in words]
+    centers_y = [(word.y1 + word.y2) / 2 for word in words]
+    spread = max(centers_y) - min(centers_y)
+    scale = max(4.0, max(heights) * 2.0)
+    return max(0.0, 1.0 - spread / scale)
 
 
 def _min_similarity_for_anchor(anchor: str) -> float:
@@ -583,35 +833,17 @@ def _min_similarity_for_anchor(anchor: str) -> float:
 def _proximity_adjusted_score(
     anchor: str,
     similarity: float,
-    distance_n: float,
-    anchor_is_before_candidate: bool,
+    exact: bool,
+    geometry_score: float,
 ) -> float:
-    if anchor in {"n", "nr", "numero"} and not anchor_is_before_candidate:
-        return 0.0
-
-    if anchor == "fattura" and not _is_usable_single_fattura_anchor(
-        distance_n=distance_n,
-        anchor_is_before_candidate=anchor_is_before_candidate,
-    ):
-        return 0.0
-
-    max_distance_n = 0.28
-    distance_factor = max(0.55, 1 - min(distance_n / max_distance_n, 1) * 0.45)
     anchor_weight = _anchor_weight(anchor)
-    reading_order_bonus = 18.0 if anchor_is_before_candidate and anchor not in {"n", "nr"} else 0.0
-    return anchor_weight * similarity * distance_factor + reading_order_bonus
-
-
-def _is_usable_single_fattura_anchor(
-    distance_n: float,
-    anchor_is_before_candidate: bool,
-) -> bool:
-    return anchor_is_before_candidate or distance_n <= 0.035
+    exact_bonus = 12.0 if exact else 0.0
+    return anchor_weight * similarity * geometry_score + exact_bonus
 
 
 def _anchor_weight(anchor: str) -> float:
     if anchor == "fattura":
-        return 60.0
+        return 66.0
 
     if anchor in {"n", "nr"}:
         return 45.0
@@ -626,9 +858,9 @@ def _deduplicate_anchor_matches(matches: list[_AnchorMatch]) -> list[_AnchorMatc
     best_by_label = {}
     for match in matches:
         current = best_by_label.get(match.label)
-        if current is None or (match.score, match.exact) > (
-            current.score,
+        if current is None or (match.exact, match.score) > (
             current.exact,
+            current.score,
         ):
             best_by_label[match.label] = match
 

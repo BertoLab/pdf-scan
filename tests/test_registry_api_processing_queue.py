@@ -8,13 +8,14 @@ from pathlib import Path
 import shutil
 import uuid
 
-from estrattore.batch_storage import import_pdf_batch
+from estrattore.batch_storage import import_pdf_batch, load_batch_index
 from estrattore.processing_storage import (
     ProcessingRunIndex,
     ReviewBatchRef,
     mark_document_processing_complete,
 )
 from estrattore.runtime_paths import get_runtime_paths
+from estrattore.source_archive_storage import promote_batch_sources
 import scripts.registry_api as registry_api
 
 
@@ -22,6 +23,71 @@ def _workspace() -> Path:
     root = Path("registry-api-queue-test-manual") / uuid.uuid4().hex
     root.mkdir(parents=True)
     return root
+
+
+def test_recovers_creation_date_from_legacy_process_id() -> None:
+    assert registry_api._recover_legacy_processing_job_created_at(
+        {"process_id": "process_20260812_101713_job_000001"}
+    ) == "2026-08-12T10:17:13"
+    assert registry_api._recover_legacy_processing_job_created_at(
+        {"process_id": "process_resume_job_000001"}
+    ) == ""
+
+
+def test_runtime_recovers_review_mutations_before_cleanup_and_review_rebuild(
+    monkeypatch,
+) -> None:
+    workspace = _workspace()
+    try:
+        runtime_paths = get_runtime_paths(workspace / "app-data")
+        startup_events: list[str] = []
+
+        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", runtime_paths)
+        monkeypatch.setattr(registry_api, "_REGISTRY_RUNTIME_READY", False)
+        monkeypatch.setattr(
+            registry_api,
+            "cleanup_stale_atomic_write_files",
+            lambda _paths: startup_events.append("cleanup_atomic_writes") or [],
+        )
+        monkeypatch.setattr(
+            registry_api,
+            "recover_review_mutations",
+            lambda _paths: startup_events.append("recover_mutations"),
+        )
+        monkeypatch.setattr(
+            registry_api,
+            "cleanup_incomplete_processing_runs",
+            lambda _paths, **_kwargs: startup_events.append("cleanup") or [],
+        )
+        monkeypatch.setattr(
+            registry_api,
+            "retire_completed_review_batches",
+            lambda _paths: startup_events.append("retire_reviews") or [],
+        )
+        monkeypatch.setattr(
+            registry_api,
+            "recover_missing_review_batches",
+            lambda _paths: startup_events.append("recover_reviews"),
+        )
+        monkeypatch.setattr(
+            registry_api,
+            "reconcile_feedback_operations",
+            lambda _records, _paths: startup_events.append("recover_feedback_edits"),
+        )
+        monkeypatch.setattr(registry_api, "_start_next_processing_job_if_idle", lambda: None)
+
+        registry_api.ensure_registry_runtime_ready()
+
+        assert startup_events == [
+            "cleanup_atomic_writes",
+            "recover_mutations",
+            "recover_feedback_edits",
+            "cleanup",
+            "retire_reviews",
+            "recover_reviews",
+        ]
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
 
 
 def test_processing_jobs_run_serially(monkeypatch) -> None:
@@ -100,6 +166,9 @@ def test_processing_jobs_run_serially(monkeypatch) -> None:
         assert started_batches == [batch_a.batch_id, batch_b.batch_id]
         assert registry_api._processing_job(first_job["job_id"])["status"] == "completed"
         assert registry_api._processing_job(second_job["job_id"])["status"] == "completed"
+        assert not (runtime_paths.batches_dir / batch_a.batch_id).exists()
+        assert not (runtime_paths.batches_dir / batch_b.batch_id).exists()
+        assert len(list(runtime_paths.archive_sources_dir.glob("*.pdf"))) == 2
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
@@ -120,7 +189,7 @@ def test_processing_jobs_load_persistent_queue_after_restart(monkeypatch) -> Non
                         {
                             "ok": True,
                             "job_id": "job_000001",
-                            "process_id": "process_resume_job_000001",
+                            "process_id": "process_20260811_100000_job_000001",
                             "batch_id": "batch_a",
                             "status": "processing",
                             "message": "Processamento OCR in corso",
@@ -156,8 +225,67 @@ def test_processing_jobs_load_persistent_queue_after_restart(monkeypatch) -> Non
         queued_job = registry_api._processing_job("job_000002")
         assert interrupted_job["status"] == "queued"
         assert "Ripresa" in interrupted_job["message"]
+        assert interrupted_job["created_at"] == "2026-08-11T10:00:00"
         assert queued_job["status"] == "queued"
         assert registry_api.PROCESSING_JOB_QUEUE == ["job_000001", "job_000002"]
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_processing_jobs_migrate_legacy_pause_and_interrupted_cancel(monkeypatch) -> None:
+    workspace = _workspace()
+    try:
+        runtime_paths = get_runtime_paths(workspace / "app-data")
+        runtime_paths.ensure_directories()
+        cancelled_process_dir = runtime_paths.manifests_dir / "process_cancel"
+        cancelled_process_dir.mkdir(parents=True)
+        (cancelled_process_dir / "partial.txt").write_text("partial", encoding="utf-8")
+        paused_process_dir = runtime_paths.manifests_dir / "process_pause"
+        paused_process_dir.mkdir(parents=True)
+        (paused_process_dir / "partial.txt").write_text("partial", encoding="utf-8")
+        jobs_file = runtime_paths.config_dir / "processing_jobs.json"
+        jobs_file.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "jobs": [
+                        {
+                            "job_id": "job_pause",
+                            "process_id": "process_pause",
+                            "batch_id": "batch_a",
+                            "status": "pausing",
+                            "pause_requested": True,
+                            "cancel_requested": False,
+                        },
+                        {
+                            "job_id": "job_cancel",
+                            "process_id": "process_cancel",
+                            "batch_id": "batch_b",
+                            "status": "cancelling",
+                            "pause_requested": False,
+                            "cancel_requested": True,
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", runtime_paths)
+        monkeypatch.setattr(registry_api, "PROCESSING_JOBS", {})
+        monkeypatch.setattr(registry_api, "PROCESSING_JOB_QUEUE", [])
+        monkeypatch.setattr(registry_api, "PROCESSING_ACTIVE_JOB_ID", None)
+
+        registry_api._load_processing_jobs_from_disk()
+
+        migrated_pause = registry_api._processing_job("job_pause")
+        cancelled = registry_api._processing_job("job_cancel")
+        assert migrated_pause["status"] == "cancelled"
+        assert "pause_requested" not in migrated_pause
+        assert cancelled["status"] == "cancelled"
+        assert not paused_process_dir.exists()
+        assert not cancelled_process_dir.exists()
+        assert registry_api.PROCESSING_JOB_QUEUE == []
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
@@ -276,7 +404,7 @@ def test_processing_time_estimate_ignores_resumed_documents(monkeypatch) -> None
         shutil.rmtree(workspace, ignore_errors=True)
 
 
-def test_pause_queued_processing_job_removes_it_from_queue(monkeypatch) -> None:
+def test_active_processing_job_uses_durable_cancelling_state(monkeypatch) -> None:
     workspace = _workspace()
     try:
         runtime_paths = get_runtime_paths(workspace / "app-data")
@@ -285,55 +413,51 @@ def test_pause_queued_processing_job_removes_it_from_queue(monkeypatch) -> None:
             registry_api,
             "PROCESSING_JOBS",
             {
-                "job_000001": {
-                    "job_id": "job_000001",
-                    "batch_id": "batch_a",
-                    "status": "queued",
+                "job_cancel": {
+                    "job_id": "job_cancel",
+                    "batch_id": "batch_b",
+                    "status": "processing",
                     "cancel_requested": False,
-                    "pause_requested": False,
-                }
+                },
             },
         )
-        monkeypatch.setattr(registry_api, "PROCESSING_JOB_QUEUE", ["job_000001"])
 
-        job = registry_api._pause_processing_job("/processing/jobs/job_000001/pause")
+        cancelled = registry_api._cancel_processing_job(
+            "/processing/jobs/job_cancel/cancel"
+        )
 
-        assert job["status"] == "paused"
-        assert registry_api.PROCESSING_JOB_QUEUE == []
+        assert cancelled["status"] == "cancelling"
+        assert cancelled["cancel_requested"] is True
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
 
-def test_resume_paused_processing_job_puts_it_back_in_queue(monkeypatch) -> None:
-    workspace = _workspace()
+def test_queued_processing_job_must_be_removed_instead_of_cancelled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        registry_api,
+        "PROCESSING_JOBS",
+        {
+            "job_000001": {
+                "job_id": "job_000001",
+                "batch_id": "batch_a",
+                "status": "queued",
+                "cancel_requested": False,
+            }
+        },
+    )
+    monkeypatch.setattr(registry_api, "PROCESSING_JOB_QUEUE", ["job_000001"])
+
     try:
-        runtime_paths = get_runtime_paths(workspace / "app-data")
-        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", runtime_paths)
-        monkeypatch.setattr(
-            registry_api,
-            "PROCESSING_JOBS",
-            {
-                "job_000001": {
-                    "job_id": "job_000001",
-                    "batch_id": "batch_a",
-                    "status": "paused",
-                    "cancel_requested": False,
-                    "pause_requested": False,
-                }
-            },
-        )
-        monkeypatch.setattr(registry_api, "PROCESSING_JOB_QUEUE", [])
-        monkeypatch.setattr(registry_api, "PROCESSING_ACTIVE_JOB_ID", "job_active")
+        registry_api._cancel_processing_job("/processing/jobs/job_000001/cancel")
+    except ValueError as error:
+        assert "Rimuovi dalla coda" in str(error)
+    else:
+        raise AssertionError("Expected queued job cancellation to be rejected")
 
-        job = registry_api._resume_processing_job("/processing/jobs/job_000001/resume")
-
-        assert job["status"] == "queued"
-        assert registry_api.PROCESSING_JOB_QUEUE == ["job_000001"]
-    finally:
-        shutil.rmtree(workspace, ignore_errors=True)
+    assert registry_api.PROCESSING_JOB_QUEUE == ["job_000001"]
 
 
-def test_remove_queued_processing_job_does_not_delete_imported_batch(monkeypatch) -> None:
+def test_remove_queued_processing_job_deletes_temporary_batch(monkeypatch) -> None:
     workspace = _workspace()
     try:
         runtime_paths = get_runtime_paths(workspace / "app-data")
@@ -355,7 +479,6 @@ def test_remove_queued_processing_job_does_not_delete_imported_batch(monkeypatch
                     "batch_id": batch.batch_id,
                     "status": "queued",
                     "cancel_requested": False,
-                    "pause_requested": False,
                 }
             },
         )
@@ -363,9 +486,336 @@ def test_remove_queued_processing_job_does_not_delete_imported_batch(monkeypatch
 
         job = registry_api._remove_processing_job("/processing/jobs/job_000001/remove")
 
-        assert job["status"] == "removed"
+        assert job["status"] == "cancelled"
         assert registry_api.PROCESSING_JOB_QUEUE == []
-        assert (runtime_paths.batches_dir / batch.batch_id).is_dir()
+        assert not (runtime_paths.batches_dir / batch.batch_id).exists()
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_delete_processing_history_removes_only_terminal_metadata(monkeypatch) -> None:
+    workspace = _workspace()
+    try:
+        runtime_paths = get_runtime_paths(workspace / "app-data")
+        runtime_paths.ensure_directories()
+        archived_pdf = runtime_paths.archive_sources_dir / "source.pdf"
+        archived_pdf.write_bytes(b"%PDF-source")
+        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", runtime_paths)
+        monkeypatch.setattr(
+            registry_api,
+            "PROCESSING_JOBS",
+            {
+                "job_done": {"job_id": "job_done", "status": "completed"},
+                "job_active": {"job_id": "job_active", "status": "processing"},
+            },
+        )
+        monkeypatch.setattr(registry_api, "PROCESSING_JOB_QUEUE", [])
+
+        result = registry_api._delete_processing_history(
+            {"job_ids": ["job_done", "job_active"]}
+        )
+
+        assert result["deleted_count"] == 1
+        assert "job_done" not in registry_api.PROCESSING_JOBS
+        assert "job_active" in registry_api.PROCESSING_JOBS
+        assert archived_pdf.is_file()
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_finalizing_job_is_completed_without_restarting_ocr(monkeypatch) -> None:
+    workspace = _workspace()
+    try:
+        runtime_paths = get_runtime_paths(workspace / "app-data")
+        source = workspace / "source.pdf"
+        source.write_bytes(b"%PDF-source")
+        batch = import_pdf_batch([source], runtime_paths=runtime_paths)
+        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", runtime_paths)
+        monkeypatch.setattr(
+            registry_api,
+            "PROCESSING_JOBS",
+            {
+                "job_finalizing": {
+                    "job_id": "job_finalizing",
+                    "batch_id": batch.batch_id,
+                    "process_id": "process_finalizing",
+                    "status": "finalizing",
+                    "files": [],
+                    "result": {"invoice_count": 1},
+                }
+            },
+        )
+        monkeypatch.setattr(registry_api, "PROCESSING_JOB_QUEUE", [])
+
+        registry_api._reconcile_finalizing_jobs()
+
+        job = registry_api._processing_job("job_finalizing")
+        assert job["status"] == "completed"
+        assert job["result"] == {"invoice_count": 1}
+        assert not (runtime_paths.batches_dir / batch.batch_id).exists()
+        assert len(list(runtime_paths.archive_sources_dir.glob("*.pdf"))) == 1
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_source_used_by_pending_review_cannot_be_deleted(monkeypatch) -> None:
+    workspace = _workspace()
+    try:
+        runtime_paths = get_runtime_paths(workspace / "app-data")
+        source = workspace / "source.pdf"
+        source.write_bytes(b"%PDF-source")
+        batch = import_pdf_batch([source], runtime_paths=runtime_paths)
+        archived = promote_batch_sources(batch, "process_pending", runtime_paths)[0]
+        review_dir = runtime_paths.manifests_dir / "_review_queue" / "review_0001"
+        review_dir.mkdir(parents=True)
+        (review_dir / "review_batch_index.json").write_text(
+            json.dumps(
+                {
+                    "invoices": [
+                        {
+                            "status": "pending",
+                            "source_batch_id": batch.batch_id,
+                            "document_id": batch.documents[0].document_id,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", runtime_paths)
+
+        try:
+            registry_api._reject_sources_used_by_pending_reviews([archived])
+        except ValueError as error:
+            assert "ancora da revisionare" in str(error)
+        else:
+            raise AssertionError("Expected pending source deletion to be rejected")
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_source_used_by_nonterminal_reprocessing_job_cannot_be_deleted(
+    monkeypatch,
+) -> None:
+    workspace = _workspace()
+    try:
+        runtime_paths = get_runtime_paths(workspace / "app-data")
+        source = workspace / "source.pdf"
+        source.write_bytes(b"%PDF-source")
+        batch = import_pdf_batch([source], runtime_paths=runtime_paths)
+        archived = promote_batch_sources(batch, "process_original", runtime_paths)[0]
+        monkeypatch.setattr(registry_api, "PROCESSING_JOBS", {})
+
+        for status in ("queued", "processing", "cancelling", "finalizing"):
+            registry_api.PROCESSING_JOBS["job_reprocess"] = {
+                "status": status,
+                "source_archive_bindings": {"doc_000001": archived.source_id},
+            }
+
+            try:
+                registry_api._reject_sources_used_by_processing_jobs([archived])
+            except ValueError as error:
+                assert "Annulla o rimuovi" in str(error)
+            else:
+                raise AssertionError(f"Expected deletion rejection for {status}")
+
+        registry_api.PROCESSING_JOBS["job_reprocess"]["status"] = "completed"
+        registry_api._reject_sources_used_by_processing_jobs([archived])
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_invoice_library_reprocessing_preserves_lineage_and_skips_source_archive(
+    monkeypatch,
+) -> None:
+    workspace = _workspace()
+    try:
+        runtime_paths = get_runtime_paths(workspace / "app-data")
+        runtime_paths.ensure_directories()
+        invoice_pdf = runtime_paths.archive_invoices_dir / "discarded.pdf"
+        invoice_pdf.write_bytes(b"%PDF-invoice")
+        runtime_paths.invoice_registry_file.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "records": [
+                        {
+                            "record_id": "discarded-record",
+                            "status": "discarded",
+                            "source_file_name": "origine.pdf",
+                            "archived_pdf_path": "archive/invoices/discarded.pdf",
+                            "archived_pdf_page_numbers": [4, 7],
+                            "invoice": {"fields": []},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        captured_payload: dict = {}
+
+        def fake_start_processing_job(payload: dict) -> dict:
+            captured_payload.update(payload)
+            return {"job_id": "job_invoice", **payload}
+
+        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", runtime_paths)
+        monkeypatch.setattr(
+            registry_api,
+            "_start_processing_job",
+            fake_start_processing_job,
+        )
+
+        registry_api._reprocess_archived_invoices(
+            {"record_ids": ["discarded-record"]}
+        )
+
+        batch = load_batch_index(
+            runtime_paths.batches_dir / str(captured_payload["batch_id"])
+        )
+        assert captured_payload["source_kind"] == "discarded_invoice"
+        assert captured_payload["archive_sources"] is False
+        assert captured_payload["parent_invoice_record_ids"] == ["discarded-record"]
+        assert batch.documents[0].original_file_name == "origine.pdf"
+        assert batch.documents[0].parent_invoice_record_id == "discarded-record"
+        assert batch.documents[0].source_page_numbers == (4, 7)
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_invoice_library_reprocessing_removes_staging_if_job_start_fails(
+    monkeypatch,
+) -> None:
+    workspace = _workspace()
+    try:
+        runtime_paths = get_runtime_paths(workspace / "app-data")
+        runtime_paths.ensure_directories()
+        invoice_pdf = runtime_paths.archive_invoices_dir / "saved.pdf"
+        invoice_pdf.write_bytes(b"%PDF-invoice")
+        runtime_paths.invoice_registry_file.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "records": [
+                        {
+                            "record_id": "saved-record",
+                            "status": "saved",
+                            "source_file_name": "origine.pdf",
+                            "archived_pdf_path": "archive/invoices/saved.pdf",
+                            "archived_pdf_page_numbers": [2],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", runtime_paths)
+
+        def fail_job_start(_payload: dict) -> dict:
+            raise RuntimeError("job start failed")
+
+        monkeypatch.setattr(registry_api, "_start_processing_job", fail_job_start)
+
+        try:
+            registry_api._reprocess_archived_invoices(
+                {"record_ids": ["saved-record"]}
+            )
+        except RuntimeError as error:
+            assert str(error) == "job start failed"
+        else:
+            raise AssertionError("Expected job start failure")
+
+        assert list(runtime_paths.batches_dir.iterdir()) == []
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_invoice_library_finalization_deletes_staging_without_promoting_source(
+    monkeypatch,
+) -> None:
+    workspace = _workspace()
+    try:
+        runtime_paths = get_runtime_paths(workspace / "app-data")
+        source = workspace / "invoice.pdf"
+        source.write_bytes(b"%PDF-invoice")
+        batch = import_pdf_batch([source], runtime_paths=runtime_paths)
+        job = {
+            "job_id": "job_invoice",
+            "batch_id": batch.batch_id,
+            "process_id": "process_invoice",
+            "status": "finalizing",
+            "archive_sources": False,
+            "source_kind": "discarded_invoice",
+            "files": [],
+        }
+        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", runtime_paths)
+        monkeypatch.setattr(registry_api, "PROCESSING_JOBS", {"job_invoice": job})
+        monkeypatch.setattr(registry_api, "PROCESSING_JOB_QUEUE", [])
+
+        registry_api._reconcile_finalizing_jobs()
+
+        assert registry_api.PROCESSING_JOBS["job_invoice"]["status"] == "completed"
+        assert not (runtime_paths.batches_dir / batch.batch_id).exists()
+        assert list(runtime_paths.archive_sources_dir.glob("*.pdf")) == []
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_invoice_used_by_nonterminal_reprocessing_job_cannot_be_deleted(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        registry_api,
+        "PROCESSING_JOBS",
+        {
+            "job_invoice": {
+                "status": "processing",
+                "parent_invoice_record_ids": ["invoice-record"],
+            }
+        },
+    )
+
+    try:
+        registry_api._reject_invoice_records_used_by_processing_jobs(
+            ["invoice-record"]
+        )
+    except ValueError as error:
+        assert "Annulla o rimuovi" in str(error)
+    else:
+        raise AssertionError("Expected invoice deletion rejection")
+
+
+def test_invoice_used_by_pending_reprocessed_review_cannot_be_deleted(
+    monkeypatch,
+) -> None:
+    workspace = _workspace()
+    try:
+        runtime_paths = get_runtime_paths(workspace / "app-data")
+        review_dir = runtime_paths.manifests_dir / "_review_queue" / "review_0001"
+        review_dir.mkdir(parents=True)
+        (review_dir / "review_batch_index.json").write_text(
+            json.dumps(
+                {
+                    "invoices": [
+                        {
+                            "status": "pending",
+                            "parent_invoice_record_id": "invoice-record",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", runtime_paths)
+
+        try:
+            registry_api._reject_invoice_records_used_by_pending_reviews(
+                ["invoice-record"]
+            )
+        except ValueError as error:
+            assert "ancora da revisionare" in str(error)
+        else:
+            raise AssertionError("Expected pending review deletion rejection")
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import re
-import shutil
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +8,7 @@ from typing import Any
 
 from estrattore.processing_storage import ProcessedInvoiceRef
 from estrattore.runtime_paths import RuntimePaths, get_runtime_paths
+from estrattore.source_archive_storage import resolve_archived_source_for_origin
 
 
 @dataclass(frozen=True)
@@ -18,77 +17,62 @@ class ArchivedInvoicePdf:
     relative_path: str
     page_numbers: list[int]
     source_pdf_path: Path
-    archived_source_path: Path
+    archived_source_path: Path | None
     archived_source_relative_path: str
 
 
 def archive_invoice_pdf(
     invoice_payload: dict[str, Any],
     invoice_ref: ProcessedInvoiceRef,
-    record_id: str,
     runtime_paths: RuntimePaths | None = None,
+    parent_invoice_record: dict[str, Any] | None = None,
+    file_stem: str | None = None,
 ) -> ArchivedInvoicePdf:
     paths = runtime_paths or get_runtime_paths()
     paths.ensure_directories()
 
-    source_pdf_path = (
-        paths.batches_dir
-        / invoice_ref.source_batch_id
-        / "input"
-        / f"{invoice_ref.document_id}.pdf"
-    )
-    if not source_pdf_path.is_file():
-        raise ValueError(f"PDF sorgente interno non trovato: {source_pdf_path}")
+    local_page_numbers = _page_numbers(invoice_payload)
+    archived_source_relative_path = ""
+    archived_source_path: Path | None = None
+    if parent_invoice_record is not None:
+        source_pdf_path = _parent_invoice_pdf_path(parent_invoice_record, paths)
+        page_numbers = _compose_page_numbers(
+            local_page_numbers,
+            invoice_ref.source_page_numbers,
+        )
+        archived_source_relative_path = str(
+            parent_invoice_record.get("archived_source_pdf_path") or ""
+        )
+        if archived_source_relative_path:
+            candidate = (paths.app_data_dir / archived_source_relative_path).resolve()
+            if candidate.is_file() and _is_inside(candidate, paths.archive_sources_dir):
+                archived_source_path = candidate
+    else:
+        archived_source, source_pdf_path = resolve_archived_source_for_origin(
+            invoice_ref.source_batch_id,
+            invoice_ref.document_id,
+            paths,
+        )
+        page_numbers = local_page_numbers
+        archived_source_relative_path = archived_source.relative_path
+        archived_source_path = source_pdf_path
 
-    page_numbers = _page_numbers(invoice_payload)
     output_path = _unique_path(
         paths.archive_invoices_dir
         / _archive_file_name(
             invoice_payload,
-            record_id,
+            file_stem=file_stem,
         )
     )
-    archived_source_path = _archive_source_pdf(
-        source_pdf_path=source_pdf_path,
-        invoice_ref=invoice_ref,
-        runtime_paths=paths,
-    )
-    _split_pdf_pages(source_pdf_path, output_path, page_numbers)
+    _split_pdf_pages(source_pdf_path, output_path, local_page_numbers)
     return ArchivedInvoicePdf(
         path=output_path,
         relative_path=output_path.relative_to(paths.app_data_dir).as_posix(),
         page_numbers=page_numbers,
         source_pdf_path=source_pdf_path,
         archived_source_path=archived_source_path,
-        archived_source_relative_path=archived_source_path.relative_to(
-            paths.app_data_dir
-        ).as_posix(),
+        archived_source_relative_path=archived_source_relative_path,
     )
-
-
-def _archive_source_pdf(
-    source_pdf_path: Path,
-    invoice_ref: ProcessedInvoiceRef,
-    runtime_paths: RuntimePaths,
-) -> Path:
-    original_name = Path(invoice_ref.source_file_name).name
-    original_stem = Path(original_name).stem or invoice_ref.document_id
-    source_file_name = "_".join(
-        part
-        for part in (
-            "source",
-            _slug(invoice_ref.source_batch_id),
-            _slug(invoice_ref.document_id),
-            _slug(original_stem),
-        )
-        if part
-    )
-    target_path = _unique_path(
-        runtime_paths.archive_sources_dir / f"{source_file_name}.pdf"
-    )
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_pdf_path, target_path)
-    return target_path
 
 
 def _split_pdf_pages(
@@ -140,17 +124,64 @@ def _page_numbers(invoice_payload: dict[str, Any]) -> list[int]:
     return page_numbers
 
 
-def _archive_file_name(invoice_payload: dict[str, Any], record_id: str) -> str:
+def _archive_file_name(
+    invoice_payload: dict[str, Any],
+    file_stem: str | None = None,
+) -> str:
+    if file_stem:
+        safe_file_stem = _slug(file_stem)
+        if safe_file_stem:
+            return f"{safe_file_stem}.pdf"
     fields = _fields_by_kind(invoice_payload)
-    uid = hashlib.sha1(record_id.encode("utf-8")).hexdigest()[:12]
     parts = [
-        f"f_{uid}",
-        fields.get("nome_emittente", ""),
-        fields.get("condominio", ""),
-        fields.get("data_fattura", ""),
+        "Fattura",
+        _slug(fields.get("numero_fattura", ""))[:30],
+        _slug(fields.get("nome_emittente", ""))[:55],
+        _slug(fields.get("condominio", ""))[:55],
+        _slug(fields.get("data_fattura", ""))[:20],
     ]
-    stem = "_".join(_slug(part) for part in parts if _slug(part))
-    return f"{stem or f'f_{uid}'}.pdf"
+    stem = "_".join(part for part in parts if part)
+    return f"{stem}.pdf"
+
+
+def invoice_page_label(source_file_name: str, page_numbers: list[int]) -> str:
+    source_stem = Path(source_file_name).stem or "File origine"
+    clean_pages = sorted(set(page_numbers))
+    if not clean_pages:
+        return source_stem
+    if len(clean_pages) == 1:
+        return f"{source_stem} - pagina {clean_pages[0]}"
+    if clean_pages == list(range(clean_pages[0], clean_pages[-1] + 1)):
+        return f"{source_stem} - pagine {clean_pages[0]}-{clean_pages[-1]}"
+    return f"{source_stem} - pagine {', '.join(str(page) for page in clean_pages)}"
+
+
+def _parent_invoice_pdf_path(
+    parent_invoice_record: dict[str, Any],
+    paths: RuntimePaths,
+) -> Path:
+    relative_path = str(parent_invoice_record.get("archived_pdf_path") or "")
+    candidate = (paths.app_data_dir / relative_path).resolve()
+    if not relative_path or not candidate.is_file() or not _is_inside(
+        candidate, paths.archive_invoices_dir
+    ):
+        raise ValueError("PDF della fattura di origine non disponibile")
+    return candidate
+
+
+def _compose_page_numbers(
+    local_page_numbers: list[int],
+    source_page_numbers: list[int],
+) -> list[int]:
+    if not source_page_numbers:
+        return local_page_numbers
+    mapped: list[int] = []
+    for local_page_number in local_page_numbers:
+        source_index = local_page_number - 1
+        if source_index < 0 or source_index >= len(source_page_numbers):
+            raise ValueError("Mappa pagine della fattura non valida")
+        mapped.append(source_page_numbers[source_index])
+    return mapped
 
 
 def _unique_path(path: Path) -> Path:
@@ -183,3 +214,9 @@ def _slug(value: str) -> str:
     slug = re.sub(r"[^0-9a-zA-Z_-]+", "_", ascii_value.strip())
     slug = re.sub(r"_+", "_", slug).strip("_")
     return slug[:80]
+
+
+def _is_inside(path: Path, root: Path) -> bool:
+    resolved_path = path.resolve()
+    resolved_root = root.resolve()
+    return resolved_path == resolved_root or resolved_root in resolved_path.parents

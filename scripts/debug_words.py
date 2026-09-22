@@ -66,6 +66,7 @@ from estrattore.vat_extraction import (
 
 
 SUPPORTED_SUFFIXES = {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
+VIEWER_MANIFEST_SCHEMA_VERSION = 2
 VIEWER_SAMPLE_ROOT = Path("apps") / "viewer" / "public" / "sample"
 MONEY_TOKEN_PATTERN = re.compile(
     r"-?\d{1,3}(?:\.\d{3})*,\d{2}|-?\d+,\d{2}|-?\d+\.\d{2}"
@@ -781,7 +782,7 @@ def save_viewer_manifest(
     )
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": VIEWER_MANIFEST_SCHEMA_VERSION,
         "source_file": document.source_file.as_posix(),
         "ocr_lang": ocr_lang,
         "ocr_profile": ocr_profile,
@@ -836,13 +837,14 @@ def _viewer_page_manifest(
         "image": (output_dir / f"page-{page.page_number:03d}-boxes.png").name,
         "tokens": [
             {
+                "token_id": f"p{page.page_number}-t{token_index}",
                 "text": token.text,
                 "confidence": token.confidence,
                 "bbox": _bbox_dict(token.bbox),
                 **({"source": token.source} if token.source else {}),
                 **({"source_id": token.source_id} if token.source_id else {}),
             }
-            for token in page.tokens
+            for token_index, token in enumerate(page.tokens, start=1)
         ],
         "spans": [
             {
@@ -1051,6 +1053,11 @@ def _viewer_targets(
         if not candidate.selected_as_field:
             continue
 
+        rejected_by_resolver = _economic_field_rejected_by_resolver(
+            candidate,
+            economic_summary_resolved_rows,
+        )
+
         targets.append(
             _target_manifest(
                 page=page,
@@ -1074,17 +1081,18 @@ def _viewer_targets(
                 role="label",
             )
         )
-        targets.append(
-            _target_manifest(
-                page=page,
-                kind=f"economic_summary.{candidate.target}.value",
-                label="",
-                bbox=candidate.value_bbox,
-                value=candidate.value_text,
-                score=candidate.score,
-                role="value",
+        if not rejected_by_resolver:
+            targets.append(
+                _target_manifest(
+                    page=page,
+                    kind=f"economic_summary.{candidate.target}.value",
+                    label="",
+                    bbox=candidate.value_bbox,
+                    value=candidate.value_text,
+                    score=candidate.score,
+                    role="value",
+                )
             )
-        )
 
     for row in economic_summary_resolved_rows:
         _append_economic_resolved_target(
@@ -1105,6 +1113,24 @@ def _viewer_targets(
         )
 
     return targets
+
+
+def _economic_field_rejected_by_resolver(
+    candidate: EconomicSummaryFieldCandidate,
+    rows: list[EconomicSummaryResolvedRow],
+) -> bool:
+    source_attribute = {
+        "totale_fattura": "totale_fattura_source",
+        "totale_netto_fattura": "totale_netto_fattura_source",
+    }.get(candidate.target)
+    if source_attribute is None:
+        return False
+
+    return any(
+        row.page == candidate.page
+        and str(getattr(row, source_attribute, "")).startswith("rejected_")
+        for row in rows
+    )
 
 
 def _append_economic_resolved_target(
@@ -1358,6 +1384,7 @@ def _viewer_invoice_number_candidate(candidate: InvoiceNumberCandidate) -> dict:
         "score": candidate.score,
         "selected_as_numero_fattura": candidate.selected_as_numero_fattura,
         "anchor_context": candidate.anchor_context,
+        "anchor_quality": candidate.anchor_quality,
         "date_context": candidate.date_context,
         "excluded_reason": candidate.excluded_reason,
         "nearby_text": candidate.nearby_text,

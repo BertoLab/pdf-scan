@@ -1,3 +1,4 @@
+from copy import deepcopy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
 
@@ -38,6 +39,7 @@ def build_viewer_invoices(
         )
         page_signature = _page_invoice_signature(page_manifest)
         start_decision = _invoice_start_decision(
+            page_manifest=page_manifest,
             page_signature=page_signature,
             current_invoice_signature=current_invoice_signature,
             current_invoice_has_payment_summary=current_invoice_has_payment_summary,
@@ -83,7 +85,14 @@ def build_viewer_invoices(
             )
         )
 
-    _link_shared_payment_dates(invoices, page_manifests)
+    link_shared_payment_dates(invoices, page_manifests)
+    for invoice in invoices:
+        extraction_fields = deepcopy(invoice.get("fields", []))
+        invoice["extraction_fields"] = extraction_fields
+        invoice["fields"] = enrich_invoice_fields_from_registry(
+            extraction_fields,
+            registry_cache,
+        )
     return invoices
 
 
@@ -242,6 +251,7 @@ def _contains_words(text: str, words: list[str]) -> bool:
 
 
 def _invoice_start_decision(
+    page_manifest: dict,
     page_signature: dict[str, str],
     current_invoice_signature: dict[str, str],
     current_invoice_has_payment_summary: bool = False,
@@ -258,6 +268,11 @@ def _invoice_start_decision(
     has_post_payment_split_signals = (
         current_invoice_has_payment_summary and len(changed_signals) >= 2
     )
+    has_strong_invoice_identity_change = _has_strong_invoice_identity_change(
+        page_manifest=page_manifest,
+        page_signature=page_signature,
+        current_invoice_signature=current_invoice_signature,
+    )
     reasons = []
     if is_first_invoice_page:
         reasons.append("prima_pagina")
@@ -267,8 +282,11 @@ def _invoice_start_decision(
         reasons.append("almeno_3_segnali_diversi")
     if has_post_payment_split_signals:
         reasons.append("dopo_riepilogo_bancario_almeno_2_segnali_diversi")
+    if has_strong_invoice_identity_change:
+        reasons.append("numero_fattura_forte_diverso")
     starts_invoice = bool(
         is_first_invoice_page
+        or (current_invoice_signature and has_strong_invoice_identity_change)
         or (current_invoice_signature and has_enough_signals and has_enough_changes)
         or (current_invoice_signature and has_post_payment_split_signals)
     )
@@ -280,6 +298,31 @@ def _invoice_start_decision(
         "changed_signals": changed_signals,
         "reasons": reasons,
     }
+
+
+def _has_strong_invoice_identity_change(
+    page_manifest: dict,
+    page_signature: dict[str, str],
+    current_invoice_signature: dict[str, str],
+) -> bool:
+    page_invoice_number = page_signature.get("numero_fattura", "")
+    current_invoice_number = current_invoice_signature.get("numero_fattura", "")
+    if (
+        not page_invoice_number
+        or not current_invoice_number
+        or page_invoice_number == current_invoice_number
+    ):
+        return False
+
+    return any(
+        candidate.get("selected_as_numero_fattura") is True
+        and candidate.get("normalized_value") == page_invoice_number
+        and int(candidate.get("anchor_quality") or 0) >= 4
+        for candidate in page_manifest.get("candidate_tables", {}).get(
+            "invoice_numbers",
+            [],
+        )
+    )
 
 
 def _is_bank_payment_summary_page(page_manifest: dict) -> bool:
@@ -331,16 +374,17 @@ def _viewer_invoice(
 ) -> dict:
     return {
         "invoice_id": f"invoice-{invoice_index:03d}",
+        "display_number": invoice_index,
         "title": f"Fattura {invoice_index:03d}",
         "page_numbers": [page["page"] for page in page_manifests],
-        "fields": enrich_invoice_fields_from_registry(
-            _viewer_invoice_fields(page_manifests),
-            registry_cache,
-        ),
+        "fields": _viewer_invoice_fields(page_manifests),
     }
 
 
-def _link_shared_payment_dates(invoices: list[dict], page_manifests: list[dict]) -> None:
+def link_shared_payment_dates(
+    invoices: list[dict],
+    page_manifests: list[dict],
+) -> None:
     payment_candidates = _shared_payment_candidates(page_manifests)
     if not payment_candidates:
         return
@@ -378,7 +422,7 @@ def _shared_payment_candidates(page_manifests: list[dict]) -> list[dict]:
             "invoice_dates",
             [],
         ):
-            paid_score = _paid_date_score(candidate)
+            paid_score = _paid_date_score(candidate, page_manifest)
             if paid_score <= 0:
                 continue
 
@@ -426,6 +470,22 @@ def _referenced_invoice_numbers(candidate: dict) -> set[str]:
         ]
     )
     referenced_invoice_numbers = set()
+
+    for match in re.finditer(
+        r"\bn\.?\s*([A-Za-z0-9][A-Za-z0-9./-]*)\s+del\s+"
+        r"\d{1,2}[./-]\d{1,2}[./-](\d{2}|\d{4})\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        invoice_number = _normalize_invoice_date_link_text(match.group(1))
+        if not invoice_number:
+            continue
+        referenced_invoice_numbers.add(invoice_number)
+        year = match.group(2)
+        if len(year) == 2:
+            year = f"20{year}"
+        if not invoice_number.endswith(year):
+            referenced_invoice_numbers.add(f"{invoice_number}{year}")
 
     for raw_token in re.findall(r"[A-Za-z0-9.]+", text):
         value = _normalize_invoice_date_link_text(raw_token)
@@ -478,10 +538,16 @@ def _viewer_invoice_fields(page_manifests: list[dict]) -> list[dict]:
         for page_manifest in page_manifests
         for target in page_manifest["targets"]
     ]
+    reconciled_economic_targets = _reconcile_invoice_economic_targets(
+        page_manifests,
+        targets,
+    )
 
     fields = []
     for kind, label in INVOICE_FIELD_DEFINITIONS:
-        best_target = _best_invoice_field_target(page_manifests, targets, kind)
+        best_target = reconciled_economic_targets.get(kind)
+        if best_target is None:
+            best_target = _best_invoice_field_target(page_manifests, targets, kind)
         fields.append(
             {
                 "kind": kind,
@@ -500,6 +566,203 @@ def _viewer_invoice_fields(page_manifests: list[dict]) -> list[dict]:
     return fields
 
 
+def _reconcile_invoice_economic_targets(
+    page_manifests: list[dict],
+    targets: list[dict],
+) -> dict[str, dict]:
+    """Promote direct cross-page evidence only when all accounting checks agree."""
+    totals = _money_targets(
+        targets,
+        "economic_summary.totale_fattura.value",
+    )
+    net_totals = _money_targets(
+        targets,
+        "economic_summary.totale_netto_fattura.value",
+    )
+    taxable_amounts = _money_targets(
+        targets,
+        "economic_summary.totale_imponibile.value",
+    )
+    withholding_candidates = _direct_withholding_candidates(page_manifests, targets)
+    combinations = []
+
+    for total_target, total in totals:
+        for net_target, net_total in net_totals:
+            for withholding_target, withholding, percent in withholding_candidates:
+                if not _money_matches_manifest(total - withholding, net_total):
+                    continue
+
+                matching_taxable_targets = (
+                    [
+                        (target, taxable)
+                        for target, taxable in taxable_amounts
+                        if _money_matches_manifest(
+                            taxable * Decimal(percent) / Decimal("100"),
+                            withholding,
+                        )
+                    ]
+                    if percent is not None
+                    else []
+                )
+
+                score = sum(
+                    float(target.get("score", 0) or 0)
+                    for target in (total_target, net_target, withholding_target)
+                )
+                if matching_taxable_targets:
+                    score += max(
+                        float(target.get("score", 0) or 0)
+                        for target, _value in matching_taxable_targets
+                    )
+                combinations.append(
+                    (
+                        score,
+                        total_target,
+                        net_target,
+                        withholding_target,
+                    )
+                )
+
+    if not combinations:
+        return {}
+
+    _score, total_target, net_target, withholding_target = max(
+        combinations,
+        key=lambda combination: combination[0],
+    )
+    selected_pages = {
+        target.get("page")
+        for target in (total_target, net_target, withholding_target)
+    }
+    crosses_pages = len(selected_pages) > 1
+    return {
+        "economic_summary.totale_fattura.value": {
+            **total_target,
+            "role": (
+                "invoice_reconciled"
+                if crosses_pages
+                else total_target.get("role")
+            ),
+        },
+        "economic_summary.ritenuta.value": withholding_target,
+        "economic_summary.totale_netto_fattura.value": {
+            **net_target,
+            "role": (
+                "invoice_reconciled"
+                if crosses_pages
+                else net_target.get("role")
+            ),
+        },
+    }
+
+
+def _money_targets(targets: list[dict], kind: str) -> list[tuple[dict, Decimal]]:
+    candidates = []
+    for target in targets:
+        if target.get("kind") != kind:
+            continue
+        value = _manifest_money_value(str(target.get("value", "")))
+        if value is not None:
+            candidates.append((target, abs(_money(value))))
+    return candidates
+
+
+def _direct_withholding_candidates(
+    page_manifests: list[dict],
+    targets: list[dict],
+) -> list[tuple[dict, Decimal, int | None]]:
+    candidates = []
+    direct_targets = _money_targets(
+        targets,
+        "economic_summary.ritenuta.value",
+    )
+    for page_manifest in page_manifests:
+        page_number = page_manifest.get("page")
+        rows = page_manifest.get("candidate_tables", {}).get(
+            "economic_summary_resolved_rows",
+            [],
+        )
+        for row in rows:
+            if row.get("ritenuta_source") != "direct":
+                continue
+            withholding = _manifest_money_value(str(row.get("ritenuta_value", "")))
+            percent = _ritenuta_percent_value(str(row.get("ritenuta_percentuale", "")))
+            if withholding is None:
+                continue
+            withholding = abs(_money(withholding))
+            source_target = max(
+                [
+                    target
+                    for target, target_value in direct_targets
+                    if target.get("page") == page_number
+                    and _money_matches_manifest(target_value, withholding)
+                ],
+                key=lambda target: target.get("score", 0),
+                default=None,
+            )
+            matching_token = _money_token_matching_value(page_manifest, withholding)
+            candidates.append(
+                (
+                    {
+                        "kind": "economic_summary.ritenuta.value",
+                        "value": _format_manifest_money(withholding),
+                        "score": (
+                            float(source_target.get("score", 0) or 0)
+                            if source_target
+                            else 0
+                        )
+                        + 120,
+                        "ocr_confidence": (
+                            source_target.get("ocr_confidence")
+                            if source_target
+                            else matching_token.get("confidence")
+                            if matching_token
+                            else None
+                        ),
+                        "page": page_number,
+                        "bbox": (
+                            source_target.get("bbox")
+                            if source_target
+                            else matching_token.get("bbox")
+                            if matching_token
+                            else row.get("bbox")
+                        ),
+                        "role": (
+                            "resolved"
+                            if row.get("math_check") == "ok"
+                            else "invoice_reconciled"
+                        ),
+                    },
+                    withholding,
+                    percent,
+                )
+            )
+    return candidates
+
+
+def _ritenuta_percent_value(value: str) -> int | None:
+    match = re.fullmatch(r"\s*(0|4|10)\s*%?\s*", value)
+    return int(match.group(1)) if match else None
+
+
+def _money_matches_manifest(left: Decimal, right: Decimal) -> bool:
+    return abs(_money(left) - _money(right)) <= Decimal("0.01")
+
+
+def build_viewer_invoice_fields_for_pages(
+    page_manifests: list[dict],
+    page_numbers: list[int],
+) -> list[dict]:
+    """Rebuild invoice fields for an explicit, user-approved page group."""
+    selected_page_numbers = set(page_numbers)
+    selected_pages = [
+        page_manifest
+        for page_manifest in page_manifests
+        if page_manifest.get("page") in selected_page_numbers
+    ]
+    return _viewer_invoice_fields(selected_pages)
+
+
 def _best_invoice_field_target(
     page_manifests: list[dict],
     targets: list[dict],
@@ -515,7 +778,7 @@ def _best_invoice_field_target(
         return _best_paid_date_target(page_manifests, targets)
 
     if kind == "economic_summary.totale_netto_fattura.value":
-        return _best_net_total_target(targets)
+        return _best_net_total_target(page_manifests, targets)
 
     candidates = [target for target in targets if target["kind"] == kind]
     return max(candidates, key=lambda target: target["score"], default=None)
@@ -540,6 +803,9 @@ def _best_invoice_date_target(
             value = candidate.get("normalized_value", "")
             if not value:
                 continue
+            priority = _invoice_date_candidate_priority(candidate, page_manifest)
+            if priority < 0:
+                continue
 
             source_target = _matching_target(
                 targets=targets,
@@ -561,7 +827,7 @@ def _best_invoice_date_target(
                     "page": page_manifest.get("page"),
                     "bbox": candidate.get("bbox"),
                     "role": "target",
-                    "priority": _invoice_date_candidate_priority(candidate),
+                    "priority": priority,
                     "matches_invoice_header": value in header_date_values,
                     "follows_invoice_number": _date_candidate_follows_invoice_number(
                         page_manifest,
@@ -588,13 +854,40 @@ def _best_invoice_date_target(
     return max(fallback_candidates, key=lambda target: target["score"], default=None)
 
 
-def _invoice_date_candidate_priority(candidate: dict) -> int:
+def _invoice_date_candidate_priority(
+    candidate: dict,
+    page_manifest: dict | None = None,
+) -> int:
     anchor_context = candidate.get("anchor_context", "")
-    negative_context = candidate.get("negative_context", "")
+    negative_context = _invoice_date_negative_context(candidate)
     if "entro" in negative_context:
         return -1
     if "riferimento normativo" in negative_context:
         return -1
+    if "periodo fatturazione" in negative_context:
+        return -1
+    if "data pagamento" in negative_context:
+        return -1
+
+    row_text = _payment_date_row_text(candidate, page_manifest)
+    if row_text:
+        row_words = row_text.split()
+        if _has_payment_execution_context(row_words):
+            return -1
+        if (
+            _has_adjacent_words(row_words, "data", "documento")
+            or _has_adjacent_words(row_words, "data", "doc")
+            or _has_adjacent_words(row_words, "data", "fattura")
+        ):
+            return 5
+        if "fattura" in row_words and "del" in row_words:
+            return 4
+        if "data" in row_words:
+            return 1
+        return 0
+
+    if "data documento" in anchor_context or "data doc" in anchor_context:
+        return 4
 
     if "del" in anchor_context and "fattura" in anchor_context:
         return 3
@@ -606,6 +899,35 @@ def _invoice_date_candidate_priority(candidate: dict) -> int:
         return 1
 
     return 0
+
+
+def _invoice_date_negative_context(candidate: dict) -> str:
+    negative_context = str(candidate.get("negative_context") or "")
+    if negative_context:
+        return negative_context
+
+    nearby_text = _normalize_payment_context_text(candidate.get("nearby_text", ""))
+    words = nearby_text.split()
+    compact_words = {re.sub(r"[^0-9a-zA-Z]+", "", word) for word in words}
+    has_law_reference = any(
+        word.startswith("l") and word[1:].isdigit() for word in compact_words
+    ) or any(left == "l" and right.isdigit() for left, right in zip(words, words[1:]))
+    if (
+        has_law_reference
+        or "contribuenti" in words
+        or "forfetari" in words
+        or "forfettari" in words
+    ):
+        return "riferimento normativo"
+
+    if (
+        _has_adjacent_words(words, "periodo", "fatturazione")
+        or _has_words_in_order(words, ["periodo", "di", "fatturazione"])
+        or ("fatturazione" in words and ("dal" in words or "al" in words))
+    ):
+        return "periodo fatturazione"
+
+    return ""
 
 
 def _best_invoice_number_for_date_link(targets: list[dict]) -> str:
@@ -635,7 +957,7 @@ def _best_paid_date_target(page_manifests: list[dict], targets: list[dict]) -> d
             if not value or value == invoice_date_value:
                 continue
 
-            paid_score = _paid_date_score(candidate)
+            paid_score = _paid_date_score(candidate, page_manifest)
             if paid_score <= 0:
                 continue
 
@@ -654,7 +976,7 @@ def _best_paid_date_target(page_manifests: list[dict], targets: list[dict]) -> d
     return max(candidates, key=lambda target: target["score"], default=None)
 
 
-def _best_net_total_target(targets: list[dict]) -> dict | None:
+def _best_net_total_target(page_manifests: list[dict], targets: list[dict]) -> dict | None:
     candidates = [
         target
         for target in targets
@@ -663,7 +985,7 @@ def _best_net_total_target(targets: list[dict]) -> dict | None:
     if not candidates:
         return None
 
-    expected_net_total = _expected_net_total_from_targets(targets)
+    expected_net_total = _expected_net_total_from_targets(page_manifests, targets)
     if expected_net_total is None:
         return max(candidates, key=lambda target: target["score"], default=None)
 
@@ -678,16 +1000,8 @@ def _best_net_total_target(targets: list[dict]) -> dict | None:
 
 def _best_ritenuta_value_target(
     page_manifests: list[dict],
-    targets: list[dict],
+    _targets: list[dict],
 ) -> dict | None:
-    direct_targets = [
-        target
-        for target in targets
-        if target["kind"] == "economic_summary.ritenuta.value"
-    ]
-    if direct_targets:
-        return max(direct_targets, key=lambda target: target["score"], default=None)
-
     candidates = []
     for page_manifest in page_manifests:
         resolved_rows = page_manifest.get("candidate_tables", {}).get(
@@ -695,40 +1009,101 @@ def _best_ritenuta_value_target(
             [],
         )
         for row in resolved_rows:
+            if row.get("math_check") != "ok":
+                continue
+
             ritenuta_value = _manifest_money_value(str(row.get("ritenuta_value", "")))
             if ritenuta_value is None:
                 continue
-
+            ritenuta_amount = abs(_money(ritenuta_value))
             matching_token = _money_token_matching_value(
                 page_manifest,
-                abs(ritenuta_value),
+                ritenuta_amount,
             )
-            if matching_token is None:
-                continue
-
+            bbox = matching_token.get("bbox") if matching_token else row.get("bbox")
+            confidence = (
+                matching_token.get("confidence")
+                if matching_token
+                else None
+            )
             candidates.append(
                 {
                     "kind": "economic_summary.ritenuta.value",
-                    "value": _format_manifest_money(abs(ritenuta_value)),
-                    "score": 90,
-                    "ocr_confidence": matching_token.get("confidence"),
+                    "value": _format_manifest_money(ritenuta_amount),
+                    "score": 220,
+                    "ocr_confidence": confidence,
                     "page": page_manifest.get("page"),
-                    "bbox": matching_token.get("bbox"),
-                    "role": "value",
+                    "bbox": bbox,
+                    "role": "resolved",
                 }
             )
 
     return max(candidates, key=lambda target: target["score"], default=None)
 
 
-def _expected_net_total_from_targets(targets: list[dict]) -> Decimal | None:
+def _valid_ritenuta_percentuale(value: str) -> bool:
+    match = re.fullmatch(r"\s*(0|4|10)\s*%?\s*", value)
+    return match is not None
+
+
+def _best_ritenuta_amount_target(
+    page_manifests: list[dict],
+) -> dict | None:
+    candidates = []
+    for page_manifest in page_manifests:
+        resolved_rows = page_manifest.get("candidate_tables", {}).get(
+            "economic_summary_resolved_rows",
+            [],
+        )
+        for row in resolved_rows:
+            if row.get("math_check") != "ok":
+                continue
+            ritenuta_value = _manifest_money_value(str(row.get("ritenuta_value", "")))
+            if ritenuta_value is None:
+                continue
+            matching_token = _money_token_matching_value(
+                page_manifest,
+                abs(ritenuta_value),
+            )
+            candidates.append(
+                {
+                    "kind": "economic_summary.ritenuta.value",
+                    "value": _format_manifest_money(abs(ritenuta_value)),
+                    "score": 90,
+                    "ocr_confidence": (
+                        matching_token.get("confidence")
+                        if matching_token
+                        else None
+                    ),
+                    "page": page_manifest.get("page"),
+                    "bbox": matching_token.get("bbox") if matching_token else row.get("bbox"),
+                    "role": "resolved_amount",
+                }
+            )
+
+    return max(candidates, key=lambda target: target["score"], default=None)
+
+
+def _expected_net_total_from_targets(
+    page_manifests: list[dict],
+    targets: list[dict],
+) -> Decimal | None:
     total_invoice = _best_money_target(
         targets,
         "economic_summary.totale_fattura.value",
     )
-    withholding = _best_money_target(
-        targets,
-        "economic_summary.ritenuta.value",
+    withholding_target = _best_ritenuta_amount_target(page_manifests)
+    withholding = (
+        _manifest_money_value(str(withholding_target.get("value", "")))
+        if withholding_target
+        else _best_money_target(
+            [
+                target
+                for target in targets
+                if not _valid_ritenuta_percentuale(str(target.get("value", "")))
+            ],
+            "economic_summary.ritenuta.value",
+        )
     )
     if total_invoice is None or withholding is None:
         return None
@@ -801,17 +1176,48 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _paid_date_score(candidate: dict) -> float:
+def _paid_date_score(candidate: dict, page_manifest: dict | None = None) -> float:
     nearby_text = _normalize_payment_context_text(candidate.get("nearby_text", ""))
+    row_text = _payment_date_row_text(candidate, page_manifest)
+    role_words = (row_text or nearby_text).split()
+
+    has_debit_label = _has_words_in_order(
+        role_words,
+        ["data", "di", "addebito"],
+    ) or _has_adjacent_words(role_words, "data", "addebito")
+    has_credit_label = _has_words_in_order(
+        role_words,
+        ["data", "di", "accredito"],
+    ) or _has_adjacent_words(role_words, "data", "accredito")
+    if has_credit_label and not has_debit_label:
+        return 0.0
+
+    has_execution_label = _has_adjacent_words(
+        role_words,
+        "data",
+        "esecuzione",
+    )
+    if (
+        row_text
+        and "fattura" in role_words
+        and "del" in role_words
+        and not has_debit_label
+        and not has_execution_label
+    ):
+        return 0.0
+
     words = nearby_text.split()
     score = 0.0
 
-    if _has_adjacent_words(words, "data", "esecuzione"):
+    if has_debit_label:
+        score += 250
+
+    if has_execution_label:
         score += 150
-    elif "esecuzione" in words:
+    elif "esecuzione" in role_words:
         score += 115
 
-    if _has_adjacent_words(words, "data", "ora"):
+    if _has_adjacent_words(role_words, "data", "ora"):
         score += 95
 
     if "bonifico" in words:
@@ -846,8 +1252,46 @@ def _paid_date_score(candidate: dict) -> float:
     return round(score, 2)
 
 
+def _payment_date_row_text(
+    candidate: dict,
+    page_manifest: dict | None,
+) -> str:
+    if not page_manifest:
+        return ""
+
+    candidate_bbox = candidate.get("bbox")
+    if not candidate_bbox:
+        return ""
+
+    row_parts = []
+    for span in page_manifest.get("spans", []):
+        span_bbox = span.get("bbox")
+        if not span_bbox or not _vertically_overlapping(candidate_bbox, span_bbox):
+            continue
+        row_parts.append(span.get("text", ""))
+
+    return _normalize_payment_context_text(" ".join(row_parts))
+
+
+def _vertically_overlapping(left: dict, right: dict) -> bool:
+    overlap = min(left["y2"], right["y2"]) - max(left["y1"], right["y1"])
+    if overlap <= 0:
+        return False
+
+    smaller_height = min(left["y2"] - left["y1"], right["y2"] - right["y1"])
+    return smaller_height > 0 and overlap / smaller_height >= 0.4
+
+
 def _normalize_payment_context_text(text: str) -> str:
     return " ".join(re.sub(r"[^0-9a-zA-Z]+", " ", text.lower()).split())
+
+
+def _has_payment_execution_context(words: list[str]) -> bool:
+    return (
+        _has_adjacent_words(words, "data", "esecuzione")
+        or _has_adjacent_words(words, "data", "addebito")
+        or _has_words_in_order(words, ["data", "di", "addebito"])
+    )
 
 
 def _has_adjacent_words(words: list[str], first: str, second: str) -> bool:

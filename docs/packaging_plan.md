@@ -106,6 +106,13 @@ Domande da risolvere dentro questo punto:
 
 ### 4. Creare launcher eseguibile
 
+Worker contract discovered during OCR queue implementation:
+
+- source development launches document workers with `python -m estrattore.document_worker`;
+- the frozen executable must recognize the internal `--document-worker` mode and dispatch it before starting the normal app UI/backend path;
+- the launcher must preserve Windows Job Object ownership so closing the runtime also terminates active worker and Tesseract descendants;
+- packaging verification must include cancellation, forced launcher shutdown, crash recovery, and orphan-process checks.
+
 Obiettivo:
 
 - generare un `.exe` che avvia l'app;
@@ -173,4 +180,3 @@ Domande da risolvere dentro questo punto:
 - serve una procedura di backup prima di update?
 - come versionare il pacchetto consegnato?
 - come distinguere installazione nuova, reinstallazione e aggiornamento?
-

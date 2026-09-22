@@ -11,9 +11,12 @@ export type Point = {
 }
 
 export type ViewerToken = {
+  token_id?: string
   text: string
   confidence: number | null
   bbox: BoundingBox
+  source?: string
+  source_id?: string
 }
 
 export type ViewerSpan = {
@@ -161,6 +164,27 @@ export type InvoiceField = {
   registry_source_row?: number | null
   registry_match_group?: string | null
   registry_replaced_value?: string | null
+  review_interaction?:
+    | 'manual_input'
+    | 'formatting_only'
+    | 'registry_selection'
+    | 'dependent_registry_fill'
+    | 'suggestion_selection'
+    | 'dependent_suggestion_fill'
+    | 'automatic_replacement'
+    | 'cleared'
+    | 'reset'
+  review_value_origin?:
+    | 'manual_input'
+    | 'explicit_registry'
+    | 'dependent_registry'
+    | 'suggestion'
+    | 'dependent_suggestion'
+    | 'automatic_registry'
+    | 'document_extraction'
+  review_action_id?: string
+  review_source_field_kind?: string
+  review_registry_snapshot?: Record<string, unknown> | null
 }
 
 export type InvoicePage = {
@@ -177,15 +201,18 @@ export type InvoicePage = {
 
 export type ViewerManifestInvoice = {
   invoice_id: string
+  display_number?: number
   title: string
   page_numbers: number[]
   fields: InvoiceField[]
+  extraction_fields?: InvoiceField[]
 }
 
 export type ViewerInvoice = {
   invoiceId: string
   manifestInvoiceId?: string
   title: string
+  displayNumber?: number
   documentId?: string
   variantLabel?: string
   sourceFile: string

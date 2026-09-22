@@ -14,7 +14,8 @@ const clickTargets = args.click ?? [];
 
 const viewports = [
   { name: "desktop", width: 1440, height: 900 },
-  { name: "wide", width: 1728, height: 972 }
+  { name: "wide", width: 1728, height: 972 },
+  { name: "full-hd", width: 1920, height: 1080 }
 ];
 
 const checks = [

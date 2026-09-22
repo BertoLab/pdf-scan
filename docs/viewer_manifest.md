@@ -39,7 +39,7 @@ folder must be listed explicitly in this index for now.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source_file": "data/input/example.pdf",
   "pages": [],
   "invoices": []
@@ -174,10 +174,11 @@ evidence without searching the page targets:
 - `role`: evidence role copied from the selected target, for example `target`,
   `value`, `label`, or `pair`.
 
-The invoice field `economic_summary.ritenuta_percentuale` stores the selected
-withholding percentage, for example `4%` or `20%`. The monetary withholding
-amount remains available in the economic summary diagnostics and overlays only
-as evidence for validating the percentage and totals.
+The invoice field `economic_summary.ritenuta.value` stores the monetary
+withholding amount, for example `4,20`. The printed percentage remains available
+only in economic-summary diagnostics as auxiliary extraction evidence. The
+reviewed accounting fields must satisfy `gross total - withholding = net total`
+whenever all three values are present.
 
 The invoice field `pagata_il` is selected from invoice date candidates with a
 bank/payment context such as `Data esecuzione`, `Data/Ora`, `bonifico`,
@@ -299,3 +300,7 @@ come from `targets`.
 Additive fields are allowed without increasing `schema_version`.
 Breaking changes to existing field meaning, target kind names, or bbox shape
 must increment `schema_version`.
+
+Schema version 2 changes `economic_summary.ritenuta.value` from a percentage
+to the monetary withholding amount. Schema version 1 manifests require the
+gross/net compatibility adaptation described above or reprocessing.

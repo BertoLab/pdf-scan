@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import threading
 import time
 import hashlib
+from dataclasses import replace
 from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default
@@ -43,23 +45,45 @@ from estrattore.batch_storage import (
     load_batch_index,
 )
 from estrattore.invoice_registry_storage import (
+    delete_invoice_archive,
     discard_reviewed_invoice,
     load_invoice_registry,
+    purge_discarded_invoice_records,
     save_invoice_registry_excel,
     save_invoice_registry_records,
     save_reviewed_invoice,
 )
+from estrattore.feedback_collection import (
+    reconcile_feedback_operations,
+    record_capture_issue,
+)
+from estrattore.feedback_export import export_feedback_to_desktop
+from estrattore.source_archive_storage import (
+    archived_source_path,
+    delete_archived_sources,
+    list_archived_sources,
+    migrate_legacy_archived_sources,
+    promote_batch_sources,
+)
 from estrattore.processing_storage import (
     ProcessingCancelled,
-    ProcessingPaused,
     ProcessingRunIndex,
     ReviewBatchRef,
+    clear_all_review_batches,
     cleanup_incomplete_processing_runs,
+    delete_review_invoice_drafts,
     is_document_processing_complete,
+    list_review_invoice_drafts,
     list_review_batches,
-    move_review_invoice_page,
+    mutate_review_invoice_segmentation,
     process_imported_batch,
+    recover_missing_review_batches,
+    recover_review_mutations,
+    retire_completed_review_batches,
+    review_draft_id_for_invoice_payload,
+    save_review_invoice_draft,
 )
+from estrattore.runtime_cleanup import cleanup_stale_atomic_write_files
 from estrattore.runtime_paths import (
     get_runtime_paths,
     migrate_legacy_registry_files_if_needed,
@@ -80,8 +104,16 @@ PROCESSING_JOBS_LOCK = threading.Lock()
 PROCESSING_JOB_QUEUE: list[str] = []
 PROCESSING_ACTIVE_JOB_ID: str | None = None
 INCOMPLETE_PROCESSING_CLEANUPS: list[str] = []
+STALE_ATOMIC_WRITE_CLEANUPS: list[str] = []
+COMPLETED_REVIEW_CLEANUPS: list[str] = []
 PROCESSING_JOBS_FILE_NAME = "processing_jobs.json"
 TERMINAL_PROCESSING_JOB_STATUSES = {"completed", "error", "cancelled", "removed"}
+SOURCE_DELETE_BLOCKING_JOB_STATUSES = {
+    "queued",
+    "processing",
+    "cancelling",
+    "finalizing",
+}
 PENDING_IMPORT_SOURCES: dict[str, dict[str, Any]] = {}
 PENDING_IMPORT_SOURCES_LOCK = threading.Lock()
 
@@ -109,8 +141,19 @@ class RegistryApiHandler(BaseHTTPRequestHandler):
             self._send_json_response(200, _review_batches_payload())
             return
 
+        if self.path == "/viewer/drafts":
+            self._send_json_response(
+                200,
+                {"ok": True, **list_review_invoice_drafts(RUNTIME_PATHS)},
+            )
+            return
+
         if self.path == "/processing/jobs":
             self._send_json_response(200, _processing_jobs_payload())
+            return
+
+        if self.path == "/archive/sources":
+            self._send_json_response(200, _source_archive_payload())
             return
 
         if self.path == "/invoices/registry":
@@ -219,6 +262,29 @@ class RegistryApiHandler(BaseHTTPRequestHandler):
                 self._send_json_response(400, {"ok": False, "error": str(error)})
             return
 
+        if self.path == "/batches/import-and-process":
+            try:
+                payload = self._read_json_body()
+                batch = _import_pending_sources(payload)
+                job = _start_processing_job(
+                    {
+                        "batch_id": batch.batch_id,
+                        "source_kind": "external_upload",
+                        "archive_sources": True,
+                    }
+                )
+                self._send_json_response(
+                    202,
+                    {
+                        "ok": True,
+                        "batch": _batch_payload(batch),
+                        "job": job,
+                    },
+                )
+            except Exception as error:
+                self._send_json_response(400, {"ok": False, "error": str(error)})
+            return
+
         if self.path == "/batches/import-sources/discard":
             try:
                 payload = self._read_json_body()
@@ -246,23 +312,89 @@ class RegistryApiHandler(BaseHTTPRequestHandler):
                 self._send_json_response(400, {"ok": False, "error": str(error)})
             return
 
+        if self.path == "/archive/invoices/reprocess":
+            try:
+                payload = self._read_json_body()
+                job = _reprocess_archived_invoices(payload)
+                self._send_json_response(202, job)
+            except Exception as error:
+                self._send_json_response(400, {"ok": False, "error": str(error)})
+            return
+
+        if self.path == "/processing/history/delete":
+            try:
+                payload = self._read_json_body()
+                self._send_json_response(200, _delete_processing_history(payload))
+            except Exception as error:
+                self._send_json_response(400, {"ok": False, "error": str(error)})
+            return
+
+        if self.path == "/archive/delete":
+            try:
+                payload = self._read_json_body()
+                if str(payload.get("scope") or "") == "source" and isinstance(
+                    payload.get("source_ids"), list
+                ):
+                    source_records = [
+                        archived_source_path(source_id, RUNTIME_PATHS)[0]
+                        for source_id in payload["source_ids"]
+                    ]
+                    source_paths = [source.relative_path for source in source_records]
+                    _reject_sources_used_by_pending_reviews(source_records)
+                    _reject_sources_used_by_processing_jobs(source_records)
+                    try:
+                        delete_invoice_archive(
+                            scope="source",
+                            archived_source_pdf_paths=source_paths,
+                            runtime_paths=RUNTIME_PATHS,
+                        )
+                    except ValueError as error:
+                        if "non trovati" not in str(error):
+                            raise
+                    deleted_count = delete_archived_sources(
+                        payload["source_ids"], RUNTIME_PATHS
+                    )
+                    self._send_json_response(
+                        200, {"ok": True, "deleted_source_file_count": deleted_count}
+                    )
+                    return
+                if str(payload.get("scope") or "") in {"invoice", "all"}:
+                    invoice_record_ids = [
+                        str(value)
+                        for value in [
+                            *(payload.get("record_ids") or []),
+                            payload.get("record_id"),
+                        ]
+                        if str(value or "").strip()
+                    ]
+                    if str(payload.get("scope") or "") == "all":
+                        invoice_record_ids = [
+                            str(record.get("record_id") or "")
+                            for record in load_invoice_registry(RUNTIME_PATHS).get(
+                                "records", []
+                            )
+                            if isinstance(record, dict)
+                            and record.get("status") in {"saved", "discarded"}
+                            and str(record.get("record_id") or "").strip()
+                        ]
+                    _reject_invoice_records_used_by_processing_jobs(invoice_record_ids)
+                    _reject_invoice_records_used_by_pending_reviews(invoice_record_ids)
+                result = delete_invoice_archive(
+                    scope=str(payload.get("scope") or ""),
+                    record_id=payload.get("record_id"),
+                    record_ids=payload.get("record_ids"),
+                    archived_source_pdf_path=payload.get("archived_source_pdf_path"),
+                    archived_source_pdf_paths=payload.get("archived_source_pdf_paths"),
+                    runtime_paths=RUNTIME_PATHS,
+                )
+                self._send_json_response(200, {"ok": True, **result})
+            except Exception as error:
+                self._send_json_response(400, {"ok": False, "error": str(error)})
+            return
+
         if self.path.startswith("/processing/jobs/") and self.path.endswith("/cancel"):
             try:
                 self._send_json_response(200, _cancel_processing_job(self.path))
-            except Exception as error:
-                self._send_json_response(400, {"ok": False, "error": str(error)})
-            return
-
-        if self.path.startswith("/processing/jobs/") and self.path.endswith("/pause"):
-            try:
-                self._send_json_response(200, _pause_processing_job(self.path))
-            except Exception as error:
-                self._send_json_response(400, {"ok": False, "error": str(error)})
-            return
-
-        if self.path.startswith("/processing/jobs/") and self.path.endswith("/resume"):
-            try:
-                self._send_json_response(200, _resume_processing_job(self.path))
             except Exception as error:
                 self._send_json_response(400, {"ok": False, "error": str(error)})
             return
@@ -276,10 +408,15 @@ class RegistryApiHandler(BaseHTTPRequestHandler):
 
         if self.path == "/invoices/save":
             try:
+                payload = self._read_json_body()
                 record = save_reviewed_invoice(
-                    self._read_json_body(),
+                    payload,
                     runtime_paths=RUNTIME_PATHS,
                 )
+                draft_id = review_draft_id_for_invoice_payload(
+                    payload.get("invoice") or {}
+                )
+                delete_review_invoice_drafts([draft_id], RUNTIME_PATHS)
                 self._send_json_response(200, {"ok": True, "record": record})
             except Exception as error:
                 self._send_json_response(400, {"ok": False, "error": str(error)})
@@ -302,22 +439,70 @@ class RegistryApiHandler(BaseHTTPRequestHandler):
 
         if self.path == "/invoices/discard":
             try:
+                payload = self._read_json_body()
                 record = discard_reviewed_invoice(
-                    self._read_json_body(),
+                    payload,
                     runtime_paths=RUNTIME_PATHS,
                 )
+                draft_id = review_draft_id_for_invoice_payload(
+                    payload.get("invoice") or {}
+                )
+                delete_review_invoice_drafts([draft_id], RUNTIME_PATHS)
                 self._send_json_response(200, {"ok": True, "record": record})
             except Exception as error:
                 self._send_json_response(400, {"ok": False, "error": str(error)})
             return
 
-        if self.path == "/viewer/move-page":
+        if self.path == "/viewer/segmentation":
             try:
-                result = move_review_invoice_page(
+                result = mutate_review_invoice_segmentation(
                     self._read_json_body(),
                     runtime_paths=RUNTIME_PATHS,
                 )
                 self._send_json_response(200, result)
+            except Exception as error:
+                self._send_json_response(400, {"ok": False, "error": str(error)})
+            return
+
+        if self.path == "/viewer/drafts":
+            try:
+                draft = save_review_invoice_draft(
+                    self._read_json_body(),
+                    runtime_paths=RUNTIME_PATHS,
+                )
+                self._send_json_response(200, {"ok": True, "draft": draft})
+            except Exception as error:
+                self._send_json_response(400, {"ok": False, "error": str(error)})
+            return
+
+        if self.path == "/viewer/review-batches/clear":
+            try:
+                result = clear_all_review_batches(RUNTIME_PATHS)
+                self._send_json_response(
+                    200,
+                    {
+                        "ok": True,
+                        "deleted_review_batch_count": result.deleted_review_batch_count,
+                        "updated_processing_run_count": result.updated_processing_run_count,
+                    },
+                )
+            except Exception as error:
+                self._send_json_response(400, {"ok": False, "error": str(error)})
+            return
+
+        if self.path == "/feedback/export":
+            try:
+                result = export_feedback_to_desktop(runtime_paths=RUNTIME_PATHS)
+                self._send_json_response(
+                    200,
+                    {
+                        "ok": True,
+                        "folder_name": result.folder_name,
+                        "output_path": str(result.output_path),
+                        "stats": result.stats,
+                        "missing_pdf_count": result.missing_pdf_count,
+                    },
+                )
             except Exception as error:
                 self._send_json_response(400, {"ok": False, "error": str(error)})
             return
@@ -379,6 +564,24 @@ class RegistryApiHandler(BaseHTTPRequestHandler):
             try:
                 _delete_registry()
                 self._send_json_response(200, {"ok": True})
+            except Exception as error:
+                self._send_json_response(400, {"ok": False, "error": str(error)})
+            return
+
+        if self.path == "/viewer/drafts":
+            try:
+                payload = self._read_json_body()
+                draft_ids = payload.get("draft_ids")
+                if not isinstance(draft_ids, list):
+                    raise ValueError("Bozze da eliminare mancanti")
+                deleted_count = delete_review_invoice_drafts(
+                    draft_ids,
+                    RUNTIME_PATHS,
+                )
+                self._send_json_response(
+                    200,
+                    {"ok": True, "deleted_count": deleted_count},
+                )
             except Exception as error:
                 self._send_json_response(400, {"ok": False, "error": str(error)})
             return
@@ -648,14 +851,39 @@ def _warning_counts(records: list[Any]) -> dict[str, int]:
 def ensure_registry_runtime_ready() -> None:
     global LEGACY_REGISTRY_MIGRATIONS
     global INCOMPLETE_PROCESSING_CLEANUPS
+    global STALE_ATOMIC_WRITE_CLEANUPS
+    global COMPLETED_REVIEW_CLEANUPS
     global _REGISTRY_RUNTIME_READY
 
     if _REGISTRY_RUNTIME_READY:
         return
 
     RUNTIME_PATHS.ensure_directories()
+    STALE_ATOMIC_WRITE_CLEANUPS = [
+        str(path)
+        for path in cleanup_stale_atomic_write_files(RUNTIME_PATHS)
+    ]
+    recover_review_mutations(RUNTIME_PATHS)
     LEGACY_REGISTRY_MIGRATIONS = migrate_legacy_registry_files_if_needed(RUNTIME_PATHS)
     _load_processing_jobs_from_disk()
+    migrate_legacy_archived_sources(load_invoice_registry(RUNTIME_PATHS), RUNTIME_PATHS)
+    purge_discarded_invoice_records(RUNTIME_PATHS)
+    try:
+        registry = load_invoice_registry(RUNTIME_PATHS)
+        reconcile_feedback_operations(
+            registry.get("records", []),
+            RUNTIME_PATHS,
+        )
+    except Exception as error:
+        record_capture_issue(
+            process_id="",
+            document_id="",
+            stage="registry_edit_startup_recovery",
+            error=error,
+            runtime_paths=RUNTIME_PATHS,
+        )
+    _reconcile_finalizing_jobs()
+    _reconcile_terminal_job_storage()
     INCOMPLETE_PROCESSING_CLEANUPS = [
         str(path)
         for path in cleanup_incomplete_processing_runs(
@@ -663,6 +891,11 @@ def ensure_registry_runtime_ready() -> None:
             preserve_process_ids=_resumable_processing_process_ids(),
         )
     ]
+    COMPLETED_REVIEW_CLEANUPS = [
+        str(path)
+        for path in retire_completed_review_batches(RUNTIME_PATHS)
+    ]
+    recover_missing_review_batches(RUNTIME_PATHS)
     _REGISTRY_RUNTIME_READY = True
     _start_next_processing_job_if_idle()
 
@@ -710,6 +943,8 @@ def _runtime_paths_payload() -> dict[str, Any]:
             for source, target in LEGACY_REGISTRY_MIGRATIONS
         ],
         "incomplete_processing_cleanups": INCOMPLETE_PROCESSING_CLEANUPS,
+        "stale_atomic_write_cleanups": STALE_ATOMIC_WRITE_CLEANUPS,
+        "completed_review_cleanups": COMPLETED_REVIEW_CLEANUPS,
     }
 
 
@@ -754,7 +989,11 @@ def _batch_payload(batch: ImportedBatchIndex) -> dict[str, Any]:
 def _delete_imported_batch(path: str) -> dict[str, Any]:
     batch_id = path.rsplit("/", 1)[-1]
     active_job = _processing_job_for_batch(batch_id)
-    if active_job and active_job.get("status") in {"queued", "processing", "paused"}:
+    if active_job and active_job.get("status") in {
+        "queued",
+        "processing",
+        "cancelling",
+    }:
         raise ValueError("Il gruppo e in lavorazione: annulla prima il processamento")
 
     delete_imported_batch(batch_id, runtime_paths=RUNTIME_PATHS)
@@ -945,6 +1184,20 @@ def _processing_jobs_file_path() -> Path:
     return RUNTIME_PATHS.config_dir / PROCESSING_JOBS_FILE_NAME
 
 
+def _recover_legacy_processing_job_created_at(job: dict[str, Any]) -> str:
+    """Recover the creation timestamp embedded in legacy process identifiers."""
+    process_id = str(job.get("process_id") or "")
+    parts = process_id.split("_")
+    if len(parts) < 3 or parts[0] != "process":
+        return ""
+    try:
+        return datetime.strptime(
+            f"{parts[1]}_{parts[2]}", "%Y%m%d_%H%M%S"
+        ).isoformat()
+    except ValueError:
+        return ""
+
+
 def _load_processing_jobs_from_disk() -> None:
     global PROCESSING_ACTIVE_JOB_ID
     jobs_file = _processing_jobs_file_path()
@@ -974,26 +1227,40 @@ def _load_processing_jobs_from_disk() -> None:
                 continue
 
             job = dict(raw_job)
+            if not str(job.get("created_at") or "").strip():
+                recovered_created_at = _recover_legacy_processing_job_created_at(job)
+                if recovered_created_at:
+                    job["created_at"] = recovered_created_at
+            if not isinstance(job.get("files"), list):
+                job["files"] = _job_files_from_batch(batch_id)
             status = str(job.get("status") or "")
             if status == "processing":
                 if job.get("process_id"):
                     job["status"] = "queued"
                     job["message"] = "Ripresa in coda dopo chiusura dell'app"
                     job["cancel_requested"] = False
-                    job["pause_requested"] = False
                     PROCESSING_JOB_QUEUE.append(job_id)
                 else:
                     job["status"] = "cancelled"
                     job["message"] = "Processamento interrotto dalla chiusura dell'app"
                     job["cancel_requested"] = True
-                    job["pause_requested"] = False
+                job["estimated_remaining_seconds"] = None
+            elif status in {"pausing", "paused"}:
+                _delete_job_process_dir(job)
+                job["status"] = "cancelled"
+                job["message"] = "Processamento annullato"
+                job["cancel_requested"] = True
+                job["estimated_remaining_seconds"] = None
+            elif status == "cancelling":
+                _delete_job_process_dir(job)
+                job["status"] = "cancelled"
+                job["message"] = "Processamento annullato"
+                job["cancel_requested"] = True
                 job["estimated_remaining_seconds"] = None
             elif status == "queued":
                 PROCESSING_JOB_QUEUE.append(job_id)
-            elif status == "paused":
-                job["cancel_requested"] = False
-                job["pause_requested"] = False
-                job["estimated_remaining_seconds"] = None
+
+            job.pop("pause_requested", None)
 
             job.pop("started_at_monotonic", None)
             PROCESSING_JOBS[job_id] = job
@@ -1004,6 +1271,22 @@ def _load_processing_jobs_from_disk() -> None:
 def _persist_processing_jobs() -> None:
     with PROCESSING_JOBS_LOCK:
         _persist_processing_jobs_locked()
+
+
+def _job_files_from_batch(batch_id: str) -> list[dict[str, Any]]:
+    try:
+        batch = load_batch_index(RUNTIME_PATHS.batches_dir / batch_id)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+    return [
+        {
+            "document_id": document.document_id,
+            "source_id": "",
+            "name": document.original_file_name,
+            "size_bytes": document.size_bytes,
+        }
+        for document in batch.documents
+    ]
 
 
 def _persist_processing_jobs_locked() -> None:
@@ -1043,7 +1326,8 @@ def _resumable_processing_process_ids() -> set[str]:
         return {
             str(job.get("process_id"))
             for job in PROCESSING_JOBS.values()
-            if str(job.get("status") or "") in {"queued", "processing", "paused"}
+            if str(job.get("status") or "")
+            in {"queued", "processing"}
             and job.get("process_id")
         }
 
@@ -1055,7 +1339,7 @@ def _start_processing_job(payload: dict[str, Any]) -> dict[str, Any]:
 
     batch_index = load_batch_index(RUNTIME_PATHS.batches_dir / batch_id)
     document_count = batch_index.document_count
-    job_id = f"job_{len(PROCESSING_JOBS) + 1:06d}"
+    job_id = f"job_{uuid4().hex[:12]}"
     process_id = _new_processing_process_id(job_id)
     started_at = time.monotonic()
     with PROCESSING_JOBS_LOCK:
@@ -1069,10 +1353,34 @@ def _start_processing_job(payload: dict[str, Any]) -> dict[str, Any]:
             "progress_current": 0,
             "progress_total": document_count,
             "started_at_monotonic": started_at,
+            "created_at": datetime.now().replace(microsecond=0).isoformat(),
             "elapsed_seconds": 0,
             "estimated_remaining_seconds": None,
             "cancel_requested": False,
-            "pause_requested": False,
+            "files": [
+                {
+                    "document_id": document.document_id,
+                    "source_id": str(
+                        (payload.get("source_archive_bindings") or {}).get(
+                            document.document_id
+                        )
+                        or ""
+                    ),
+                    "name": document.original_file_name,
+                    "size_bytes": document.size_bytes,
+                }
+                for document in batch_index.documents
+            ],
+            "source_archive_bindings": dict(
+                payload.get("source_archive_bindings") or {}
+            ),
+            "parent_invoice_record_ids": [
+                str(record_id)
+                for record_id in payload.get("parent_invoice_record_ids", [])
+                if str(record_id).strip()
+            ],
+            "source_kind": str(payload.get("source_kind") or "external_upload"),
+            "archive_sources": bool(payload.get("archive_sources", True)),
         }
         PROCESSING_JOB_QUEUE.append(job_id)
         _persist_processing_jobs_locked()
@@ -1082,23 +1390,99 @@ def _start_processing_job(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _reprocess_archived_source_pdf(payload: dict[str, Any]) -> dict[str, Any]:
-    archived_source_pdf_path = str(payload.get("archived_source_pdf_path") or "").strip()
-    source_file_name = Path(str(payload.get("source_file_name") or "")).name
-    if not archived_source_pdf_path:
-        raise ValueError("PDF origine da riprocessare mancante")
-
-    source_path = _archived_source_pdf_path(archived_source_pdf_path)
+    source_ids = [
+        str(value).strip()
+        for value in payload.get("source_ids", [])
+        if str(value).strip()
+    ]
+    if not source_ids:
+        raise ValueError("Seleziona almeno un PDF origine da riprocessare")
+    sources = [archived_source_path(source_id, RUNTIME_PATHS) for source_id in source_ids]
     batch = import_pdf_batch(
         [
             PdfBatchSource(
                 path=source_path,
-                original_file_name=source_file_name or source_path.name,
+                original_file_name=source.original_file_name,
             )
+            for source, source_path in sources
         ],
         runtime_paths=RUNTIME_PATHS,
-        source_label=f"Riprocessa {source_file_name or source_path.name}",
+        source_label=f"Riprocessamento {len(sources)} PDF",
     )
-    return _start_processing_job({"batch_id": batch.batch_id})
+    bindings = {
+        document.document_id: source.source_id
+        for document, (source, _) in zip(batch.documents, sources, strict=True)
+    }
+    return _start_processing_job(
+        {
+            "batch_id": batch.batch_id,
+            "source_archive_bindings": bindings,
+            "source_kind": "source_archive",
+            "archive_sources": True,
+        }
+    )
+
+
+def _reprocess_archived_invoices(payload: dict[str, Any]) -> dict[str, Any]:
+    record_ids = [
+        str(value).strip()
+        for value in payload.get("record_ids", [])
+        if str(value).strip()
+    ]
+    if not record_ids:
+        raise ValueError("Seleziona almeno una fattura da riprocessare")
+    if len(record_ids) != len(set(record_ids)):
+        raise ValueError("Sono presenti fatture duplicate")
+
+    registry = load_invoice_registry(RUNTIME_PATHS)
+    records_by_id = {
+        str(record.get("record_id") or ""): record
+        for record in registry.get("records", [])
+        if isinstance(record, dict)
+    }
+    records = [records_by_id.get(record_id) for record_id in record_ids]
+    if any(record is None for record in records):
+        raise ValueError("Una fattura selezionata non e piu disponibile")
+
+    typed_records = [record for record in records if record is not None]
+    statuses = {str(record.get("status") or "") for record in typed_records}
+    if len(statuses) != 1 or not statuses.issubset({"saved", "discarded"}):
+        raise ValueError("Seleziona fatture salvate oppure fatture scartate")
+
+    sources = [
+        PdfBatchSource(
+            path=_archived_invoice_pdf_path(str(record.get("archived_pdf_path") or "")),
+            original_file_name=str(record.get("source_file_name") or "fattura.pdf"),
+            parent_invoice_record_id=str(record.get("record_id") or ""),
+            source_page_numbers=tuple(
+                int(page_number)
+                for page_number in record.get("archived_pdf_page_numbers", [])
+                if isinstance(page_number, int | float | str)
+                and str(page_number).strip().isdigit()
+            ),
+        )
+        for record in typed_records
+    ]
+    status = next(iter(statuses))
+    batch = import_pdf_batch(
+        sources,
+        runtime_paths=RUNTIME_PATHS,
+        source_label=f"Riprocessamento {len(sources)} fatture",
+    )
+    try:
+        return _start_processing_job(
+            {
+                "batch_id": batch.batch_id,
+                "parent_invoice_record_ids": record_ids,
+                "source_kind": (
+                    "saved_invoice" if status == "saved" else "discarded_invoice"
+                ),
+                "archive_sources": False,
+            }
+        )
+    except Exception:
+        delete_imported_batch(batch.batch_id, RUNTIME_PATHS)
+        raise
 
 
 def _archived_source_pdf_path(value: str) -> Path:
@@ -1117,6 +1501,19 @@ def _archived_source_pdf_path(value: str) -> Path:
     if source_path.suffix.lower() != ".pdf" or not source_path.is_file():
         raise ValueError("PDF origine non trovato")
     return source_path
+
+
+def _archived_invoice_pdf_path(value: str) -> Path:
+    normalized_value = value.replace("\\", "/").strip().lstrip("/")
+    if not normalized_value:
+        raise ValueError("PDF della fattura non disponibile")
+    invoice_path = (RUNTIME_PATHS.app_data_dir / normalized_value).resolve()
+    archive_invoices_dir = RUNTIME_PATHS.archive_invoices_dir.resolve()
+    if invoice_path != archive_invoices_dir and archive_invoices_dir not in invoice_path.parents:
+        raise ValueError("PDF della fattura fuori dall'archivio")
+    if invoice_path.suffix.lower() != ".pdf" or not invoice_path.is_file():
+        raise ValueError("PDF della fattura non trovato")
+    return invoice_path
 
 
 def _start_next_processing_job_if_idle() -> None:
@@ -1172,8 +1569,21 @@ def _run_processing_job(job_id: str, batch_id: str) -> None:
                 )
             ),
             should_cancel=lambda: bool(_processing_job(job_id).get("cancel_requested")),
-            should_pause=lambda: bool(_processing_job(job_id).get("pause_requested")),
         )
+        _update_processing_job(
+            job_id,
+            status="finalizing",
+            message=(
+                "Archiviazione dei file origine"
+                if _job_archives_sources(job)
+                else "Completamento della lavorazione"
+            ),
+            result=_processing_run_payload(run_index),
+        )
+        if _job_archives_sources(job):
+            _finalize_job_sources(job_id, batch_id, process_id)
+        else:
+            _delete_job_staging(job)
         _update_processing_job(
             job_id,
             status="completed",
@@ -1184,6 +1594,7 @@ def _run_processing_job(job_id: str, batch_id: str) -> None:
     except ProcessingCancelled as error:
         job = _processing_job(job_id)
         _delete_job_process_dir(job)
+        _delete_job_staging(job)
         _update_processing_job(
             job_id,
             status="cancelled",
@@ -1194,24 +1605,25 @@ def _run_processing_job(job_id: str, batch_id: str) -> None:
                 int(job.get("progress_total") or 0) if job else 0,
             ),
         )
-    except ProcessingPaused as error:
-        job = _processing_job(job_id)
-        _update_processing_job(
-            job_id,
-            status="paused",
-            message="Processamento in pausa" if job else str(error),
-            pause_requested=False,
-            **_processing_time_estimate(
-                job_id,
-                int(job.get("progress_current") or 0) if job else 0,
-                int(job.get("progress_total") or 0) if job else 0,
-            ),
-        )
     except Exception as error:
+        job = _processing_job(job_id)
+        if _job_archives_sources(job):
+            try:
+                _finalize_job_sources(
+                    job_id,
+                    batch_id,
+                    str(job.get("process_id") or ""),
+                )
+            except Exception:
+                pass
+        else:
+            _delete_job_staging(job)
+        _delete_job_process_dir(job)
         _update_processing_job(
             job_id,
             status="error",
-            message=str(error),
+            message="Elaborazione non completata. Controlla i file e riprova.",
+            technical_error=str(error),
         )
     finally:
         _finish_active_processing_job(job_id)
@@ -1320,6 +1732,158 @@ def _processing_jobs_payload() -> dict[str, Any]:
     }
 
 
+def _source_archive_payload() -> dict[str, Any]:
+    registry = load_invoice_registry(RUNTIME_PATHS)
+    linked_counts: dict[str, int] = {}
+    for record in registry.get("records", []):
+        if (
+            not isinstance(record, dict)
+            or record.get("status") not in {"saved", "discarded"}
+        ):
+            continue
+        source_path = str(record.get("archived_source_pdf_path") or "")
+        if source_path:
+            linked_counts[source_path] = linked_counts.get(source_path, 0) + 1
+    records = list_archived_sources(RUNTIME_PATHS)
+    return {
+        "ok": True,
+        "records": [
+            {
+                "source_id": source.source_id,
+                "source_file_name": source.original_file_name,
+                "archived_at": source.archived_at,
+                "size_bytes": source.size_bytes,
+                "archived_source_pdf_path": source.relative_path,
+                "archived_source_pdf_url": f"/runtime/{source.relative_path}",
+                "linked_invoice_count": linked_counts.get(source.relative_path, 0),
+            }
+            for source in sorted(records, key=lambda item: item.archived_at, reverse=True)
+        ],
+    }
+
+
+def _reject_sources_used_by_pending_reviews(source_records: list[Any]) -> None:
+    target_origins = {
+        (origin.batch_id, origin.document_id)
+        for source in source_records
+        for origin in source.origins
+    }
+    if not target_origins:
+        return
+    for review_index_path in RUNTIME_PATHS.manifests_dir.rglob("review_batch_index.json"):
+        try:
+            payload = json.loads(review_index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for invoice in payload.get("invoices", []):
+            if not isinstance(invoice, dict) or invoice.get("status", "pending") != "pending":
+                continue
+            origin = (
+                str(invoice.get("source_batch_id") or ""),
+                str(invoice.get("document_id") or ""),
+            )
+            if origin in target_origins:
+                raise ValueError(
+                    "Il file origine contiene fatture ancora da revisionare e non puo essere eliminato"
+                )
+
+
+def _reject_sources_used_by_processing_jobs(source_records: list[Any]) -> None:
+    source_ids = {
+        str(source.source_id)
+        for source in source_records
+        if str(source.source_id).strip()
+    }
+    if not source_ids:
+        return
+
+    with PROCESSING_JOBS_LOCK:
+        is_in_use = any(
+            str(job.get("status") or "") in SOURCE_DELETE_BLOCKING_JOB_STATUSES
+            and bool(
+                source_ids.intersection(
+                    str(source_id)
+                    for source_id in (job.get("source_archive_bindings") or {}).values()
+                    if str(source_id).strip()
+                )
+            )
+            for job in PROCESSING_JOBS.values()
+        )
+
+    if is_in_use:
+        raise ValueError(
+            "Il file origine e usato da una lavorazione. "
+            "Annulla o rimuovi prima la lavorazione."
+        )
+
+
+def _reject_invoice_records_used_by_processing_jobs(record_ids: list[str]) -> None:
+    targets = {record_id for record_id in record_ids if record_id.strip()}
+    if not targets:
+        return
+    with PROCESSING_JOBS_LOCK:
+        is_in_use = any(
+            str(job.get("status") or "") in SOURCE_DELETE_BLOCKING_JOB_STATUSES
+            and bool(
+                targets.intersection(
+                    str(record_id)
+                    for record_id in job.get("parent_invoice_record_ids", [])
+                    if str(record_id).strip()
+                )
+            )
+            for job in PROCESSING_JOBS.values()
+        )
+    if is_in_use:
+        raise ValueError(
+            "La fattura e usata da una lavorazione. "
+            "Annulla o rimuovi prima la lavorazione."
+        )
+
+
+def _reject_invoice_records_used_by_pending_reviews(record_ids: list[str]) -> None:
+    targets = {record_id for record_id in record_ids if record_id.strip()}
+    if not targets:
+        return
+    for review_index_path in RUNTIME_PATHS.manifests_dir.rglob(
+        "review_batch_index.json"
+    ):
+        try:
+            payload = json.loads(review_index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if any(
+            isinstance(invoice, dict)
+            and invoice.get("status", "pending") == "pending"
+            and str(invoice.get("parent_invoice_record_id") or "") in targets
+            for invoice in payload.get("invoices", [])
+        ):
+            raise ValueError(
+                "La fattura contiene un riprocessamento ancora da revisionare."
+            )
+
+
+def _delete_processing_history(payload: dict[str, Any]) -> dict[str, Any]:
+    delete_all = bool(payload.get("all"))
+    requested_ids = {
+        str(value).strip()
+        for value in payload.get("job_ids", [])
+        if str(value).strip()
+    }
+    with PROCESSING_JOBS_LOCK:
+        target_ids = {
+            job_id
+            for job_id, job in PROCESSING_JOBS.items()
+            if str(job.get("status") or "") in TERMINAL_PROCESSING_JOB_STATUSES
+            and (delete_all or job_id in requested_ids)
+        }
+        if not target_ids:
+            raise ValueError("Nessun processo in cronologia selezionato")
+        for job_id in target_ids:
+            PROCESSING_JOBS.pop(job_id, None)
+        _persist_processing_jobs_locked()
+    return {"ok": True, "deleted_count": len(target_ids)}
+
+
 def _processing_job_for_batch(batch_id: str) -> dict[str, Any]:
     with PROCESSING_JOBS_LOCK:
         for job in PROCESSING_JOBS.values():
@@ -1336,83 +1900,20 @@ def _cancel_processing_job(path: str) -> dict[str, Any]:
             raise ValueError("Lavorazione non trovata")
         if job.get("status") in TERMINAL_PROCESSING_JOB_STATUSES:
             return dict(job)
-        if job.get("status") in {"queued", "paused", "removed"}:
-            if job_id in PROCESSING_JOB_QUEUE:
-                PROCESSING_JOB_QUEUE.remove(job_id)
-            _delete_job_process_dir(job)
-            PROCESSING_JOBS[job_id] = {
-                **job,
-                "status": "cancelled",
-                "cancel_requested": True,
-                "pause_requested": False,
-                "message": "Processamento annullato",
-            }
-            _persist_processing_jobs_locked()
-            return dict(PROCESSING_JOBS[job_id])
-        PROCESSING_JOBS[job_id] = {
-            **job,
-            "cancel_requested": True,
-            "pause_requested": False,
-            "message": "Annullamento richiesto",
-        }
-        _persist_processing_jobs_locked()
-        return dict(PROCESSING_JOBS[job_id])
-
-
-def _pause_processing_job(path: str) -> dict[str, Any]:
-    job_id = path.removesuffix("/pause").rsplit("/", 1)[-1]
-    with PROCESSING_JOBS_LOCK:
-        job = PROCESSING_JOBS.get(job_id)
-        if job is None:
-            raise ValueError("Lavorazione non trovata")
-        if job.get("status") in TERMINAL_PROCESSING_JOB_STATUSES or job.get("status") == "paused":
+        if job.get("status") == "cancelling":
             return dict(job)
         if job.get("status") == "queued":
-            if job_id in PROCESSING_JOB_QUEUE:
-                PROCESSING_JOB_QUEUE.remove(job_id)
-            PROCESSING_JOBS[job_id] = {
-                **job,
-                "status": "paused",
-                "pause_requested": False,
-                "cancel_requested": False,
-                "message": "Processamento in pausa",
-                "estimated_remaining_seconds": None,
-            }
-            _persist_processing_jobs_locked()
-            return dict(PROCESSING_JOBS[job_id])
-
-        PROCESSING_JOBS[job_id] = {
-            **job,
-            "pause_requested": True,
-            "cancel_requested": False,
-            "message": "Pausa richiesta",
-        }
-        _persist_processing_jobs_locked()
-        return dict(PROCESSING_JOBS[job_id])
-
-
-def _resume_processing_job(path: str) -> dict[str, Any]:
-    job_id = path.removesuffix("/resume").rsplit("/", 1)[-1]
-    with PROCESSING_JOBS_LOCK:
-        job = PROCESSING_JOBS.get(job_id)
-        if job is None:
-            raise ValueError("Lavorazione non trovata")
-        if job.get("status") != "paused":
+            raise ValueError("Rimuovi dalla coda la lavorazione non ancora avviata")
+        if job.get("status") != "processing":
             return dict(job)
         PROCESSING_JOBS[job_id] = {
             **job,
-            "status": "queued",
-            "message": "Processamento rimesso in coda",
-            "cancel_requested": False,
-            "pause_requested": False,
-            "estimated_remaining_seconds": None,
+            "status": "cancelling",
+            "cancel_requested": True,
+            "message": "Annullamento in corso",
         }
-        if job_id not in PROCESSING_JOB_QUEUE:
-            PROCESSING_JOB_QUEUE.append(job_id)
         _persist_processing_jobs_locked()
-
-    _start_next_processing_job_if_idle()
-    return _processing_job(job_id)
+        return dict(PROCESSING_JOBS[job_id])
 
 
 def _remove_processing_job(path: str) -> dict[str, Any]:
@@ -1421,17 +1922,19 @@ def _remove_processing_job(path: str) -> dict[str, Any]:
         job = PROCESSING_JOBS.get(job_id)
         if job is None:
             raise ValueError("Lavorazione non trovata")
-        if job.get("status") == "processing":
-            raise ValueError("Metti in pausa o annulla la lavorazione attiva")
+        if job.get("status") in {"processing", "cancelling"}:
+            raise ValueError("Annulla la lavorazione attiva prima di rimuoverla")
+        if job.get("status") != "queued":
+            return dict(job)
         if job_id in PROCESSING_JOB_QUEUE:
             PROCESSING_JOB_QUEUE.remove(job_id)
         _delete_job_process_dir(job)
+        _delete_job_staging(job)
         PROCESSING_JOBS[job_id] = {
             **job,
-            "status": "removed",
+            "status": "cancelled",
             "message": "Lavorazione rimossa dalla coda",
             "cancel_requested": False,
-            "pause_requested": False,
             "estimated_remaining_seconds": None,
         }
         _persist_processing_jobs_locked()
@@ -1447,10 +1950,137 @@ def _delete_job_process_dir(job: dict[str, Any] | None) -> None:
     shutil.rmtree(RUNTIME_PATHS.manifests_dir / process_id, ignore_errors=True)
 
 
+def _delete_job_staging(job: dict[str, Any] | None) -> None:
+    if not job:
+        return
+    batch_id = str(job.get("batch_id") or "")
+    if not batch_id:
+        return
+    shutil.rmtree(RUNTIME_PATHS.batches_dir / batch_id, ignore_errors=True)
+
+
+def _finalize_job_sources(
+    job_id: str,
+    batch_id: str,
+    process_id: str,
+    allow_missing: bool = False,
+) -> None:
+    batch_dir = RUNTIME_PATHS.batches_dir / batch_id
+    if not batch_dir.is_dir():
+        return
+    job = _processing_job(job_id)
+    batch = load_batch_index(batch_dir)
+    if allow_missing:
+        available_documents = [
+            document
+            for document in batch.documents
+            if (batch_dir / document.relative_path).is_file()
+            or str(
+                (job.get("source_archive_bindings") or {}).get(document.document_id)
+                or ""
+            )
+        ]
+        batch = replace(
+            batch,
+            document_count=len(available_documents),
+            documents=available_documents,
+        )
+    promoted = promote_batch_sources(
+        batch,
+        process_id,
+        RUNTIME_PATHS,
+        source_bindings=dict(job.get("source_archive_bindings") or {}),
+    )
+    promoted_files = [
+            {
+                "document_id": document.document_id,
+                "source_id": source.source_id,
+                "name": document.original_file_name,
+                "size_bytes": document.size_bytes,
+            }
+            for document, source in zip(batch.documents, promoted, strict=True)
+        ]
+    if allow_missing:
+        promoted_by_document = {
+            str(item.get("document_id") or ""): item for item in promoted_files
+        }
+        files = [
+            promoted_by_document.get(str(item.get("document_id") or ""), item)
+            for item in job.get("files", [])
+            if isinstance(item, dict)
+        ]
+    else:
+        files = promoted_files
+    _update_processing_job(job_id, files=files)
+    shutil.rmtree(batch_dir, ignore_errors=True)
+
+
+def _reconcile_terminal_job_storage() -> None:
+    with PROCESSING_JOBS_LOCK:
+        jobs = [dict(job) for job in PROCESSING_JOBS.values()]
+    for job in jobs:
+        status = str(job.get("status") or "")
+        if status not in TERMINAL_PROCESSING_JOB_STATUSES:
+            continue
+        if status in {"completed", "error"}:
+            if _job_archives_sources(job):
+                try:
+                    _finalize_job_sources(
+                        str(job.get("job_id") or ""),
+                        str(job.get("batch_id") or ""),
+                        str(job.get("process_id") or ""),
+                        allow_missing=True,
+                    )
+                except Exception:
+                    continue
+            else:
+                _delete_job_staging(job)
+        else:
+            _delete_job_staging(job)
+
+
+def _reconcile_finalizing_jobs() -> None:
+    with PROCESSING_JOBS_LOCK:
+        jobs = [
+            dict(job)
+            for job in PROCESSING_JOBS.values()
+            if str(job.get("status") or "") == "finalizing"
+        ]
+    for job in jobs:
+        job_id = str(job.get("job_id") or "")
+        try:
+            if _job_archives_sources(job):
+                _finalize_job_sources(
+                    job_id,
+                    str(job.get("batch_id") or ""),
+                    str(job.get("process_id") or ""),
+                )
+            else:
+                _delete_job_staging(job)
+            _update_processing_job(
+                job_id,
+                status="completed",
+                message="Processamento completato",
+            )
+        except Exception as error:
+            _update_processing_job(
+                job_id,
+                status="error",
+                message="Archiviazione dei file origine non completata.",
+                technical_error=str(error),
+            )
+
+
 def _processing_job(job_id: str) -> dict[str, Any]:
     with PROCESSING_JOBS_LOCK:
         job = PROCESSING_JOBS.get(job_id)
         return dict(job) if job else {}
+
+
+def _job_archives_sources(job: dict[str, Any] | None) -> bool:
+    if not job:
+        return True
+    return bool(job.get("archive_sources", True))
 
 
 def _pick_windows_folder() -> Path | None:

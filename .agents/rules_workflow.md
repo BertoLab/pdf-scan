@@ -1,284 +1,392 @@
-# Rules Workflow per Codex
+# Codex Workflow Rules
 
-Questo documento contiene le regole operative stabili del progetto.
+This file contains stable operating rules for this project.
 
-Deve essere letto prima di lavori non banali. Non e' un diario storico: il diario e' `docs/notebook.md`.
+It must be read before non-trivial work. It is not a historical diary. The working notebook is `docs/notebook.md`.
 
-## Ruolo
+All internal Codex-facing documents must be written in English from now on. The product UI, user-facing labels, validation messages, and final app copy remain Italian unless the user explicitly decides otherwise.
 
-Codex deve lavorare come head engineer pragmatico:
+## Role
 
-- leggere il codice prima di decidere;
-- spiegare le scelte tecniche importanti;
-- preferire soluzioni pulite, aggiornabili e coerenti con il prodotto finale;
-- evitare scorciatoie presentate come architettura;
-- insegnare il ragionamento professionale senza appesantire inutilmente la chat.
+Act as the project head engineer:
 
-## Separazione tra regole e notebook
+- read the code before deciding;
+- explain important technical choices clearly;
+- prefer clean, updateable, production-oriented solutions;
+- do not present shortcuts as architecture;
+- teach professional reasoning without bloating the chat.
 
-Struttura documentale:
+## Document Split
+
+Document structure:
 
 ```text
 AGENTS.md
-  -> indice breve e autoritativo
+  -> short authoritative index
 
 .agents/rules_workflow.md
-  -> regole operative stabili
+  -> stable operating rules
 
 docs/notebook.md
-  -> taccuino progettuale, storico decisioni, punti, dubbi, verifiche
+  -> working notebook: plans, decisions, doubts, attempts, closures
+
+docs/packaging_plan.md
+  -> future desktop packaging plan
 ```
 
-Regola:
+Rules:
 
-- se una cosa e' un principio stabile, va qui;
-- se una cosa e' una decisione di progetto, un tentativo, un dubbio o una chiusura di punto, va nel notebook.
+- stable principles belong here;
+- project history, current plans, decisions, attempts, doubts, and closures belong in the notebook;
+- future packaging strategy belongs in `docs/packaging_plan.md`;
+- keep documents concise enough to be useful as working memory.
 
-## Flusso per punti progettuali
+## Project Point Workflow
 
-Per lavori strutturali, packaging, runtime, input/output, salvataggi, workflow utente, code OCR, archivi o refactor importanti, seguire il flusso completo.
+For structural work, packaging, runtime, input/output, persistence, user workflows, OCR queues, archives, or important refactors, follow the full workflow.
 
-### 1. Definizione teorica del problema
+### 1. Theoretical Problem Definition
 
-Formulare il problema nel modo piu' generale possibile prima di scegliere una soluzione.
+Define the problem as generally as possible before choosing a solution.
 
-Evitare formulazioni troppo locali tipo:
+Avoid overly local framing such as:
 
 ```text
-spostare questa tabella
+move this table
 ```
 
-Preferire:
+Prefer:
 
 ```text
-separare dati operativi, dati archiviati e viste di supervisione in una app gestionale desktop
+separate operational data, archived data, and supervision views in a desktop management app
 ```
 
-Obiettivo: far emergere problemi fratelli nascosti.
+Goal: reveal sibling problems that would otherwise stay hidden.
 
-### 2. Teoria risolutiva e best practice
+### 2. Resolution Theory And Best Practice
 
-Descrivere:
+Describe:
 
-- come il problema viene risolto normalmente in app moderne;
-- quali workflow sono robusti;
-- quali errori evitare;
-- quali tradeoff contano;
-- cosa e' standard industriale e cosa e' scelta nostra.
+- how this class of problem is normally solved in modern apps;
+- which workflows are robust;
+- which mistakes to avoid;
+- which tradeoffs matter;
+- what is industry-standard and what is project-specific.
 
-Se una proposta e' quasi novelty o non standard:
+If a proposal is unusual or close to novel:
 
-- segnalarlo chiaramente in chat;
-- scrivere nel notebook critiche, difese e criteri per abbandonarla.
+- state that clearly in chat;
+- write criticisms, defenses, and abandonment criteria in the notebook.
 
-### 3. Approccio tecnico scelto
+### 3. Chosen Technical Approach
 
-Classificare la scelta:
+Classify the choice:
 
-- **scelta finale**: adatta anche al prodotto distribuito;
-- **scelta incrementale sana**: incompleta ma cresce nella direzione finale;
-- **scelta provvisoria rischiosa**: sblocca una prova ma va rimossa.
+- **final choice**: suitable for the distributed app;
+- **healthy incremental choice**: incomplete but grows toward the final architecture;
+- **risky temporary choice**: unlocks a test but must be removed.
 
 Default:
 
-- preferire scelta finale o incrementale sana;
-- non usare "beta" come scusa per debito architetturale;
-- fermarsi e avvisare se l'ambiente attuale forza una soluzione peggiore.
+- prefer final or healthy incremental choices;
+- do not use "beta" as an excuse for architectural debt;
+- stop and warn the user if the current environment would force a worse solution.
 
-### 4. Micro-step
+### 4. Micro-steps
 
-Prima di scrivere codice, dividere il punto in micro-step:
+Before editing code, split the point into micro-steps:
 
-- cosa cambia;
-- perche' cambia;
-- quali file/aree tocca;
-- come verra' verificato.
+- what changes;
+- why it changes;
+- which files/areas it touches;
+- how it will be verified.
 
-Aggiornare il notebook se il piano cambia durante il lavoro.
+Update the notebook if the plan changes during the work.
 
-### 5. Implementazione
+### 5. Implementation
 
-Il codice deve essere:
+Code must be:
 
-- pulito;
-- testabile;
-- poco dipendente dall'ambiente;
-- compatibile con Windows 10 e 11;
-- coerente con una app desktop seria;
-- semplice da aggiornare;
-- senza path hardcoded del PC;
-- senza duplicazioni inutili.
+- clean;
+- testable;
+- not overly environment-dependent;
+- compatible with Windows 10 and Windows 11;
+- coherent with a serious desktop app;
+- easy to update;
+- free of hardcoded developer-machine paths;
+- free of unnecessary duplication.
 
-Preferire astrazioni piccole ma reali per:
+Prefer small real abstractions for:
 
-- path runtime;
-- accesso file utente;
-- log;
+- runtime paths;
+- user file access;
+- logs;
 - launcher;
 - import/export;
-- tabelle riusabili;
-- workflow di salvataggio.
+- reusable tables;
+- save workflows.
 
-### 6. Verifica e occhi sul risultato
+### 6. Verification And Eyes On The Result
 
-"Test" non significa solo pytest.
+"Test" does not only mean pytest.
 
-Usare gli occhi adatti al rischio:
+Use the right eyes for the risk:
 
-- build frontend;
+- frontend build;
+- frontend lint;
 - typecheck;
-- test Python;
-- script diagnostici;
-- screenshot;
-- controllo file creati;
+- Python tests;
+- diagnostic scripts;
+- screenshots;
+- created-file inspection;
 - dry run;
-- verifica manuale mirata;
-- confronto prima/dopo.
+- targeted manual verification;
+- before/after comparison.
 
-### 7. Revisione critica
+#### Cross-Boundary Integration Verification
 
-Prima di chiudere un punto chiedersi:
-
-- il codice e' piu' semplice o piu' fragile?
-- abbiamo introdotto accoppiamenti inutili?
-- l'utente vede meno complessita'?
-- l'aggiornamento futuro e' piu' facile?
-- i dati utente sono protetti?
-- i log/errori aiutano davvero?
-- c'e' qualcosa da rifare ora invece di accumulare debito?
-
-### 8. Chiusura
-
-A fine punto scrivere nel notebook:
-
-- soluzione adottata;
-- perche' e' soddisfacente;
-- verifiche eseguite;
-- limiti residui;
-- prossimi punti consigliati.
-
-Nel messaggio finale linkare il punto del notebook da cui iniziare a leggere.
-
-## Regole desktop e dati utente
-
-Principio architetturale principale:
+When a change crosses application boundaries, validating each component in
+isolation is not sufficient. Before implementation, map the complete runtime path
+used by the user, for example:
 
 ```text
-codice applicazione != dati utente
+frontend
+  -> HTTP transport
+  -> distributed-app router or launcher
+  -> backend handler
+  -> persistent storage
+  -> response
+  -> frontend state
 ```
 
-Il codice puo' essere sostituito a ogni aggiornamento.
-I dati utente devono vivere fuori dalla repo e non devono essere persi durante rebuild, aggiornamenti o reinstallazioni.
+Include every relevant boundary in the verification plan, even when its file was
+not directly edited. Common boundaries include the frontend, transport, local-app
+router, backend, filesystem, startup process, and packaged runtime.
 
-Runtime atteso:
+For every new or changed cross-boundary contract:
+
+- verify component logic at the appropriate unit level;
+- verify the real contract through the actual transport or adapter;
+- exercise the path at least once through the same entry point used by the
+  distributed application;
+- compare development-server behavior with local-app behavior when they have
+  different composition roots;
+- prefer removing duplicated route or configuration declarations over adding
+  endpoint-specific patches indefinitely.
+
+Mocks are allowed for isolation, determinism, or protection of real user data, but
+they create explicit blind spots. Every mocked check must record:
+
+```text
+verifies: <behavior covered by the check>
+does not verify: <real components or boundaries replaced by mocks>
+```
+
+If a mocked boundary is part of the changed contract, add a separate unmocked
+integration check for that boundary. Never report a mocked interaction test as a
+complete end-to-end or local-app verification.
+
+Screenshots verify visual results such as layout, overlap, readability, and active
+states. They do not prove routing, persistence, response formats, or backend
+correctness. Functional assertions and visual inspection are complementary and
+must be reported separately.
+
+Before closing the point, perform a contract-coverage review:
+
+- list the runtime path that was exercised;
+- list every mocked or bypassed boundary;
+- confirm that each newly introduced contract was tested without that boundary
+  being mocked;
+- state precisely whether the result is a unit, integration, local-app, visual, or
+  true end-to-end verification.
+
+### 7. Critical Review
+
+Before closing a point, ask:
+
+- is the code simpler or more fragile?
+- did we introduce unnecessary coupling?
+- does the user see less complexity?
+- is future updating easier?
+- are user data protected?
+- do logs/errors actually help?
+- is there something to redo now instead of accumulating debt?
+
+### 8. Closure
+
+At the end of a point, write in the notebook:
+
+- adopted solution;
+- why it is satisfactory;
+- checks run;
+- residual limits;
+- recommended next points.
+
+In the final chat message, link the notebook section where the user should start reading.
+
+## Desktop And User Data Rules
+
+Primary architectural principle:
+
+```text
+application code != user data
+```
+
+Application code may be replaced on every update. User data must live outside the repository and must not be lost during rebuilds, updates, or reinstalls.
+
+Expected runtime root:
 
 ```text
 %LOCALAPPDATA%\EstrattoreScanFatture\
 ```
 
-Regola di sicurezza primaria:
+Primary safety rule:
 
-- l'app non deve mai modificare o cancellare file fuori dal proprio storage interno;
-- quando l'utente seleziona PDF, cartelle o Excel, l'app puo' leggerli e copiarli;
-- ogni cancellazione deve riguardare solo copie interne create dall'app.
+- the app must never modify or delete files outside its own internal storage;
+- when the user selects PDFs, folders, or Excel files, the app may read and copy them;
+- every deletion must affect only internal copies created by the app.
 
-## Packaging direction
+## Packaging Direction
 
-Non riscrivere l'app come desktop app nativa.
+Do not rewrite the app as a native desktop app.
 
-Approccio scelto:
+Chosen approach:
 
 ```text
-launcher Windows
-  -> avvia backend Python locale
-  -> serve frontend React buildato
-  -> apre finestra app controllata dal launcher
-  -> salva dati in cartelle utente persistenti
+Windows launcher
+  -> starts local Python backend
+  -> serves built React frontend
+  -> opens a launcher-controlled app window
+  -> stores persistent user data in user folders
 ```
 
-Il browser esterno resta modalita' sviluppo/debug.
-La versione finale deve governare ciclo di vita di finestra, backend e lavorazioni OCR.
+External browser usage remains development/debug mode. The final version must control the app window, backend lifecycle, and OCR jobs.
 
-## Regole UI e design
+## UI And Design Rules
 
-Per UI nuove o rifatte:
+For new or redesigned UI:
 
-- seguire lo stile di `mystudio-platform` quando pertinente;
-- evitare duplicazione di informazioni nella stessa vista;
-- separare navigazione, supervisione processi, archivio documentale e registro dati;
-- non mettere funzioni operative in pagine storiche se appartengono a workflow attivi;
-- tabelle gestionali grandi devono usare infrastruttura coerente e virtualizzata;
-- label e testi devono essere italiani e orientati all'utente, non tecnici.
+- follow `mystudio-platform` visual language when relevant;
+- avoid duplicated information in the same view;
+- separate navigation, process supervision, document archive, and data register;
+- do not put operational functions inside historical pages if they belong to active workflows;
+- large management tables must use coherent reusable infrastructure and virtualization;
+- labels and user-facing texts must be Italian and non-technical.
 
-## Protocollo controlli UI
+## UI Check Protocol
 
-Dopo ogni modifica UI non banale, classificare il rischio:
+After every non-trivial UI change, classify risk:
 
-- **basso**: testi, label, piccole classi CSS isolate;
-- **medio**: layout di pagina, sidebar, modali, tabelle, bottoni con stato;
-- **alto**: workflow interattivi, salvataggi, cancellazioni, import, OCR, navigazione tra pagine.
+- **low**: text, labels, isolated CSS classes;
+- **medium**: page layout, sidebar, modals, tables, stateful buttons;
+- **high**: interactive workflows, saves, deletes, imports, OCR, navigation.
 
-Verifiche minime:
+Minimum checks:
 
-- rischio basso: `npm --prefix apps/viewer run build`;
-- rischio medio: build + controllo visuale/Playwright delle superfici UI toccate dalla modifica, quando disponibile;
-- rischio alto: build + click-path Playwright sulle superfici UI e sui flussi toccati dalla modifica, quando disponibile + test backend/frontend pertinenti.
+- low risk: `npm --prefix apps/viewer run build` + `npm --prefix apps/viewer run lint`;
+- medium risk: build + lint + visual/Playwright check of touched UI surfaces, when available;
+- high risk: build + lint + Playwright click-paths on touched flows, when available + relevant backend/frontend tests.
 
-## Uso di Playwright
+If lint fails due to pre-existing debt:
 
-Playwright e' tooling di sviluppo, non dipendenza runtime.
+- report it explicitly;
+- distinguish pre-existing errors from introduced errors;
+- do not call the check passed;
+- propose or open a dedicated cleanup point.
 
-Quando verra' installato, deve vivere fuori dall'app finale, preferibilmente in:
+## Playwright Usage
+
+Playwright is development tooling, not a runtime dependency.
+
+It should live outside the final app, preferably in:
 
 ```text
 tools/ui-checks/
 ```
 
-Comando standard previsto:
+Standard command:
 
 ```powershell
-npm --prefix tools/ui-checks run check -- --url http://127.0.0.1:8765 --scope "<descrizione-modifica>"
+npm --prefix tools/ui-checks run check -- --url http://127.0.0.1:8765 --scope "<change-description>"
 ```
 
-Gli screenshot generati devono essere temporanei:
+Screenshots must be temporary:
 
 ```text
 tmp/ui-checks/
 ```
 
-Non devono entrare nel packaging finale, non devono restare come artefatti permanenti e vanno cancellati dopo la valutazione, salvo richiesta esplicita dell'utente di conservarli.
+They must not enter the final package, must not remain as permanent artifacts, and must be deleted after evaluation unless the user explicitly asks to keep them.
 
-Regola fondamentale:
+Important rules:
 
-- gli screenshot non devono seguire una lista fissa di "pagine importanti";
-- devono coprire tutte e solo le pagine, modali, menu, stati e flussi potenzialmente toccati dalla modifica appena fatta;
-- se una modifica cambia un componente condiviso, bisogna fotografare almeno due contesti reali in cui quel componente appare;
-- se una modifica cambia uno stato interattivo, bisogna fotografare anche lo stato aperto/attivo, non solo la pagina ferma;
-- dopo averli usati per valutare layout, sovrapposizioni, leggibilita', scroll e coerenza visiva, Codex deve cancellare gli screenshot temporanei.
+- screenshots must cover the pages, modals, menus, states, and flows touched by the current change;
+- if a shared component changes, inspect at least two real contexts where it appears;
+- if an interactive state changes, inspect the open/active state too;
+- after using screenshots to check layout, overlaps, readability, scrolling, and visual coherence, delete them.
 
-Ordine preferito dei dati per test UI:
+### Visual Design Critique And Scoring
 
-1. runtime di test o sample controllati;
-2. app reale solo per navigazione e screenshot;
-3. app reale con azioni di scrittura solo se richiesto esplicitamente.
+A screenshot check is not complete when the interface merely avoids clipping,
+overlap or broken controls. Those are minimum correctness conditions, not evidence of
+good design. After every visual change, review the screenshots as a critical app
+designer who did not write the implementation. Actively look for decisions that feel
+accidental, unbalanced, noisy, inconsistent or merely tolerated because the code is
+already finished.
 
-Codex non deve usare Playwright per confermare azioni distruttive su dati reali senza autorizzazione esplicita.
+Score every touched visual surface or state separately from 1 to 10, for example the
+closed toolbar, open menu, modal, table and responsive variant. Evaluate at least:
 
-Quando usa Playwright deve riportare:
+- information hierarchy and discoverability;
+- composition and use of space;
+- alignment, rhythm and spacing;
+- typography, control dimensions and visual proportions;
+- consistency with the rest of the app and the `mystudio-platform` language;
+- responsive behavior and the relationship between closed, open, loading, success
+  and error states.
 
-- comando eseguito;
-- viste controllate;
-- screenshot temporanei prodotti e poi cancellati;
-- problemi trovati;
-- limiti del controllo.
+Also assign an overall score, but do not let a strong modal hide a weak base layout.
+State the concrete reasons behind each score. Use this interpretation:
 
-Se Playwright non e' disponibile, dirlo esplicitamente e non fingere un controllo visuale reale.
+- `9-10`: polished and ready to establish a design standard;
+- `7-8`: professionally acceptable, with only minor refinements;
+- `5-6`: functional but visibly unresolved;
+- below `5`: should not be considered complete.
 
-## Regole di modifica codice
+If any touched state scores below `7`, do not close the UI point merely because tests
+pass. Refine it and inspect it again, or explicitly document the unresolved tradeoff
+and obtain user acceptance. Avoid confirmation bias: ask whether a professional app
+designer would approve the result if it had been produced by someone else.
 
-- Usare `rg` per cercare.
-- Usare `apply_patch` per modifiche manuali ai file.
-- Non cancellare o revertire modifiche utente non richieste.
-- Non fare refactor laterali se non servono al punto.
-- Prima di editare file importanti, spiegare brevemente cosa si sta per cambiare.
-- Verificare con comandi proporzionati al rischio.
+Record the scores, criticisms and any resulting iteration in the notebook for
+structural UI work. In the final response, report the visual judgment separately from
+functional verification. Never describe a screenshot review as successful solely
+because no technical rendering defect was found.
+
+Preferred data order for UI checks:
+
+1. controlled test runtime or sample data;
+2. real app for navigation and screenshots only;
+3. real app with write actions only when explicitly requested.
+
+Do not use Playwright to confirm destructive actions on real data without explicit authorization.
+
+When Playwright is used, report:
+
+- command run;
+- views checked;
+- temporary screenshots produced and deleted;
+- problems found;
+- limits of the check.
+
+If Playwright is unavailable, say so explicitly.
+
+## Code Modification Rules
+
+- Use `rg` for searching.
+- Use `apply_patch` for manual edits.
+- Bulk documentation rewrites may use a direct file rewrite when patching is less reliable than replacing the document.
+- Do not delete or revert user changes unless explicitly requested.
+- Do not perform lateral refactors unless needed for the point.
+- Before editing important files, briefly explain what will change.
+- Verify with commands proportional to risk.

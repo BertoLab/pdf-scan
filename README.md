@@ -392,6 +392,40 @@ cd apps\viewer
 npm run dev
 ```
 
+### Raccolta dati per il miglioramento dell'estrazione
+
+L'app raccoglie automaticamente, nella propria cartella dati, le evidenze OCR,
+le proposte iniziali, i valori mostrati dopo l'anagrafica e le revisioni salvate:
+
+```text
+%LOCALAPPDATA%\EstrattoreScanFatture\feedback\
+```
+
+La raccolta non rilancia l'OCR e non duplica stabilmente i PDF. Per creare un
+pacchetto consistente da trasferire nell'ambiente di analisi:
+
+Nell'app aprire `Area sviluppatore` e scegliere
+`Esporta dati per miglioramento`. Dopo la conferma, il pacchetto completo viene
+salvato sul Desktop in una nuova cartella con data e ora. Sono inclusi anche i PDF
+ancora disponibili negli archivi dell'app.
+
+Lo stesso export puo essere eseguito dagli strumenti di sviluppo con:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_feedback_collection.py .\feedback-export
+```
+
+Il pacchetto contiene una copia consistente del database, le evidenze OCR
+compresse, i PDF ancora disponibili nell'archivio e un manifest con checksum.
+Per omettere i PDF usare `--without-pdfs`.
+
+Per controllare run completi o temporanei, revisioni, operazioni pendenti,
+anomalie e sorgenti immagine non piu disponibili senza creare un export:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_feedback_collection.py --status-only
+```
+
 ### Importare l'anagrafica clienti
 
 Nel viewer, il pulsante `Anagrafica clienti` apre la finestra di gestione

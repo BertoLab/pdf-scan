@@ -186,6 +186,9 @@ def _complete_field_from_registry(
     field["registry_source_row"] = (
         decision.record.source_row if decision.record else None
     )
+    field["review_registry_snapshot"] = (
+        _registry_snapshot(decision.record) if decision.record else None
+    )
 
 
 def _mark_registry_conflict(
@@ -264,6 +267,18 @@ def _record_value(record: RegistryRecord, registry_field: str) -> str | None:
 
 def _record_key(record: RegistryRecord) -> tuple[str, int]:
     return record.registry_id, record.source_row
+
+
+def _registry_snapshot(record: RegistryRecord) -> dict:
+    return {
+        "registry_id": record.registry_id,
+        "source_row": record.source_row,
+        "codice_anagrafica": record.codice_anagrafica,
+        "nominativo": record.nominativo,
+        "codice_fiscale": record.codice_fiscale,
+        "partita_iva": record.partita_iva,
+        "tipologia": record.tipologia,
+    }
 
 
 def _field_value(field: dict | None) -> str:

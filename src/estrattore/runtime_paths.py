@@ -26,6 +26,8 @@ class RuntimePaths:
     archive_sources_dir: Path
     logs_dir: Path
     config_dir: Path
+    feedback_dir: Path
+    feedback_evidence_dir: Path
 
     @property
     def registry_input_file(self) -> Path:
@@ -55,6 +57,14 @@ class RuntimePaths:
     def invoice_registry_export_xlsx_file(self) -> Path:
         return self.invoice_registry_dir / "registro_fatture.xlsx"
 
+    @property
+    def source_archive_index_file(self) -> Path:
+        return self.archive_sources_dir / "source_archive_index.json"
+
+    @property
+    def feedback_database_file(self) -> Path:
+        return self.feedback_dir / "feedback.sqlite3"
+
     def ensure_directories(self) -> None:
         for directory in (
             self.app_data_dir,
@@ -70,6 +80,8 @@ class RuntimePaths:
             self.archive_sources_dir,
             self.logs_dir,
             self.config_dir,
+            self.feedback_dir,
+            self.feedback_evidence_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -88,6 +100,8 @@ class RuntimePaths:
             "archive_sources_dir": str(self.archive_sources_dir),
             "logs_dir": str(self.logs_dir),
             "config_dir": str(self.config_dir),
+            "feedback_dir": str(self.feedback_dir),
+            "feedback_evidence_dir": str(self.feedback_evidence_dir),
         }
 
 
@@ -108,6 +122,8 @@ def get_runtime_paths(app_data_dir: Path | None = None) -> RuntimePaths:
         archive_sources_dir=base_dir / "archive" / "sources",
         logs_dir=base_dir / "logs",
         config_dir=base_dir / "config",
+        feedback_dir=base_dir / "feedback",
+        feedback_evidence_dir=base_dir / "feedback" / "evidence",
     )
 
 

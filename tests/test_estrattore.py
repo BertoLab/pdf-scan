@@ -28,6 +28,7 @@ from estrattore.debug_output import (
 from estrattore import debug_flags
 from estrattore.economic_summary_extraction import find_economic_summary_regions
 from estrattore.economic_summary_extraction import (
+    EconomicSummaryFieldCandidate,
     EconomicSummaryResolvedRow,
     EconomicSummaryRegionCandidate,
     _best_economic_value_combination,
@@ -45,7 +46,11 @@ from estrattore.invoice_date_extraction import (
     InvoiceDateCandidate,
     find_invoice_date_candidates,
 )
-from estrattore.invoice_number_extraction import find_invoice_number_candidates
+from estrattore.invoice_number_extraction import (
+    InvoiceNumberCandidate,
+    find_invoice_number_candidates,
+    select_invoice_number_target_per_page,
+)
 from estrattore.issuer_name_extraction import (
     IssuerNameCandidate,
     find_issuer_name_candidates,
@@ -1608,6 +1613,214 @@ def test_find_invoice_number_candidates_accepts_short_alphanumeric_slash_documen
     assert by_value["4/A"].selected_as_numero_fattura is True
 
 
+def test_find_invoice_number_candidates_prefers_exact_document_number_over_body_reference() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    OcrToken("NUMERO", BoundingBox(1057, 399, 1119, 411)),
+                    OcrToken("DOCUMENTO", BoundingBox(1123, 399, 1215, 411)),
+                    OcrToken("DATA", BoundingBox(1320, 399, 1356, 411)),
+                    OcrToken("DOCUMENTO", BoundingBox(1361, 399, 1451, 411)),
+                    OcrToken("87", BoundingBox(1119, 426, 1143, 442)),
+                    OcrToken("10/01/2025", BoundingBox(1362, 425, 1491, 444)),
+                    OcrToken("(G.U.23", BoundingBox(958, 1701, 1035, 1722)),
+                    OcrToken("fattura,", BoundingBox(777, 1766, 844, 1785)),
+                    OcrToken("numero", BoundingBox(853, 1771, 927, 1783)),
+                    OcrToken("o", BoundingBox(936, 1771, 946, 1783)),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_invoice_number_candidates(document)
+    by_value = {candidate.normalized_value: candidate for candidate in candidates}
+
+    assert by_value["87"].anchor_context == "numero documento"
+    assert by_value["87"].anchor_quality == 4
+    assert by_value["G.U.23"].score < by_value["87"].score
+    assert by_value["G.U.23"].selected_as_numero_fattura is False
+    assert by_value["87"].selected_as_numero_fattura is True
+
+
+def test_find_invoice_number_candidates_rejects_anchor_below_company_identifier() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    OcrToken("Rea", BoundingBox(491, 291, 533, 311), 0.93),
+                    OcrToken("GR-135284", BoundingBox(541, 290, 668, 311), 0.92),
+                    OcrToken("N.", BoundingBox(414, 360, 431, 376), 0.82),
+                    OcrToken("fattura", BoundingBox(438, 361, 491, 376), 0.96),
+                    OcrToken("Data", BoundingBox(636, 361, 675, 376), 0.96),
+                    OcrToken("8", BoundingBox(492, 389, 502, 403), 0.96),
+                    OcrToken("14/01/2025", BoundingBox(637, 387, 767, 406), 0.95),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_invoice_number_candidates(document)
+    by_value = {candidate.normalized_value: candidate for candidate in candidates}
+
+    assert by_value["GR-135284"].anchor_context == "n fattura"
+    assert by_value["GR-135284"].score < 120
+    assert by_value["GR-135284"].selected_as_numero_fattura is False
+    assert by_value["8"].anchor_context == "n fattura"
+    assert by_value["8"].anchor_quality == 4
+    assert by_value["8"].selected_as_numero_fattura is True
+
+
+def test_find_invoice_number_candidates_does_not_prefer_alphanumeric_format() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1000,
+                height=1000,
+                tokens=[OcrToken("42", BoundingBox(100, 100, 125, 120))],
+            ),
+            DocumentPage(
+                page_number=2,
+                width=1000,
+                height=1000,
+                tokens=[OcrToken("AB-42", BoundingBox(100, 100, 155, 120))],
+            ),
+        ],
+    )
+
+    candidates = find_invoice_number_candidates(document)
+    by_value = {candidate.normalized_value: candidate for candidate in candidates}
+
+    assert by_value["42"].score == by_value["AB-42"].score == 50.0
+    assert by_value["42"].selected_as_numero_fattura is False
+    assert by_value["AB-42"].selected_as_numero_fattura is False
+
+
+def test_invoice_number_anchor_geometry_scores_direction_and_alignment_continuously() -> None:
+    def page_with_candidate(
+        page_number: int,
+        value: str,
+        candidate_bbox: BoundingBox,
+    ) -> DocumentPage:
+        return DocumentPage(
+            page_number=page_number,
+            width=1000,
+            height=1000,
+            tokens=[
+                OcrToken("N.", BoundingBox(100, 100, 125, 120)),
+                OcrToken("fattura", BoundingBox(130, 100, 200, 120)),
+                OcrToken(value, candidate_bbox),
+            ],
+        )
+
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            page_with_candidate(1, "101", BoundingBox(210, 100, 240, 120)),
+            page_with_candidate(2, "102", BoundingBox(20, 100, 50, 120)),
+            page_with_candidate(3, "103", BoundingBox(145, 140, 175, 160)),
+            page_with_candidate(4, "104", BoundingBox(310, 140, 340, 160)),
+            page_with_candidate(5, "105", BoundingBox(145, 60, 175, 80)),
+        ],
+    )
+
+    candidates = find_invoice_number_candidates(document)
+    by_value = {candidate.normalized_value: candidate for candidate in candidates}
+
+    assert by_value["101"].score > by_value["102"].score
+    assert by_value["103"].score > by_value["104"].score > by_value["105"].score
+    assert by_value["105"].anchor_context == "n fattura"
+    assert by_value["105"].score > 50
+
+
+def test_find_invoice_number_candidates_prefers_complete_over_exact_fragments() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    OcrToken("Numero", BoundingBox(1200, 620, 1270, 641)),
+                    OcrToken("doc.", BoundingBox(1275, 620, 1320, 641)),
+                    OcrToken("Data", BoundingBox(1450, 620, 1495, 641)),
+                    OcrToken("08/01/2024", BoundingBox(1500, 620, 1630, 641)),
+                    OcrToken("13", BoundingBox(1418, 651, 1446, 671), 0.80),
+                    OcrToken(
+                        "1",
+                        BoundingBox(1418, 651, 1428, 671),
+                        0.96,
+                        "table_column_masked_psm12",
+                        "crop:1",
+                    ),
+                    OcrToken(
+                        "3",
+                        BoundingBox(1432, 651, 1446, 671),
+                        0.94,
+                        "table_column_masked_psm12",
+                        "crop:1",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_invoice_number_candidates(document)
+    by_raw_text = {candidate.raw_text: candidate for candidate in candidates}
+
+    assert by_raw_text["13"].selected_as_numero_fattura is True
+    assert by_raw_text["1"].selected_as_numero_fattura is False
+    assert by_raw_text["3"].selected_as_numero_fattura is False
+
+
+def test_invoice_number_composition_transfers_fragment_selection_evidence() -> None:
+    def candidate(
+        value: str,
+        bbox: BoundingBox,
+        score: float,
+    ) -> InvoiceNumberCandidate:
+        return InvoiceNumberCandidate(
+            page=1,
+            raw_text=value,
+            normalized_value=value,
+            format_kind="progressivo_numerico",
+            bbox=bbox,
+            score=score,
+            selected_as_numero_fattura=False,
+            anchor_context="doc numero",
+            anchor_quality=2,
+            date_context="data",
+            excluded_reason="",
+            nearby_text="",
+        )
+
+    complete = candidate("13", BoundingBox(1418, 651, 1446, 671), 158.53)
+    fragment_one = candidate("1", BoundingBox(1418, 651, 1428, 671), 194.0)
+    fragment_three = candidate("3", BoundingBox(1432, 651, 1446, 671), 157.93)
+    competing_iban = candidate(
+        "S0103072240000002556608",
+        BoundingBox(1131, 594, 1379, 621),
+        168.29,
+    )
+
+    selected = select_invoice_number_target_per_page(
+        [complete, fragment_one, fragment_three, competing_iban]
+    )
+
+    assert selected[1] == complete
+
+
 def test_find_invoice_number_candidates_ignores_flat_spurious_token_near_document_anchor() -> None:
     document = DocumentRepresentation(
         source_file=Path("fattura.pdf"),
@@ -1820,7 +2033,8 @@ def test_find_invoice_number_candidates_ignores_generic_fattura_after_item_code(
     candidates = find_invoice_number_candidates(document)
 
     assert candidates[0].normalized_value == "OTT.3/4"
-    assert candidates[0].anchor_context == ""
+    assert candidates[0].anchor_context == "fattura"
+    assert candidates[0].score < 120
     assert candidates[0].selected_as_numero_fattura is False
 
 
@@ -2248,6 +2462,7 @@ def test_viewer_targets_include_page_issuer_candidate_even_when_not_globally_sel
         condominium_candidates=[],
         economic_summary_regions=[],
         economic_summary_field_candidates=[],
+        economic_summary_resolved_rows=[],
     )
 
     assert targets[0]["kind"] == "nome_emittente"
@@ -2283,6 +2498,35 @@ def test_find_invoice_date_candidates_selects_date_near_fattura_data() -> None:
     assert candidates[0].selected_as_data_fattura is True
 
 
+def test_find_invoice_date_candidates_separates_data_doc_from_payment_execution() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    OcrToken("Data", BoundingBox(1237, 908, 1275, 925)),
+                    OcrToken("doc.", BoundingBox(1280, 908, 1325, 925)),
+                    OcrToken("03/01/2024", BoundingBox(1428, 899, 1559, 920)),
+                    OcrToken("Data", BoundingBox(1010, 826, 1050, 843)),
+                    OcrToken("esecuzione", BoundingBox(1055, 826, 1172, 843)),
+                    OcrToken("27/01/2025", BoundingBox(1202, 826, 1311, 843)),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_invoice_date_candidates(document)
+    by_raw_text = {candidate.raw_text: candidate for candidate in candidates}
+
+    assert "data doc" in by_raw_text["03/01/2024"].anchor_context
+    assert by_raw_text["03/01/2024"].selected_as_data_fattura is True
+    assert by_raw_text["27/01/2025"].negative_context == "data pagamento"
+    assert by_raw_text["27/01/2025"].selected_as_data_fattura is False
+
+
 def test_find_invoice_date_candidates_penalizes_entro_il_due_date() -> None:
     document = DocumentRepresentation(
         source_file=Path("fattura.pdf"),
@@ -2313,6 +2557,60 @@ def test_find_invoice_date_candidates_penalizes_entro_il_due_date() -> None:
     assert by_raw_text["30/04/2024"].selected_as_data_fattura is False
     assert by_raw_text["30/04/2024"].negative_context == "entro il"
     assert by_raw_text["30/04/2024"].score < by_raw_text["08/04/2024"].score
+
+
+def test_find_invoice_date_candidates_uses_row_context_with_degraded_ocr() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1600,
+                height=2200,
+                tokens=[
+                    OcrToken("DeL.", BoundingBox(107, 943, 316, 969)),
+                    OcrToken("2205-2024", BoundingBox(413, 953, 537, 979)),
+                    OcrToken("IMPORTO", BoundingBox(107, 984, 190, 1024)),
+                    OcrToken("ENmROlI", BoundingBox(107, 1022, 196, 1051)),
+                    OcrToken("21-06-2024", BoundingBox(411, 1022, 537, 1050)),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_invoice_date_candidates(document)
+    by_raw_text = {candidate.raw_text: candidate for candidate in candidates}
+
+    assert by_raw_text["2205-2024"].normalized_value == "2024-05-22"
+    assert by_raw_text["2205-2024"].selected_as_data_fattura is True
+    assert by_raw_text["2205-2024"].anchor_context == "del"
+    assert by_raw_text["21-06-2024"].negative_context == "entro il"
+    assert by_raw_text["21-06-2024"].selected_as_data_fattura is False
+
+
+def test_find_invoice_date_candidates_does_not_reject_entro_when_del_is_same_row() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1000,
+                height=1000,
+                tokens=[
+                    OcrToken("Fattura", BoundingBox(10, 10, 80, 25)),
+                    OcrToken("del", BoundingBox(90, 10, 120, 25)),
+                    OcrToken("entro", BoundingBox(130, 10, 175, 25)),
+                    OcrToken("il", BoundingBox(180, 10, 195, 25)),
+                    OcrToken("08/04/2024", BoundingBox(205, 10, 320, 25)),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_invoice_date_candidates(document)
+
+    assert candidates[0].negative_context == ""
+    assert candidates[0].selected_as_data_fattura is True
 
 
 def test_find_invoice_date_candidates_penalizes_legal_reference_date() -> None:
@@ -2346,7 +2644,7 @@ def test_find_invoice_date_candidates_penalizes_legal_reference_date() -> None:
     assert by_raw_text["23/12/2014"].score < by_raw_text["06/01/2025"].score
 
 
-def test_find_invoice_date_candidates_treats_billing_period_as_positive_context() -> None:
+def test_find_invoice_date_candidates_penalizes_billing_period_dates() -> None:
     document = DocumentRepresentation(
         source_file=Path("fattura.pdf"),
         pages=[
@@ -2375,12 +2673,47 @@ def test_find_invoice_date_candidates_treats_billing_period_as_positive_context(
     candidates = find_invoice_date_candidates(document)
     by_raw_text = {candidate.raw_text: candidate for candidate in candidates}
 
-    assert by_raw_text["01/03/2024"].negative_context == ""
-    assert by_raw_text["31/03/2024"].negative_context == ""
+    assert by_raw_text["01/03/2024"].negative_context == "periodo fatturazione"
+    assert by_raw_text["31/03/2024"].negative_context == "periodo fatturazione"
     assert "periodo di fatturazione" in by_raw_text["01/03/2024"].anchor_context
     assert "periodo di fatturazione" in by_raw_text["31/03/2024"].anchor_context
-    assert by_raw_text["01/03/2024"].score >= 120
-    assert by_raw_text["31/03/2024"].score >= 120
+    assert by_raw_text["01/03/2024"].selected_as_data_fattura is False
+    assert by_raw_text["31/03/2024"].selected_as_data_fattura is False
+    assert by_raw_text["01/03/2024"].score < by_raw_text["08/04/2024"].score
+    assert by_raw_text["31/03/2024"].score < by_raw_text["08/04/2024"].score
+
+
+def test_find_invoice_date_candidates_accepts_data_documento_over_legal_reference() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1600,
+                height=2200,
+                tokens=[
+                    OcrToken("Numero", BoundingBox(760, 370, 830, 390)),
+                    OcrToken("documento", BoundingBox(840, 370, 950, 390)),
+                    OcrToken("Data", BoundingBox(980, 370, 1030, 390)),
+                    OcrToken("documento", BoundingBox(1040, 370, 1150, 390)),
+                    OcrToken("14-01-2025", BoundingBox(1160, 370, 1270, 390)),
+                    OcrToken("Contribuenti", BoundingBox(260, 1777, 370, 1791)),
+                    OcrToken("forfetari", BoundingBox(378, 1777, 442, 1791)),
+                    OcrToken("L.190", BoundingBox(448, 1777, 492, 1791)),
+                    OcrToken("del", BoundingBox(498, 1777, 528, 1791)),
+                    OcrToken("23/12/2014", BoundingBox(536, 1777, 633, 1791)),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_invoice_date_candidates(document)
+    by_raw_text = {candidate.raw_text: candidate for candidate in candidates}
+
+    assert by_raw_text["14-01-2025"].selected_as_data_fattura is True
+    assert "data documento" in by_raw_text["14-01-2025"].anchor_context
+    assert by_raw_text["23/12/2014"].selected_as_data_fattura is False
+    assert by_raw_text["23/12/2014"].negative_context == "riferimento normativo"
 
 
 # SECTION: Economic summary extraction from OCR layout
@@ -2533,6 +2866,217 @@ def test_find_economic_summary_field_candidates_links_labels_to_nearest_right_am
     assert selected_by_target["totale_netto_fattura"].value_text == "123,90"
 
 
+def test_find_economic_summary_field_candidates_accepts_totale_documento_anchor() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1000,
+                height=1000,
+                tokens=[
+                    OcrToken("TOTALE", BoundingBox(600, 700, 660, 715)),
+                    OcrToken("DOCUMENTO", BoundingBox(665, 700, 790, 715)),
+                    OcrToken("220,00", BoundingBox(870, 720, 930, 735)),
+                    OcrToken("NETTO", BoundingBox(600, 800, 660, 815)),
+                    OcrToken("A", BoundingBox(665, 800, 680, 815)),
+                    OcrToken("PAGARE", BoundingBox(685, 800, 760, 815)),
+                    OcrToken("220,00", BoundingBox(870, 820, 930, 835)),
+                ],
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="TOTALE DOCUMENTO",
+                        bbox=BoundingBox(600, 700, 790, 715),
+                    ),
+                    TextSpan(
+                        span_id=2,
+                        line_id=2,
+                        page_span_index=2,
+                        text="NETTO A PAGARE",
+                        bbox=BoundingBox(600, 800, 760, 815),
+                    ),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_economic_summary_field_candidates(document)
+    selected_by_target = {
+        candidate.target: candidate
+        for candidate in candidates
+        if candidate.selected_as_field
+    }
+
+    assert selected_by_target["totale_fattura"].normalized_value == "220.00"
+
+
+def test_economic_summary_specific_gross_total_anchor_wins_over_total_tax() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1000,
+                height=1000,
+                tokens=[
+                    OcrToken("TOTALE", BoundingBox(600, 700, 660, 715)),
+                    OcrToken("IVA", BoundingBox(665, 700, 700, 715)),
+                    OcrToken("INCLUSA", BoundingBox(705, 700, 780, 715)),
+                    OcrToken("104,50", BoundingBox(870, 720, 930, 735)),
+                    OcrToken("RITENUTA", BoundingBox(600, 760, 685, 775)),
+                    OcrToken("3,80", BoundingBox(880, 780, 930, 795)),
+                    OcrToken("NETTO", BoundingBox(600, 820, 660, 835)),
+                    OcrToken("A", BoundingBox(665, 820, 680, 835)),
+                    OcrToken("PAGARE", BoundingBox(685, 820, 760, 835)),
+                    OcrToken("100,70", BoundingBox(870, 840, 930, 855)),
+                ],
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="TOTALE IVA INCLUSA",
+                        bbox=BoundingBox(600, 700, 780, 715),
+                    ),
+                    TextSpan(
+                        span_id=2,
+                        line_id=2,
+                        page_span_index=2,
+                        text="RITENUTA D'ACCONTO 4%",
+                        bbox=BoundingBox(600, 760, 790, 775),
+                    ),
+                    TextSpan(
+                        span_id=3,
+                        line_id=3,
+                        page_span_index=3,
+                        text="NETTO A PAGARE",
+                        bbox=BoundingBox(600, 820, 760, 835),
+                    ),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_economic_summary_field_candidates(document)
+    selected_by_target = {
+        candidate.target: candidate
+        for candidate in candidates
+        if candidate.selected_as_field
+    }
+
+    assert selected_by_target["totale_fattura"].normalized_value == "104.50"
+    assert "totale_imposta" not in selected_by_target
+
+
+def test_economic_summary_aligned_columns_do_not_steal_neighbour_amounts() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    OcrToken("TOT:", BoundingBox(1056, 2007, 1091, 2019)),
+                    OcrToken("IMPONIBILE", BoundingBox(1098, 2007, 1195, 2021)),
+                    OcrToken("95,00", BoundingBox(1148, 2038, 1212, 2077)),
+                    OcrToken("TOT-IVA", BoundingBox(1262, 2009, 1333, 2022)),
+                    OcrToken("950", BoundingBox(1285, 2040, 1364, 2082)),
+                    OcrToken("TOI", BoundingBox(1398, 2009, 1435, 2022)),
+                    OcrToken("FATTURA", BoundingBox(1442, 2010, 1517, 2023)),
+                    OcrToken("(104,50.", BoundingBox(1398, 2041, 1544, 2079)),
+                ],
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="TOT: IMPONIBILE",
+                        bbox=BoundingBox(1056, 2007, 1195, 2021),
+                    ),
+                    TextSpan(
+                        span_id=2,
+                        line_id=1,
+                        page_span_index=2,
+                        text="TOT-IVA",
+                        bbox=BoundingBox(1262, 2009, 1333, 2022),
+                    ),
+                    TextSpan(
+                        span_id=3,
+                        line_id=1,
+                        page_span_index=3,
+                        text="TOI FATTURA",
+                        bbox=BoundingBox(1398, 2009, 1517, 2023),
+                    ),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_economic_summary_field_candidates(document)
+    selected_by_target = {
+        candidate.target: candidate
+        for candidate in candidates
+        if candidate.selected_as_field
+    }
+
+    assert selected_by_target["totale_imponibile"].normalized_value == "95.00"
+    assert selected_by_target["totale_fattura"].normalized_value == "104.50"
+    assert "totale_imposta" not in selected_by_target
+
+
+def test_resolve_economic_summary_rows_uses_netto_as_total_for_forfettario_without_ritenuta() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1000,
+                height=1000,
+                tokens=[
+                    OcrToken("FORF", BoundingBox(50, 700, 90, 715)),
+                    OcrToken("TOTALE", BoundingBox(600, 700, 660, 715)),
+                    OcrToken("IMPOSTA", BoundingBox(665, 700, 760, 715)),
+                    OcrToken("0,00", BoundingBox(870, 720, 930, 735)),
+                    OcrToken("NETTO", BoundingBox(600, 800, 660, 815)),
+                    OcrToken("A", BoundingBox(665, 800, 680, 815)),
+                    OcrToken("PAGARE", BoundingBox(685, 800, 760, 815)),
+                    OcrToken("220,00", BoundingBox(870, 820, 930, 835)),
+                ],
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="TOTALE IMPOSTA",
+                        bbox=BoundingBox(600, 700, 760, 715),
+                    ),
+                    TextSpan(
+                        span_id=2,
+                        line_id=2,
+                        page_span_index=2,
+                        text="NETTO A PAGARE",
+                        bbox=BoundingBox(600, 800, 760, 815),
+                    ),
+                ],
+            )
+        ],
+    )
+
+    rows = resolve_economic_summary_rows(document)
+
+    assert rows[0].totale_fattura_value == "220.00"
+    assert rows[0].totale_netto_fattura_value == "220.00"
+    assert rows[0].ritenuta_value == "0.00"
+    assert rows[0].ritenuta_percentuale == "0%"
+    assert rows[0].math_check == "ok"
+    assert "totale_fattura_from_netto_forfettario_without_ritenuta" in rows[0].notes
+    assert "ritenuta_zero_forfettario_totale_matches_netto" in rows[0].notes
+
+
 def test_resolve_economic_summary_rows_applies_ritenuta_math_checks() -> None:
     document = DocumentRepresentation(
         source_file=Path("fattura.pdf"),
@@ -2599,6 +3143,387 @@ def test_resolve_economic_summary_rows_applies_ritenuta_math_checks() -> None:
     assert rows[0].ritenuta_percentuale == "4%"
     assert rows[0].totale_netto_fattura_value == "123.90"
     assert rows[0].math_check == "ok"
+
+
+def test_economic_summary_rejects_gross_below_net_and_keeps_structural_taxable() -> None:
+    page = DocumentPage(
+        page_number=1,
+        width=1654,
+        height=2339,
+        tokens=[
+            OcrToken("108,50", BoundingBox(1243, 1757, 1305, 1777), 0.96),
+            OcrToken("4,94", BoundingBox(1494, 1761, 1534, 1779), 0.71),
+            OcrToken("128,03", BoundingBox(603, 2034, 667, 2054), 0.96),
+        ],
+        spans=[
+            TextSpan(1, 1, 1, "Totale documento", BoundingBox(1143, 1594, 1290, 1611)),
+            TextSpan(2, 2, 2, "RITENUTA 4%", BoundingBox(219, 1738, 361, 1756)),
+            TextSpan(3, 2, 3, "Percentuale", BoundingBox(985, 1720, 1083, 1748)),
+            TextSpan(4, 2, 4, "Imponibile", BoundingBox(1234, 1724, 1316, 1752)),
+            TextSpan(5, 2, 5, "Ritenuta", BoundingBox(1473, 1727, 1544, 1756)),
+            TextSpan(6, 3, 6, "Importo scadenza", BoundingBox(526, 1938, 671, 1956)),
+        ],
+    )
+    document = DocumentRepresentation(source_file=Path("fattura.pdf"), pages=[page])
+
+    fields = find_economic_summary_field_candidates(document)
+    rows = resolve_economic_summary_rows(document)
+
+    assert len(rows) == 1
+    assert rows[0].totale_imponibile_value == "108.50"
+    assert rows[0].totale_imponibile_text == "108,50"
+    assert rows[0].totale_fattura_value == ""
+    assert rows[0].totale_fattura_text == ""
+    assert rows[0].totale_fattura_source == "rejected_gross_below_net"
+    assert rows[0].totale_netto_fattura_value == "128.03"
+    assert "totale_fattura_rejected_below_net" in rows[0].notes
+
+    targets = _viewer_targets(
+        page=page,
+        selected_vat=None,
+        fiscal_candidates=[],
+        issuer_name_candidates=[],
+        invoice_number_candidates=[],
+        invoice_date_candidates=[],
+        condominium_candidates=[],
+        economic_summary_regions=find_economic_summary_regions(document),
+        economic_summary_field_candidates=fields,
+        economic_summary_resolved_rows=rows,
+    )
+    assert not any(
+        target["kind"] == "economic_summary.totale_fattura.value"
+        for target in targets
+    )
+    assert any(
+        target["kind"] == "economic_summary.totale_netto_fattura.value"
+        and target["value"] == "128,03"
+        for target in targets
+    )
+
+
+def test_resolve_economic_summary_rows_matches_unlabeled_total_by_equation() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1000,
+                height=1000,
+                tokens=[
+                    OcrToken("Totale", BoundingBox(600, 730, 665, 748), 0.96),
+                    OcrToken("104,50", BoundingBox(870, 730, 930, 748), 0.96),
+                    OcrToken("Ritenuta", BoundingBox(600, 750, 680, 768), 0.96),
+                    OcrToken("d'acconto", BoundingBox(685, 750, 780, 768), 0.96),
+                    OcrToken("-3,80", BoundingBox(880, 750, 930, 768), 0.90),
+                    OcrToken("Netto", BoundingBox(600, 800, 650, 818), 0.96),
+                    OcrToken("da", BoundingBox(655, 800, 680, 818), 0.96),
+                    OcrToken("pagare", BoundingBox(685, 800, 745, 818), 0.96),
+                    OcrToken("100,70", BoundingBox(870, 800, 930, 818), 0.96),
+                ],
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="Totale",
+                        bbox=BoundingBox(600, 730, 665, 748),
+                    ),
+                    TextSpan(
+                        span_id=2,
+                        line_id=2,
+                        page_span_index=2,
+                        text="Ritenuta d'acconto 4%",
+                        bbox=BoundingBox(600, 750, 800, 768),
+                    ),
+                    TextSpan(
+                        span_id=3,
+                        line_id=3,
+                        page_span_index=3,
+                        text="Netto da pagare",
+                        bbox=BoundingBox(600, 800, 745, 818),
+                    ),
+                ],
+            )
+        ],
+    )
+
+    rows = resolve_economic_summary_rows(document)
+
+    assert rows[0].totale_fattura_text == "104,50"
+    assert rows[0].totale_fattura_value == "104.50"
+    assert rows[0].totale_fattura_source == (
+        "regional_token_matching_netto_plus_ritenuta"
+    )
+    assert rows[0].ritenuta_percentuale == "4%"
+    assert rows[0].math_check == "ok"
+
+
+def test_resolve_economic_summary_rows_reads_ritenuta_percent_from_percent_column() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    OcrToken("TOTALE", BoundingBox(1394, 1942, 1457, 1955), 0.96),
+                    OcrToken("FATTURA", BoundingBox(1461, 1942, 1537, 1955), 0.96),
+                    OcrToken("56,22", BoundingBox(1488, 2000, 1565, 2022), 0.95),
+                    OcrToken("%", BoundingBox(940, 2041, 954, 2058), 0.91),
+                    OcrToken("RITENUTA", BoundingBox(1092, 2047, 1161, 2058), 0.93),
+                    OcrToken("D'ACCONTO", BoundingBox(1166, 2047, 1249, 2058), 0.94),
+                    OcrToken("NETTO", BoundingBox(1396, 2046, 1452, 2059), 0.8),
+                    OcrToken("A", BoundingBox(1456, 2046, 1467, 2058), 0.95),
+                    OcrToken("PAGARE", BoundingBox(1473, 2046, 1542, 2059), 0.95),
+                    OcrToken("4,00", BoundingBox(951, 2101, 1013, 2125), 0.96),
+                    OcrToken("1,84", BoundingBox(1222, 2100, 1282, 2123), 0.93),
+                    OcrToken("54,38", BoundingBox(1487, 2100, 1565, 2122), 0.96),
+                ],
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="TOTALE FATTURA",
+                        bbox=BoundingBox(1394, 1942, 1537, 1955),
+                    ),
+                    TextSpan(
+                        span_id=2,
+                        line_id=2,
+                        page_span_index=2,
+                        text="%",
+                        bbox=BoundingBox(940, 2041, 954, 2058),
+                    ),
+                    TextSpan(
+                        span_id=3,
+                        line_id=2,
+                        page_span_index=3,
+                        text="RITENUTA D'ACCONTO",
+                        bbox=BoundingBox(1092, 2047, 1249, 2058),
+                    ),
+                    TextSpan(
+                        span_id=4,
+                        line_id=2,
+                        page_span_index=4,
+                        text="NETTO A PAGARE",
+                        bbox=BoundingBox(1396, 2046, 1542, 2059),
+                    ),
+                ],
+            )
+        ],
+    )
+
+    rows = resolve_economic_summary_rows(document)
+
+    assert rows[0].totale_fattura_value == "56.22"
+    assert rows[0].ritenuta_value == "-1.84"
+    assert rows[0].ritenuta_percentuale == "4%"
+    assert rows[0].totale_netto_fattura_value == "54.38"
+    assert rows[0].math_check == "ok"
+    assert "ritenuta_percent_from_same_row_percent_column" in rows[0].notes
+
+
+def test_find_economic_summary_field_candidates_repairs_split_total_amount_tokens() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    OcrToken("TOTALE", BoundingBox(1393, 1942, 1456, 1955), 0.96),
+                    OcrToken("FATTURA", BoundingBox(1460, 1942, 1536, 1955), 0.96),
+                    OcrToken("56", BoundingBox(1487, 2001, 1515, 2019), 0.79),
+                    OcrToken("21", BoundingBox(1537, 2001, 1564, 2019), 0.41),
+                    OcrToken("NETTO", BoundingBox(1395, 2046, 1451, 2059), 0.96),
+                    OcrToken("A", BoundingBox(1455, 2046, 1466, 2059), 0.94),
+                    OcrToken("PAGARE", BoundingBox(1472, 2046, 1541, 2059), 0.94),
+                    OcrToken("54,37", BoundingBox(1486, 2100, 1564, 2122), 0.95),
+                    OcrToken("RITENUTA", BoundingBox(1091, 2048, 1160, 2059), 0.74),
+                    OcrToken("D'ACCONTO", BoundingBox(1165, 2048, 1248, 2059), 0.82),
+                    OcrToken("1,84", BoundingBox(1221, 2100, 1281, 2122), 0.94),
+                ],
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="TOTALE FATTURA",
+                        bbox=BoundingBox(1393, 1942, 1536, 1955),
+                    ),
+                    TextSpan(
+                        span_id=2,
+                        line_id=2,
+                        page_span_index=2,
+                        text="RITENUTA D'ACCONTO",
+                        bbox=BoundingBox(1091, 2048, 1248, 2059),
+                    ),
+                    TextSpan(
+                        span_id=3,
+                        line_id=2,
+                        page_span_index=3,
+                        text="NETTO A PAGARE",
+                        bbox=BoundingBox(1395, 2046, 1541, 2059),
+                    ),
+                ],
+            )
+        ],
+    )
+
+    candidates = find_economic_summary_field_candidates(document)
+    selected_by_target = {
+        candidate.target: candidate
+        for candidate in candidates
+        if candidate.selected_as_field
+    }
+
+    assert selected_by_target["totale_fattura"].value_text == "56,21"
+    assert selected_by_target["totale_fattura"].normalized_value == "56.21"
+
+
+def test_resolve_economic_summary_rows_repairs_split_total_and_infers_percent() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1654,
+                height=2339,
+                tokens=[
+                    OcrToken("IMPONIBILE", BoundingBox(130, 1851, 209, 1862), 0.96),
+                    OcrToken("46,07", BoundingBox(180, 1902, 257, 1924), 0.96),
+                    OcrToken("TOTALE", BoundingBox(1393, 1942, 1456, 1955), 0.96),
+                    OcrToken("FATTURA", BoundingBox(1460, 1942, 1536, 1955), 0.96),
+                    OcrToken("56", BoundingBox(1487, 2001, 1515, 2019), 0.79),
+                    OcrToken("21", BoundingBox(1537, 2001, 1564, 2019), 0.41),
+                    OcrToken("IMPONIBILE", BoundingBox(684, 2049, 763, 2059), 0.96),
+                    OcrToken("RITENUTA", BoundingBox(1091, 2048, 1160, 2059), 0.74),
+                    OcrToken("D'ACCONTO", BoundingBox(1165, 2048, 1248, 2059), 0.82),
+                    OcrToken("NETTO", BoundingBox(1395, 2046, 1451, 2059), 0.96),
+                    OcrToken("A", BoundingBox(1455, 2046, 1466, 2059), 0.94),
+                    OcrToken("PAGARE", BoundingBox(1472, 2046, 1541, 2059), 0.94),
+                    OcrToken("46,07", BoundingBox(767, 2101, 844, 2123), 0.95),
+                    OcrToken("s00)", BoundingBox(950, 2049, 1027, 2125), 0.0),
+                    OcrToken("1,84", BoundingBox(1221, 2100, 1281, 2122), 0.94),
+                    OcrToken("54,37", BoundingBox(1486, 2100, 1564, 2122), 0.95),
+                ],
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="IMPONIBILE",
+                        bbox=BoundingBox(130, 1851, 209, 1862),
+                    ),
+                    TextSpan(
+                        span_id=2,
+                        line_id=2,
+                        page_span_index=2,
+                        text="TOTALE FATTURA",
+                        bbox=BoundingBox(1393, 1942, 1536, 1955),
+                    ),
+                    TextSpan(
+                        span_id=3,
+                        line_id=3,
+                        page_span_index=3,
+                        text="IMPONIBILE",
+                        bbox=BoundingBox(684, 2049, 763, 2059),
+                    ),
+                    TextSpan(
+                        span_id=4,
+                        line_id=3,
+                        page_span_index=4,
+                        text="RITENUTA D'ACCONTO",
+                        bbox=BoundingBox(1091, 2048, 1248, 2059),
+                    ),
+                    TextSpan(
+                        span_id=5,
+                        line_id=3,
+                        page_span_index=5,
+                        text="NETTO A PAGARE",
+                        bbox=BoundingBox(1395, 2046, 1541, 2059),
+                    ),
+                ],
+            )
+        ],
+    )
+
+    rows = resolve_economic_summary_rows(document)
+
+    assert rows[0].totale_fattura_value == "56.21"
+    assert rows[0].ritenuta_value == "-1.84"
+    assert rows[0].ritenuta_percentuale == "4%"
+    assert rows[0].totale_netto_fattura_value == "54.37"
+    assert rows[0].math_check == "ok"
+
+
+def test_resolve_economic_summary_rows_infers_ritenuta_percent_from_accounting_values() -> None:
+    document = DocumentRepresentation(
+        source_file=Path("fattura.pdf"),
+        pages=[
+            DocumentPage(
+                page_number=1,
+                width=1000,
+                height=1000,
+                tokens=[
+                    OcrToken("TOTALE", BoundingBox(600, 700, 660, 715)),
+                    OcrToken("IMPONIBILE", BoundingBox(665, 700, 760, 715)),
+                    OcrToken("46,00", BoundingBox(870, 720, 930, 735)),
+                    OcrToken("TOTALE", BoundingBox(600, 760, 660, 775)),
+                    OcrToken("FATTURA", BoundingBox(665, 760, 735, 775)),
+                    OcrToken("56,12", BoundingBox(870, 780, 930, 795)),
+                    OcrToken("RITENUTA", BoundingBox(600, 820, 680, 835)),
+                    OcrToken("1,84", BoundingBox(880, 840, 930, 855)),
+                    OcrToken("NETTO", BoundingBox(600, 880, 660, 895)),
+                    OcrToken("A", BoundingBox(665, 880, 680, 895)),
+                    OcrToken("PAGARE", BoundingBox(685, 880, 750, 895)),
+                    OcrToken("54,28", BoundingBox(870, 900, 930, 915)),
+                ],
+                spans=[
+                    TextSpan(
+                        span_id=1,
+                        line_id=1,
+                        page_span_index=1,
+                        text="TOTALE IMPONIBILE",
+                        bbox=BoundingBox(600, 700, 760, 715),
+                    ),
+                    TextSpan(
+                        span_id=2,
+                        line_id=2,
+                        page_span_index=2,
+                        text="TOTALE FATTURA",
+                        bbox=BoundingBox(600, 760, 735, 775),
+                    ),
+                    TextSpan(
+                        span_id=3,
+                        line_id=3,
+                        page_span_index=3,
+                        text="RITENUTA",
+                        bbox=BoundingBox(600, 820, 680, 835),
+                    ),
+                    TextSpan(
+                        span_id=4,
+                        line_id=4,
+                        page_span_index=4,
+                        text="NETTO A PAGARE",
+                        bbox=BoundingBox(600, 880, 750, 895),
+                    ),
+                ],
+            )
+        ],
+    )
+
+    rows = resolve_economic_summary_rows(document)
+
+    assert rows[0].ritenuta_value == "-1.84"
+    assert rows[0].ritenuta_percentuale == "4%"
+    assert rows[0].math_check == "ok"
+    assert (
+        "ritenuta_matches_imponibile_percent" in rows[0].notes
+        or "ritenuta_percent_inferred_from_accounting_values" in rows[0].notes
+    )
 
 
 def test_resolve_economic_summary_rows_accepts_netto_a_pagare_direct_value() -> None:
@@ -2710,6 +3635,124 @@ def test_viewer_invoice_net_total_prefers_value_consistent_with_total_and_withho
 
     assert fields["economic_summary.totale_netto_fattura.value"]["value"] == "100,70"
     assert fields["economic_summary.totale_netto_fattura.value"]["page"] == 1
+
+
+def test_viewer_invoice_reconciles_direct_economic_evidence_across_pages() -> None:
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [],
+            "tokens": [
+                {
+                    "text": "3,80",
+                    "confidence": 0.91,
+                    "bbox": {"x1": 880, "y1": 780, "x2": 930, "y2": 795},
+                }
+            ],
+            "targets": [
+                {
+                    "kind": "economic_summary.ritenuta.value",
+                    "value": "3,80",
+                    "score": 100,
+                    "page": 1,
+                    "bbox": {"x1": 880, "y1": 780, "x2": 930, "y2": 795},
+                    "role": "value",
+                },
+                {
+                    "kind": "economic_summary.totale_netto_fattura.value",
+                    "value": "100,70",
+                    "score": 161,
+                    "page": 1,
+                    "bbox": {"x1": 870, "y1": 840, "x2": 930, "y2": 855},
+                    "role": "value",
+                },
+            ],
+            "candidate_tables": {
+                "economic_summary_resolved_rows": [
+                    {
+                        "ritenuta_value": "-3.80",
+                        "ritenuta_percentuale": "",
+                        "ritenuta_source": "direct",
+                        "totale_netto_fattura_value": "100.70",
+                        "math_check": "uncertain",
+                        "bbox": {"x1": 600, "y1": 700, "x2": 940, "y2": 860},
+                    }
+                ]
+            },
+        },
+        {
+            "page": 2,
+            "spans": [],
+            "tokens": [],
+            "targets": [
+                {
+                    "kind": "economic_summary.totale_fattura.value",
+                    "value": "660,00",
+                    "score": 260,
+                    "page": 2,
+                    "bbox": {"x1": 1000, "y1": 1900, "x2": 1080, "y2": 1930},
+                    "role": "value",
+                },
+                {
+                    "kind": "economic_summary.totale_imponibile.value",
+                    "value": "95,00",
+                    "score": 183,
+                    "page": 2,
+                    "bbox": {"x1": 1148, "y1": 2038, "x2": 1212, "y2": 2077},
+                    "role": "value",
+                },
+                {
+                    "kind": "economic_summary.totale_fattura.value",
+                    "value": "104,50",
+                    "score": 180,
+                    "page": 2,
+                    "bbox": {"x1": 1398, "y1": 2041, "x2": 1544, "y2": 2079},
+                    "role": "value",
+                },
+                {
+                    "kind": "economic_summary.totale_netto_fattura.value",
+                    "value": "400,70",
+                    "score": 170,
+                    "page": 2,
+                    "bbox": {"x1": 800, "y1": 150, "x2": 860, "y2": 170},
+                    "role": "value",
+                },
+            ],
+            "candidate_tables": {
+                "economic_summary_resolved_rows": [
+                    {
+                        "totale_imponibile_value": "95.00",
+                        "totale_fattura_value": "104.50",
+                        "math_check": "uncertain",
+                    }
+                ]
+            },
+        },
+    ]
+
+    invoice = build_viewer_invoices(page_manifests)[0]
+    fields = {field["kind"]: field for field in invoice["fields"]}
+
+    assert fields["economic_summary.totale_fattura.value"]["value"] == "104,50"
+    assert fields["economic_summary.totale_fattura.value"]["page"] == 2
+    assert fields["economic_summary.ritenuta.value"]["value"] == "3,80"
+    assert fields["economic_summary.ritenuta.value"]["page"] == 1
+    assert fields["economic_summary.ritenuta.value"]["bbox"] == {
+        "x1": 880,
+        "y1": 780,
+        "x2": 930,
+        "y2": 795,
+    }
+    assert fields["economic_summary.totale_netto_fattura.value"]["value"] == "100,70"
+    assert fields["economic_summary.totale_netto_fattura.value"]["page"] == 1
+    assert all(
+        fields[kind]["role"] == "invoice_reconciled"
+        for kind in (
+            "economic_summary.totale_fattura.value",
+            "economic_summary.ritenuta.value",
+            "economic_summary.totale_netto_fattura.value",
+        )
+    )
 
 
 # SECTION: Viewer manifest contract
@@ -2824,7 +3867,7 @@ def test_save_viewer_manifest_writes_stable_overlay_contract() -> None:
         field for field in invoice["fields"] if field["kind"] == "data_fattura"
     )
 
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["source_file"] == "fattura.pdf"
     assert invoice["invoice_id"] == "invoice-001"
     assert invoice["page_numbers"] == [1]
@@ -2835,9 +3878,10 @@ def test_save_viewer_manifest_writes_stable_overlay_contract() -> None:
         for field in invoice["fields"]
         if field["kind"] == "economic_summary.ritenuta.value"
     )
-    assert ritenuta_field["value"] == "-4,20"
+    assert ritenuta_field["label"] == "Ritenuta"
+    assert ritenuta_field["value"] == "4,20"
     assert ritenuta_field["page"] == 1
-    assert ritenuta_field["role"] == "value"
+    assert ritenuta_field["role"] == "resolved"
     assert ritenuta_field["bbox"]
     assert ritenuta_field["ocr_confidence"] == 0.55
     assert data_fattura_field["value"] == "2024-09-30"
@@ -2858,6 +3902,66 @@ def test_save_viewer_manifest_writes_stable_overlay_contract() -> None:
     assert page["candidate_tables"]["economic_summary_resolved_rows"][0][
         "math_check"
     ] == "ok"
+
+
+def test_viewer_invoice_ritenuta_field_uses_resolved_monetary_amount() -> None:
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [],
+            "targets": [
+                {
+                    "kind": "economic_summary.ritenuta.value",
+                    "value": "1,00",
+                    "score": 190,
+                    "page": 1,
+                    "bbox": {"x1": 800, "y1": 100, "x2": 850, "y2": 120},
+                    "role": "value",
+                }
+            ],
+            "candidate_tables": {
+                "economic_summary_resolved_rows": [
+                    {
+                        "bbox": {"x1": 760, "y1": 80, "x2": 900, "y2": 150},
+                        "ritenuta_value": "-4.20",
+                        "ritenuta_percentuale": "4%",
+                        "math_check": "ok",
+                    }
+                ]
+            },
+        }
+    ]
+
+    invoice = build_viewer_invoices(page_manifests)[0]
+    fields = {field["kind"]: field for field in invoice["fields"]}
+
+    assert fields["economic_summary.ritenuta.value"]["value"] == "4,20"
+    assert fields["economic_summary.ritenuta.value"]["role"] == "resolved"
+
+
+def test_viewer_invoice_ritenuta_field_rejects_unresolved_amount() -> None:
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [],
+            "targets": [
+                {
+                    "kind": "economic_summary.ritenuta.value",
+                    "value": "1,00",
+                    "score": 190,
+                    "page": 1,
+                    "bbox": {"x1": 800, "y1": 100, "x2": 850, "y2": 120},
+                    "role": "value",
+                }
+            ],
+            "candidate_tables": {},
+        }
+    ]
+
+    invoice = build_viewer_invoices(page_manifests)[0]
+    fields = {field["kind"]: field for field in invoice["fields"]}
+
+    assert fields["economic_summary.ritenuta.value"]["value"] == ""
 
 
 def test_viewer_manifest_uses_matching_token_bbox_for_calculated_economic_value() -> None:
@@ -3018,6 +4122,150 @@ def test_viewer_invoices_split_pages_when_invoice_number_changes() -> None:
     assert page_manifests[1]["invoice_start_decision"]["starts_invoice"] is False
     assert page_manifests[2]["invoice_start_decision"]["starts_invoice"] is True
     assert page_manifests[2]["invoice_start_decision"]["changed_signal_count"] == 3
+
+
+def test_viewer_invoices_split_recurring_invoices_on_strong_number_identity() -> None:
+    shared_payment_bbox = {"x1": 1453, "y1": 657, "x2": 1567, "y2": 675}
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [],
+            "tokens": [],
+            "targets": [
+                {"kind": "p_iva", "value": "01414100535", "score": 130},
+                {"kind": "codice_fiscale", "value": "90009720534", "score": 100},
+                {"kind": "condominio", "value": "condominio via Bovio 70", "score": 80},
+                {"kind": "numero_fattura", "value": "7/2025", "score": 205},
+                {"kind": "data_fattura", "value": "2025-01-10", "score": 170},
+                {
+                    "kind": "economic_summary.totale_fattura.value",
+                    "value": "179,50",
+                    "score": 140,
+                },
+            ],
+            "candidate_tables": {
+                "invoice_numbers": [
+                    {
+                        "normalized_value": "7/2025",
+                        "selected_as_numero_fattura": True,
+                        "anchor_context": "fattura nr",
+                        "anchor_quality": 4,
+                    }
+                ]
+            },
+        },
+        {
+            "page": 2,
+            "spans": [],
+            "tokens": [],
+            "targets": [
+                {"kind": "p_iva", "value": "01414100535", "score": 130},
+                {"kind": "codice_fiscale", "value": "90009720534", "score": 100},
+                {"kind": "condominio", "value": "condominio via Bovio 70", "score": 80},
+                {"kind": "numero_fattura", "value": "202/2024", "score": 204},
+                {"kind": "data_fattura", "value": "2024-12-09", "score": 170},
+                {
+                    "kind": "economic_summary.totale_fattura.value",
+                    "value": "179,50",
+                    "score": 140,
+                },
+            ],
+            "candidate_tables": {
+                "invoice_numbers": [
+                    {
+                        "normalized_value": "202/2024",
+                        "selected_as_numero_fattura": True,
+                        "anchor_context": "fattura nr",
+                        "anchor_quality": 4,
+                    }
+                ]
+            },
+        },
+        {
+            "page": 3,
+            "spans": [
+                {
+                    "text": "Data di addebito",
+                    "bbox": {"x1": 102, "y1": 661, "x2": 245, "y2": 679},
+                },
+                {
+                    "text": (
+                        "Pagamento fatt. n.202 del 09-12-24 e "
+                        "n.7 del 10-01-25"
+                    ),
+                    "bbox": {"x1": 100, "y1": 848, "x2": 900, "y2": 865},
+                },
+            ],
+            "tokens": [],
+            "targets": [],
+            "candidate_tables": {
+                "invoice_dates": [
+                    {
+                        "normalized_value": "2025-01-16",
+                        "score": 70,
+                        "ocr_confidence": 0.96,
+                        "nearby_text": "Sepa EUR",
+                        "bbox": shared_payment_bbox,
+                    }
+                ]
+            },
+        },
+    ]
+
+    invoices = build_viewer_invoices(page_manifests)
+
+    assert [invoice["page_numbers"] for invoice in invoices] == [[1, 3], [2, 3]]
+    assert (
+        "numero_fattura_forte_diverso"
+        in page_manifests[1]["invoice_start_decision"]["reasons"]
+    )
+    assert page_manifests[1]["invoice_start_decision"]["changed_signal_count"] == 2
+    assert [
+        next(field for field in invoice["fields"] if field["kind"] == "pagata_il")[
+            "value"
+        ]
+        for invoice in invoices
+    ] == ["2025-01-16", "2025-01-16"]
+
+
+def test_viewer_invoices_do_not_split_on_weak_number_change_alone() -> None:
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [],
+            "targets": [
+                {"kind": "numero_fattura", "value": "7/2025", "score": 205},
+                {"kind": "data_fattura", "value": "2025-01-10", "score": 170},
+                {"kind": "p_iva", "value": "01414100535", "score": 130},
+                {"kind": "codice_fiscale", "value": "90009720534", "score": 100},
+                {"kind": "condominio", "value": "BOVIO 70", "score": 80},
+            ],
+        },
+        {
+            "page": 2,
+            "spans": [],
+            "targets": [
+                {"kind": "numero_fattura", "value": "202/2024", "score": 130},
+                {"kind": "p_iva", "value": "01414100535", "score": 130},
+                {"kind": "codice_fiscale", "value": "90009720534", "score": 100},
+                {"kind": "condominio", "value": "BOVIO 70", "score": 80},
+            ],
+            "candidate_tables": {
+                "invoice_numbers": [
+                    {
+                        "normalized_value": "202/2024",
+                        "selected_as_numero_fattura": True,
+                        "anchor_context": "fattura",
+                        "anchor_quality": 2,
+                    }
+                ]
+            },
+        },
+    ]
+
+    invoices = build_viewer_invoices(page_manifests)
+
+    assert [invoice["page_numbers"] for invoice in invoices] == [[1, 2]]
 
 
 def test_viewer_invoices_can_start_from_batch_invoice_number() -> None:
@@ -3296,6 +4544,112 @@ def test_viewer_invoice_date_ignores_legal_reference_date() -> None:
     assert fields["data_fattura"]["value"] == "2025-01-06"
 
 
+def test_viewer_invoice_date_leaves_field_empty_when_only_due_date_exists() -> None:
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [],
+            "tokens": [],
+            "targets": [],
+            "candidate_tables": {
+                "invoice_dates": [
+                    {
+                        "raw_text": "21-06-2024",
+                        "normalized_value": "2024-06-21",
+                        "score": 40.0,
+                        "anchor_context": "del|numero_fattura",
+                        "negative_context": "entro il",
+                        "bbox": {"x1": 411, "y1": 1022, "x2": 537, "y2": 1050},
+                    }
+                ]
+            },
+        }
+    ]
+
+    invoice = build_viewer_invoices(page_manifests)[0]
+    fields = {field["kind"]: field for field in invoice["fields"]}
+
+    assert fields["data_fattura"]["value"] == ""
+
+
+def test_viewer_invoice_date_infers_legal_reference_from_nearby_text() -> None:
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [],
+            "tokens": [],
+            "targets": [
+                {"kind": "numero_fattura", "value": "778/25", "score": 180},
+            ],
+            "candidate_tables": {
+                "invoice_dates": [
+                    {
+                        "raw_text": "14-01-2025",
+                        "normalized_value": "2025-01-14",
+                        "score": 170.0,
+                        "anchor_context": "data documento|data",
+                        "negative_context": "",
+                        "bbox": {"x1": 1019, "y1": 377, "x2": 1125, "y2": 393},
+                    },
+                    {
+                        "raw_text": "23/12/2014",
+                        "normalized_value": "2014-12-23",
+                        "score": 130.0,
+                        "anchor_context": "del|numero_fattura",
+                        "negative_context": "",
+                        "nearby_text": "Contribuenti forfetari L.190 del",
+                        "bbox": {"x1": 467, "y1": 1693, "x2": 554, "y2": 1708},
+                    },
+                ]
+            },
+        }
+    ]
+
+    invoices = build_viewer_invoices(page_manifests)
+
+    fields = {field["kind"]: field for field in invoices[0]["fields"]}
+    assert fields["data_fattura"]["value"] == "2025-01-14"
+
+
+def test_viewer_invoice_date_prefers_data_documento_over_billing_period() -> None:
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [],
+            "tokens": [],
+            "targets": [
+                {"kind": "numero_fattura", "value": "3348088778", "score": 180},
+            ],
+            "candidate_tables": {
+                "invoice_dates": [
+                    {
+                        "raw_text": "28.01.2025",
+                        "normalized_value": "2025-01-28",
+                        "score": 170.0,
+                        "anchor_context": "data documento|data",
+                        "negative_context": "",
+                        "bbox": {"x1": 173, "y1": 323, "x2": 282, "y2": 339},
+                    },
+                    {
+                        "raw_text": "01.01.2025",
+                        "normalized_value": "2025-01-01",
+                        "score": 170.0,
+                        "anchor_context": "periodo fatturazione|periodo di fatturazione",
+                        "negative_context": "",
+                        "nearby_text": "Periodo fatturazione Dal 01.01.2025 al 30.06.2025",
+                        "bbox": {"x1": 468, "y1": 955, "x2": 577, "y2": 971},
+                    },
+                ]
+            },
+        }
+    ]
+
+    invoices = build_viewer_invoices(page_manifests)
+
+    fields = {field["kind"]: field for field in invoices[0]["fields"]}
+    assert fields["data_fattura"]["value"] == "2025-01-28"
+
+
 def test_viewer_invoices_extracts_paid_date_from_bank_context() -> None:
     page_manifests = [
         {
@@ -3350,6 +4704,207 @@ def test_viewer_invoices_extracts_paid_date_from_bank_context() -> None:
         "y2": 520,
     }
     assert fields["pagata_il"]["ocr_confidence"] == 0.91
+
+
+def test_viewer_invoices_keeps_invoice_date_and_execution_date_in_their_rows() -> None:
+    issue_bbox = {"x1": 1428, "y1": 899, "x2": 1559, "y2": 920}
+    execution_bbox = {"x1": 1202, "y1": 826, "x2": 1311, "y2": 843}
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [
+                {
+                    "text": "Data doc.",
+                    "bbox": {"x1": 1237, "y1": 908, "x2": 1325, "y2": 925},
+                }
+            ],
+            "tokens": [],
+            "targets": [
+                {"kind": "numero_fattura", "value": "337/CV", "score": 195},
+                {
+                    "kind": "data_fattura",
+                    "value": "2024-01-03",
+                    "score": 170,
+                    "page": 1,
+                    "bbox": issue_bbox,
+                },
+            ],
+            "candidate_tables": {
+                "invoice_dates": [
+                    {
+                        "normalized_value": "2024-01-03",
+                        "score": 170,
+                        "anchor_context": "data doc|data",
+                        "negative_context": "",
+                        "bbox": issue_bbox,
+                        "nearby_text": "N. doc. 337/CV Data doc.",
+                    }
+                ]
+            },
+        },
+        {
+            "page": 2,
+            "spans": [
+                {
+                    "text": "Data esecuzione",
+                    "bbox": {"x1": 1010, "y1": 826, "x2": 1172, "y2": 843},
+                },
+                {
+                    "text": "Descrizione causale Pagamento fattura n.337 del 03/01/2024",
+                    "bbox": {"x1": 84, "y1": 908, "x2": 701, "y2": 929},
+                },
+                {
+                    "text": "Autorizzata da ANGELA BRUNO 27/01/2025",
+                    "bbox": {"x1": 84, "y1": 952, "x2": 613, "y2": 972},
+                },
+            ],
+            "tokens": [],
+            "targets": [
+                {"kind": "numero_fattura", "value": "337", "score": 133},
+                {
+                    "kind": "data_fattura",
+                    "value": "2025-01-27",
+                    "score": 170,
+                    "page": 2,
+                    "bbox": execution_bbox,
+                },
+            ],
+            "candidate_tables": {
+                "invoice_dates": [
+                    {
+                        "normalized_value": "2025-01-27",
+                        "score": 170,
+                        "anchor_context": "data",
+                        "negative_context": "data pagamento",
+                        "bbox": execution_bbox,
+                        "nearby_text": "Tipologia bonifico Data esecuzione",
+                    },
+                    {
+                        "normalized_value": "2024-01-03",
+                        "score": 130,
+                        "anchor_context": "fattura|del|numero_fattura",
+                        "negative_context": "",
+                        "bbox": {"x1": 592, "y1": 908, "x2": 701, "y2": 925},
+                        "nearby_text": (
+                            "Data esecuzione Pagamento fattura n.337 del "
+                            "27/01/2025"
+                        ),
+                    },
+                    {
+                        "normalized_value": "2025-01-27",
+                        "score": 170,
+                        "anchor_context": "data|fattura|del|numero_fattura",
+                        "negative_context": "",
+                        "bbox": {"x1": 497, "y1": 952, "x2": 613, "y2": 972},
+                        "nearby_text": (
+                            "Data esecuzione Pagamento fattura n.337 del "
+                            "03/01/2024 Autorizzata da ANGELA BRUNO"
+                        ),
+                    },
+                ]
+            },
+        },
+    ]
+
+    invoice = build_viewer_invoices(page_manifests)[0]
+    fields = {field["kind"]: field for field in invoice["fields"]}
+
+    assert fields["data_fattura"]["value"] == "2024-01-03"
+    assert fields["data_fattura"]["bbox"] == issue_bbox
+    assert fields["pagata_il"]["value"] == "2025-01-27"
+    assert fields["pagata_il"]["bbox"] == execution_bbox
+
+
+def test_viewer_invoices_prefers_debit_date_and_rejects_credit_date() -> None:
+    debit_bbox = {"x1": 1453, "y1": 657, "x2": 1567, "y2": 675}
+    credit_bbox = {"x1": 1452, "y1": 705, "x2": 1567, "y2": 722}
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [
+                {
+                    "text": "Data di addebito",
+                    "bbox": {"x1": 102, "y1": 661, "x2": 245, "y2": 679},
+                },
+                {
+                    "text": "Data di accredito",
+                    "bbox": {"x1": 102, "y1": 707, "x2": 245, "y2": 725},
+                },
+            ],
+            "tokens": [],
+            "targets": [
+                {
+                    "kind": "data_fattura",
+                    "value": "2025-01-20",
+                    "score": 170,
+                    "page": 1,
+                    "bbox": {"x1": 100, "y1": 100, "x2": 210, "y2": 120},
+                }
+            ],
+            "candidate_tables": {
+                "invoice_dates": [
+                    {
+                        "normalized_value": "2025-01-20",
+                        "score": 170,
+                        "nearby_text": "Fattura del 20/01/2025",
+                        "bbox": {"x1": 100, "y1": 100, "x2": 210, "y2": 120},
+                    },
+                    {
+                        "normalized_value": "2025-01-17",
+                        "score": 70,
+                        "ocr_confidence": 0.96,
+                        "nearby_text": "Sepa EUR 20/01/2025",
+                        "bbox": debit_bbox,
+                    },
+                    {
+                        "normalized_value": "2025-01-20",
+                        "score": 70,
+                        "ocr_confidence": 0.96,
+                        "nearby_text": "EUR 17/01/2025",
+                        "bbox": credit_bbox,
+                    },
+                ]
+            },
+        }
+    ]
+
+    invoice = build_viewer_invoices(page_manifests)[0]
+    fields = {field["kind"]: field for field in invoice["fields"]}
+
+    assert fields["pagata_il"]["value"] == "2025-01-17"
+    assert fields["pagata_il"]["bbox"] == debit_bbox
+
+
+def test_viewer_invoices_does_not_use_explicit_credit_date_as_payment_date() -> None:
+    page_manifests = [
+        {
+            "page": 1,
+            "spans": [
+                {
+                    "text": "Data di accredito",
+                    "bbox": {"x1": 102, "y1": 707, "x2": 245, "y2": 725},
+                }
+            ],
+            "tokens": [],
+            "targets": [],
+            "candidate_tables": {
+                "invoice_dates": [
+                    {
+                        "normalized_value": "2025-01-20",
+                        "score": 70,
+                        "ocr_confidence": 0.96,
+                        "nearby_text": "Bonifico EUR",
+                        "bbox": {"x1": 1452, "y1": 705, "x2": 1567, "y2": 722},
+                    }
+                ]
+            },
+        }
+    ]
+
+    invoice = build_viewer_invoices(page_manifests)[0]
+    fields = {field["kind"]: field for field in invoice["fields"]}
+
+    assert fields["pagata_il"]["value"] == ""
 
 
 def test_viewer_invoices_links_shared_payment_to_referenced_invoice_numbers() -> None:
@@ -3560,6 +5115,46 @@ def test_combinatorial_economic_values_use_only_same_table_crop_pairs() -> None:
         "table_crop_pair"
     }
 
+    page_without_direct_withholding = DocumentPage(
+        page_number=1,
+        width=1000,
+        height=1000,
+        tokens=[
+            token
+            for token in crop_tokens
+            if not (840 <= token.bbox.y1 <= 870)
+        ],
+    )
+    derived_combination = _best_economic_value_combination(
+        page_without_direct_withholding,
+        region,
+        fields={},
+        percent=None,
+    )
+
+    assert derived_combination is not None
+    assert derived_combination.values["ritenuta"].value == Decimal("17.72")
+    assert derived_combination.values["ritenuta"].source == (
+        "table_crop_calculated_totale_minus_netto"
+    )
+
+    page_without_withholding_or_net = DocumentPage(
+        page_number=1,
+        width=1000,
+        height=1000,
+        tokens=[token for token in crop_tokens if token.bbox.y1 < 840],
+    )
+
+    assert (
+        _best_economic_value_combination(
+            page_without_withholding_or_net,
+            region,
+            fields={},
+            percent=None,
+        )
+        is None
+    )
+
     page_without_crop_provenance = DocumentPage(
         page_number=1,
         width=1000,
@@ -3576,6 +5171,46 @@ def test_combinatorial_economic_values_use_only_same_table_crop_pairs() -> None:
         )
         is None
     )
+
+
+def test_combinatorial_economic_values_repair_split_decimal_tokens_in_table_crop() -> None:
+    source = "table_column_masked_psm12"
+    source_id = "table_column_masked_psm12:580:680:950:940"
+    crop_tokens = [
+        OcrToken("Tot.", BoundingBox(600, 700, 635, 715), 0.92, source, source_id),
+        OcrToken("imponibile", BoundingBox(640, 700, 740, 715), 0.92, source, source_id),
+        OcrToken("50,00", BoundingBox(880, 700, 940, 715), 0.96, source, source_id),
+        OcrToken("Tot.", BoundingBox(600, 750, 635, 765), 0.92, source, source_id),
+        OcrToken("Iva", BoundingBox(640, 750, 670, 765), 0.92, source, source_id),
+        OcrToken("6,21", BoundingBox(890, 750, 940, 765), 0.96, source, source_id),
+        OcrToken("Totale", BoundingBox(600, 800, 660, 815), 0.92, source, source_id),
+        OcrToken("documento", BoundingBox(665, 800, 750, 815), 0.92, source, source_id),
+        OcrToken("56", BoundingBox(880, 800, 905, 815), 0.96, source, source_id),
+        OcrToken("21", BoundingBox(909, 800, 930, 815), 0.96, source, source_id),
+        OcrToken("Rit.", BoundingBox(600, 850, 635, 865), 0.92, source, source_id),
+        OcrToken("acconto", BoundingBox(640, 850, 710, 865), 0.92, source, source_id),
+        OcrToken("-2,00", BoundingBox(880, 850, 940, 865), 0.96, source, source_id),
+        OcrToken("Tot.", BoundingBox(600, 910, 635, 925), 0.92, source, source_id),
+        OcrToken("dovuto", BoundingBox(640, 910, 710, 925), 0.92, source, source_id),
+        OcrToken("54,21", BoundingBox(880, 910, 940, 925), 0.96, source, source_id),
+    ]
+    page = DocumentPage(page_number=1, width=1000, height=1000, tokens=crop_tokens)
+    region = EconomicSummaryRegionCandidate(
+        page=1,
+        bbox=BoundingBox(580, 680, 950, 930),
+        score=100,
+        selected_as_economic_summary=True,
+        anchor_context="",
+        amount_count=0,
+        amount_context="",
+    )
+
+    combination = _best_economic_value_combination(page, region, fields={}, percent=4)
+
+    assert combination is not None
+    assert combination.values["totale_fattura"].value == Decimal("56.21")
+    assert combination.values["totale_netto_fattura"].value == Decimal("54.21")
+    assert combination.values["ritenuta"].value == Decimal("2.00")
 
 
 # SECTION: Invoice number regression cases
@@ -3599,7 +5234,7 @@ def test_find_invoice_number_candidates_requires_anchor_for_selection() -> None:
 
     candidates = find_invoice_number_candidates(document)
 
-    assert candidates[0].score == 60
+    assert candidates[0].score == 50
     assert candidates[0].anchor_context == ""
     assert candidates[0].selected_as_numero_fattura is False
 

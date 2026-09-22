@@ -14,11 +14,13 @@ from estrattore.model import BoundingBox, DocumentPage, DocumentRepresentation, 
 MIN_FUZZY_ANCHOR_SIMILARITY = 0.88
 MIN_SELECTED_SCORE = 80.0
 CENT_TOLERANCE = Decimal("0.01")
+ALLOWED_RITENUTA_PERCENTAGES = (0, 4, 10)
 MONEY_AMOUNT_PATTERN = re.compile(
     r"-?\d{1,3}(?:\.\d{3})*,\d{2}|-?\d+,\d{2}|-?\d+\.\d{2}"
 )
 TABLE_CROP_TOKEN_SOURCE = "table_column_masked_psm12"
 MIN_TABLE_CROP_PAIR_SCORE = 0.42
+MIN_ACCOUNTING_DERIVATION_ANCHOR_SCORE = 0.70
 
 
 @dataclass(frozen=True)
@@ -224,7 +226,7 @@ def find_economic_summary_field_candidates(
         ]
         region_amount_tokens = [
             token
-            for token in page.tokens
+            for token in _money_value_tokens_with_split_repairs(page.tokens, page)
             if _looks_like_money_amount(token.text)
             and _bbox_center_inside(token.bbox, region.bbox)
             and not any(
@@ -241,6 +243,7 @@ def find_economic_summary_field_candidates(
             value_token = _nearest_amount_to_the_right(
                 page=page,
                 anchor_hit=anchor_hit,
+                anchor_hits=region_anchor_hits,
                 amount_tokens=region_amount_tokens,
             )
             if value_token is None:
@@ -474,7 +477,37 @@ def _resolve_economic_summary_row(
 
     ritenuta_abs = abs(ritenuta_direct) if ritenuta_direct is not None else None
     ritenuta_source = "direct" if ritenuta_abs is not None else ""
+    totale_fattura_source_override = ""
+    totale_fattura_text_override = ""
+    totale_imponibile_text_override = ""
     selected_percent = percent_hint
+
+    if totale_imponibile is None and page is not None:
+        structural_taxable = _structural_taxable_column_candidate(
+            page=page,
+            region=region,
+        )
+        if structural_taxable is not None:
+            totale_imponibile = structural_taxable.value
+            totale_imponibile_text_override = structural_taxable.text
+            notes.append("totale_imponibile_from_structural_column")
+
+    if (
+        totale_fattura is not None
+        and totale_netto is not None
+        and totale_fattura + CENT_TOLERANCE < totale_netto
+    ):
+        totale_fattura = None
+        totale_fattura_source_override = "rejected_gross_below_net"
+        notes.append("totale_fattura_rejected_below_net")
+
+    if selected_percent is None and page is not None and ritenuta_field is not None:
+        selected_percent = _ritenuta_percent_from_same_row_percent_column(
+            page,
+            ritenuta_field,
+        )
+        if selected_percent is not None:
+            notes.append("ritenuta_percent_from_same_row_percent_column")
 
     if ritenuta_abs is None:
         derived_from_net = _derive_ritenuta_from_totale_netto(
@@ -510,14 +543,7 @@ def _resolve_economic_summary_row(
                 ritenuta_abs = derived_from_net
                 ritenuta_source = "derived_from_totale_fattura_minus_netto"
                 notes.append("ritenuta_derived_from_totale_netto")
-            elif ritenuta_abs is None and percent_hint is not None:
-                ritenuta_abs = _ritenuta_from_imponibile(
-                    totale_imponibile,
-                    percent_hint,
-                )
-                ritenuta_source = "calculated_from_imponibile"
-                notes.append("ritenuta_calculated_from_hint_percent")
-            elif percent_hint is not None:
+            elif percent_hint is not None and ritenuta_abs is not None:
                 notes.append("ritenuta_kept_from_direct_value_with_percent_hint")
 
     combination = (
@@ -525,7 +551,7 @@ def _resolve_economic_summary_row(
             page=page,
             region=region,
             fields=fields,
-            percent=selected_percent if selected_percent is not None else percent_candidates[0],
+            percent=selected_percent,
         )
         if page is not None
         else None
@@ -546,6 +572,42 @@ def _resolve_economic_summary_row(
         notes.append("totale_netto_from_combinatorial_candidates")
     if combination is not None and combination.notes:
         notes.extend(combination.notes)
+
+    if (
+        totale_fattura is None
+        and totale_netto is not None
+        and ritenuta_abs is not None
+        and ritenuta_source == "direct"
+        and fields.get("totale_netto_fattura") is not None
+        and page is not None
+    ):
+        expected_totale_fattura = _money(totale_netto + ritenuta_abs)
+        matching_total_token = _matching_money_token_in_region(
+            page=page,
+            region=region,
+            expected_value=expected_totale_fattura,
+        )
+        if matching_total_token is not None:
+            totale_fattura = expected_totale_fattura
+            totale_fattura_text_override = (
+                _clean_money_amount_text(matching_total_token.text)
+                or matching_total_token.text
+            )
+            totale_fattura_source_override = (
+                "regional_token_matching_netto_plus_ritenuta"
+            )
+            notes.append("totale_fattura_matched_netto_plus_ritenuta")
+
+    if (
+        totale_fattura is None
+        and totale_netto is not None
+        and ritenuta_abs is None
+        and page is not None
+        and _page_has_forfettario_tax_regime(page)
+    ):
+        totale_fattura = totale_netto
+        totale_fattura_source_override = "derived_from_netto_forfettario_without_ritenuta"
+        notes.append("totale_fattura_from_netto_forfettario_without_ritenuta")
 
     resolved_netto = totale_netto
     netto_source = "direct" if resolved_netto is not None else ""
@@ -569,8 +631,34 @@ def _resolve_economic_summary_row(
         and _money_matches(_money(totale_fattura - ritenuta_abs), resolved_netto)
     ):
         math_check = "ok"
+    elif (
+        totale_fattura is not None
+        and resolved_netto is not None
+        and ritenuta_abs is None
+        and page is not None
+        and _page_has_forfettario_tax_regime(page)
+        and _money_matches(totale_fattura, resolved_netto)
+    ):
+        ritenuta_abs = Decimal("0.00")
+        ritenuta_source = "implicit_zero_forfettario"
+        selected_percent = 0
+        math_check = "ok"
+        notes.append("ritenuta_zero_forfettario_totale_matches_netto")
     else:
         math_check = "uncertain"
+
+    if selected_percent is None:
+        selected_percent = _infer_allowed_ritenuta_percent(
+            totale_imponibile=totale_imponibile,
+            totale_fattura=totale_fattura,
+            ritenuta_abs=ritenuta_abs,
+            resolved_netto=resolved_netto,
+            percent_candidates=percent_candidates,
+            page=page,
+            region=region,
+        )
+        if selected_percent is not None:
+            notes.append("ritenuta_percent_inferred_from_accounting_values")
 
     signed_ritenuta = None
     if ritenuta_abs is not None:
@@ -582,14 +670,23 @@ def _resolve_economic_summary_row(
         totale_imponibile_text=_field_or_combination_value_text(
             fields.get("totale_imponibile"),
             combination_values.get("totale_imponibile"),
-        ),
+        )
+        or totale_imponibile_text_override,
         totale_imponibile_value=_format_decimal(totale_imponibile),
-        totale_fattura_text=_field_or_combination_value_text(
-            fields.get("totale_fattura"),
-            combination_values.get("totale_fattura"),
+        totale_fattura_text=(
+            ""
+            if totale_fattura_source_override.startswith("rejected_")
+            else _field_or_combination_value_text(
+                fields.get("totale_fattura"),
+                combination_values.get("totale_fattura"),
+            )
+            or totale_fattura_text_override
         ),
         totale_fattura_value=_format_decimal(totale_fattura),
         totale_fattura_source=(
+            totale_fattura_source_override
+            if totale_fattura_source_override
+            else
             "direct"
             if fields.get("totale_fattura") is not None
             else "combinatorial"
@@ -643,21 +740,43 @@ def _field_decimal(candidate: EconomicSummaryFieldCandidate | None) -> Decimal |
 def _ritenuta_percent_hint(label_text: str) -> int | None:
     words = _normalize_context_text(label_text).split()
     for word in words:
-        if word.startswith("20"):
-            return 20
-        if word.startswith("2") and word != "22":
-            return 20
+        if word.startswith("10"):
+            return 10
         if word.startswith("4"):
             return 4
+        if word.startswith("0"):
+            return 0
 
     return None
 
 
 def _percent_candidates(percent_hint: int | None) -> list[int]:
-    if percent_hint == 20:
-        return [20, 4]
+    if percent_hint in ALLOWED_RITENUTA_PERCENTAGES:
+        return [
+            percent_hint,
+            *[
+                percent
+                for percent in ALLOWED_RITENUTA_PERCENTAGES
+                if percent != percent_hint
+            ],
+        ]
 
-    return [4, 20]
+    return [4, 0, 10]
+
+
+def _page_has_forfettario_tax_regime(page: DocumentPage) -> bool:
+    text = _normalize_context_text(
+        " ".join(
+            [
+                *(token.text for token in page.tokens),
+                *(span.text for span in page.spans),
+            ]
+        )
+    )
+    words = set(text.split())
+    if words.intersection({"forf", "forfetario", "forfetari", "forfettario", "forfettari"}):
+        return True
+    return "190 2014" in text or "208 2015" in text
 
 
 def _percent_matching_ritenuta(
@@ -675,6 +794,144 @@ def _percent_matching_ritenuta(
     return None
 
 
+def _ritenuta_percent_from_same_row_percent_column(
+    page: DocumentPage,
+    ritenuta_field: EconomicSummaryFieldCandidate,
+) -> int | None:
+    value_bbox = ritenuta_field.value_bbox
+    candidates = []
+    for token in page.tokens:
+        if token.bbox == value_bbox:
+            continue
+        if token.bbox.x2 > value_bbox.x1:
+            continue
+        if value_bbox.x1 - token.bbox.x2 > max(260, int(page.width * 0.18)):
+            continue
+        if not _is_same_visual_row(token.bbox, value_bbox):
+            continue
+
+        percent = _allowed_percent_from_token_text(token.text)
+        if percent is None:
+            continue
+        if "%" not in token.text and not _has_percent_header_above(page, token):
+            continue
+
+        candidates.append((percent, token.bbox.x1))
+
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda candidate: candidate[1])[0]
+
+
+def _infer_allowed_ritenuta_percent(
+    totale_imponibile: Decimal | None,
+    totale_fattura: Decimal | None,
+    ritenuta_abs: Decimal | None,
+    resolved_netto: Decimal | None,
+    percent_candidates: list[int],
+    page: DocumentPage | None = None,
+    region: EconomicSummaryRegionCandidate | None = None,
+) -> int | None:
+    if ritenuta_abs is None and totale_fattura is not None and resolved_netto is not None:
+        ritenuta_abs = _derive_ritenuta_from_totale_netto(
+            totale_fattura,
+            resolved_netto,
+        )
+
+    if ritenuta_abs is None:
+        return None
+
+    if _money_matches(ritenuta_abs, Decimal("0.00")):
+        return 0
+
+    if totale_imponibile is not None:
+        return _percent_matching_ritenuta(
+            totale_imponibile,
+            ritenuta_abs,
+            percent_candidates,
+        )
+
+    if page is not None and region is not None:
+        return _percent_matching_page_amount(
+            page=page,
+            region=region,
+            ritenuta_abs=ritenuta_abs,
+            percent_candidates=percent_candidates,
+        )
+
+    return None
+
+
+def _percent_matching_page_amount(
+    page: DocumentPage,
+    region: EconomicSummaryRegionCandidate,
+    ritenuta_abs: Decimal,
+    percent_candidates: list[int],
+) -> int | None:
+    matches: dict[int, int] = defaultdict(int)
+    vertical_margin = max(80, int(page.height * 0.04))
+    min_y = max(0, region.bbox.y1 - vertical_margin)
+    max_y = min(page.height, region.bbox.y2 + vertical_margin)
+
+    for token in _money_value_tokens_with_split_repairs(page.tokens, page):
+        center_y = (token.bbox.y1 + token.bbox.y2) / 2
+        if center_y < min_y or center_y > max_y:
+            continue
+
+        try:
+            value = Decimal(_normalize_money_amount(token.text))
+        except InvalidOperation:
+            continue
+
+        if _money_matches(value, ritenuta_abs):
+            continue
+
+        for percent in percent_candidates:
+            if percent == 0:
+                continue
+            if _money_matches(_ritenuta_from_imponibile(value, percent), ritenuta_abs):
+                matches[percent] += 1
+
+    if len(matches) != 1:
+        return None
+
+    return next(iter(matches))
+
+
+def _allowed_percent_from_token_text(text: str) -> int | None:
+    cleaned_text = text.strip().replace("%", "").replace(",", ".")
+    try:
+        value = Decimal(cleaned_text)
+    except InvalidOperation:
+        return None
+
+    if value != value.to_integral_value():
+        return None
+
+    percent = int(value)
+    return percent if percent in ALLOWED_RITENUTA_PERCENTAGES else None
+
+
+def _has_percent_header_above(page: DocumentPage, value_token: OcrToken) -> bool:
+    token_center_x = (value_token.bbox.x1 + value_token.bbox.x2) / 2
+    max_dx = max(32, page.width * 0.035)
+    max_dy = max(120, page.height * 0.06)
+    for span in page.spans:
+        if span.bbox.y1 >= value_token.bbox.y1:
+            continue
+        if value_token.bbox.y1 - span.bbox.y2 > max_dy:
+            continue
+        span_center_x = (span.bbox.x1 + span.bbox.x2) / 2
+        if abs(span_center_x - token_center_x) > max_dx:
+            continue
+        normalized = _normalize_context_text(span.text)
+        if "%" in span.text or "percent" in normalized:
+            return True
+
+    return False
+
+
 def _derive_ritenuta_from_totale_netto(
     totale_fattura: Decimal | None,
     totale_netto: Decimal | None,
@@ -682,7 +939,111 @@ def _derive_ritenuta_from_totale_netto(
     if totale_fattura is None or totale_netto is None:
         return None
 
-    return abs(_money(totale_fattura - totale_netto))
+    if totale_fattura + CENT_TOLERANCE < totale_netto:
+        return None
+
+    return _money(totale_fattura - totale_netto)
+
+
+def _structural_taxable_column_candidate(
+    page: DocumentPage,
+    region: EconomicSummaryRegionCandidate,
+) -> _EconomicValueCandidate | None:
+    """Read a value below an explicit taxable column in a summary header row."""
+    candidates: list[tuple[float, _EconomicValueCandidate]] = []
+    for header in page.spans:
+        if _normalize_context_text(header.text) != "imponibile":
+            continue
+        if not _bbox_center_inside(header.bbox, region.bbox):
+            continue
+        if not _is_economic_column_header_row(page, header):
+            continue
+
+        header_center_x = (header.bbox.x1 + header.bbox.x2) / 2
+        max_horizontal_offset = max(28, page.width * 0.025)
+        max_vertical_gap = max(90, page.height * 0.065)
+        for token in _money_value_tokens_with_split_repairs(page.tokens, page):
+            if token.bbox.y1 < header.bbox.y2 - 2:
+                continue
+            vertical_gap = token.bbox.y1 - header.bbox.y2
+            if vertical_gap > max_vertical_gap:
+                continue
+            token_center_x = (token.bbox.x1 + token.bbox.x2) / 2
+            horizontal_offset = abs(token_center_x - header_center_x)
+            if horizontal_offset > max_horizontal_offset:
+                continue
+            if not _bbox_center_inside(token.bbox, region.bbox):
+                continue
+
+            value_text = _clean_money_amount_text(token.text)
+            if value_text is None:
+                continue
+            try:
+                value = abs(_money(Decimal(_normalize_money_amount(value_text))))
+            except InvalidOperation:
+                continue
+
+            distance = vertical_gap / page.height + horizontal_offset / page.width
+            candidates.append(
+                (
+                    distance,
+                    _EconomicValueCandidate(
+                        text=value_text,
+                        value=value,
+                        bbox=token.bbox,
+                        confidence=token.confidence if token.confidence is not None else 0.55,
+                        source="structural_taxable_column",
+                        anchor_text=header.text,
+                        anchor_score=1.0,
+                    ),
+                )
+            )
+
+    if not candidates:
+        return None
+
+    return min(candidates, key=lambda item: item[0])[1]
+
+
+def _is_economic_column_header_row(page: DocumentPage, header: TextSpan) -> bool:
+    companion_words: set[str] = set()
+    header_center_y = (header.bbox.y1 + header.bbox.y2) / 2
+    row_tolerance = max(16, page.height * 0.012)
+    for span in page.spans:
+        if span is header:
+            continue
+        span_center_y = (span.bbox.y1 + span.bbox.y2) / 2
+        if abs(span_center_y - header_center_y) > row_tolerance:
+            continue
+        companion_words.update(_normalize_context_text(span.text).split())
+
+    return bool(companion_words.intersection({"percentuale", "ritenuta", "imposta"}))
+
+
+def _matching_money_token_in_region(
+    page: DocumentPage,
+    region: EconomicSummaryRegionCandidate,
+    expected_value: Decimal,
+) -> OcrToken | None:
+    matches = []
+    for token in _money_value_tokens_with_split_repairs(page.tokens, page):
+        if not _bbox_center_inside(token.bbox, region.bbox):
+            continue
+        value_text = _clean_money_amount_text(token.text)
+        if value_text is None:
+            continue
+        try:
+            value = abs(_money(Decimal(_normalize_money_amount(value_text))))
+        except InvalidOperation:
+            continue
+        if _money_matches(value, expected_value):
+            matches.append(token)
+
+    return max(
+        matches,
+        key=lambda token: token.confidence if token.confidence is not None else 0.0,
+        default=None,
+    )
 
 
 def _ritenuta_from_imponibile(imponibile: Decimal, percent: int) -> Decimal:
@@ -708,7 +1069,7 @@ def _best_economic_value_combination(
     page: DocumentPage | None,
     region: EconomicSummaryRegionCandidate,
     fields: dict[str, EconomicSummaryFieldCandidate],
-    percent: int,
+    percent: int | None,
 ) -> _EconomicValueCombination | None:
     if page is None:
         return None
@@ -733,7 +1094,7 @@ def _best_economic_value_combination(
         )
         for target in _economic_targets()
     }
-    _add_derived_combination_candidates(candidates_by_target, percent=percent)
+    _add_derived_combination_candidates(candidates_by_target)
     existing_values = {
         target: _field_decimal(field)
         for target, field in fields.items()
@@ -783,7 +1144,7 @@ def _table_crop_value_candidates_by_target(
 
     seen: set[tuple[str, Decimal, BoundingBox, str]] = set()
     for source_tokens in tokens_by_source_id.values():
-        for value_token in source_tokens:
+        for value_token in _money_value_tokens_with_split_repairs(source_tokens, page):
             value_text = _clean_money_amount_text(value_token.text)
             if value_text is None:
                 continue
@@ -826,6 +1187,59 @@ def _table_crop_value_candidates_by_target(
                 )
 
     return candidates_by_target
+
+
+def _money_value_tokens_with_split_repairs(
+    source_tokens: list[OcrToken],
+    page: DocumentPage,
+) -> list[OcrToken]:
+    value_tokens = list(source_tokens)
+    ordered_tokens = sorted(source_tokens, key=lambda token: (token.bbox.y1, token.bbox.x1))
+
+    for left_index, left_token in enumerate(ordered_tokens):
+        left_text = left_token.text.strip()
+        if _looks_like_money_amount(left_text):
+            continue
+        if not re.fullmatch(r"-?\d{1,3}(?:\.\d{3})*|-?\d+", left_text):
+            continue
+
+        for right_token in ordered_tokens[left_index + 1 : left_index + 6]:
+            right_text = right_token.text.strip().lstrip(".,")
+            if _looks_like_money_amount(right_token.text):
+                continue
+            if not re.fullmatch(r"\d{2}", right_text):
+                continue
+            if not _is_same_visual_row(left_token.bbox, right_token.bbox):
+                continue
+            gap = right_token.bbox.x1 - left_token.bbox.x2
+            if gap < -2 or gap > max(18, int(page.width * 0.014)):
+                continue
+
+            repaired_text = f"{left_text},{right_text}"
+            if _clean_money_amount_text(repaired_text) is None:
+                continue
+
+            value_tokens.append(
+                OcrToken(
+                    text=repaired_text,
+                    bbox=BoundingBox(
+                        x1=min(left_token.bbox.x1, right_token.bbox.x1),
+                        y1=min(left_token.bbox.y1, right_token.bbox.y1),
+                        x2=max(left_token.bbox.x2, right_token.bbox.x2),
+                        y2=max(left_token.bbox.y2, right_token.bbox.y2),
+                    ),
+                    confidence=min(
+                        left_token.confidence if left_token.confidence is not None else 0.55,
+                        right_token.confidence if right_token.confidence is not None else 0.55,
+                        0.78,
+                    ),
+                    source=left_token.source,
+                    source_id=left_token.source_id,
+                )
+            )
+            break
+
+    return value_tokens
 
 
 def _economic_combination_bbox(
@@ -973,8 +1387,36 @@ def _target_value_candidates(
 
 def _add_derived_combination_candidates(
     candidates_by_target: dict[str, list[_EconomicValueCandidate]],
-    percent: int,
 ) -> None:
+    observed_totals = [
+        candidate
+        for candidate in candidates_by_target["totale_fattura"]
+        if _is_reliable_accounting_derivation_source(candidate)
+    ]
+    observed_net_totals = [
+        candidate
+        for candidate in candidates_by_target["totale_netto_fattura"]
+        if _is_reliable_accounting_derivation_source(candidate)
+    ]
+    for totale in observed_totals:
+        for netto in observed_net_totals:
+            if totale.bbox == netto.bbox:
+                continue
+            if netto.value > totale.value:
+                continue
+            withholding_value = _money(totale.value - netto.value)
+            candidates_by_target["ritenuta"].append(
+                _EconomicValueCandidate(
+                    text=_format_decimal(withholding_value),
+                    value=withholding_value,
+                    bbox=_union_candidate_bbox([totale, netto]),
+                    confidence=min(totale.confidence, netto.confidence, 0.68),
+                    source="table_crop_calculated_totale_minus_netto",
+                    anchor_text="",
+                    anchor_score=0.0,
+                )
+            )
+
     for imponibile in candidates_by_target["totale_imponibile"]:
         for imposta in candidates_by_target["totale_imposta"]:
             total_value = _money(imponibile.value + imposta.value)
@@ -990,21 +1432,18 @@ def _add_derived_combination_candidates(
                 )
             )
 
-            expected_ritenuta = _ritenuta_from_imponibile(imponibile.value, percent)
-            candidates_by_target["ritenuta"].append(
-                _EconomicValueCandidate(
-                    text=_format_decimal(expected_ritenuta),
-                    value=expected_ritenuta,
-                    bbox=imponibile.bbox,
-                    confidence=min(imponibile.confidence, 0.48),
-                    source="table_crop_calculated_ritenuta_from_imponibile",
-                    anchor_text="",
-                    anchor_score=0.0,
-                )
-            )
-
-    for totale in candidates_by_target["totale_fattura"]:
-        for ritenuta in candidates_by_target["ritenuta"]:
+    reliable_totals = [
+        candidate
+        for candidate in candidates_by_target["totale_fattura"]
+        if _is_reliable_accounting_derivation_source(candidate)
+    ]
+    reliable_withholdings = [
+        candidate
+        for candidate in candidates_by_target["ritenuta"]
+        if _is_reliable_accounting_derivation_source(candidate)
+    ]
+    for totale in reliable_totals:
+        for ritenuta in reliable_withholdings:
             if ritenuta.value >= totale.value:
                 continue
             netto_value = _money(totale.value - ritenuta.value)
@@ -1026,6 +1465,17 @@ def _add_derived_combination_candidates(
             key=lambda candidate: candidate.confidence,
             reverse=True,
         )[:10]
+
+
+def _is_reliable_accounting_derivation_source(
+    candidate: _EconomicValueCandidate,
+) -> bool:
+    return candidate.source == "selected_field" or candidate.source.startswith(
+        "table_crop_calculated_"
+    ) or (
+        candidate.source == "table_crop_pair"
+        and candidate.anchor_score >= MIN_ACCOUNTING_DERIVATION_ANCHOR_SCORE
+    )
 
 
 def _union_candidate_bbox(candidates: list[_EconomicValueCandidate]) -> BoundingBox:
@@ -1068,7 +1518,7 @@ def _score_value_candidate_for_target(
 def _score_economic_value_combination(
     values: dict[str, _EconomicValueCandidate],
     existing_values: dict[str, Decimal | None],
-    percent: int,
+    percent: int | None,
 ) -> _EconomicValueCombination | None:
     notes = []
     score = sum(candidate.confidence * 12 for candidate in values.values())
@@ -1086,6 +1536,15 @@ def _score_economic_value_combination(
     totale = values["totale_fattura"].value
     ritenuta = values["ritenuta"].value
     netto = values["totale_netto_fattura"].value
+    if any(
+        not _is_reliable_accounting_derivation_source(values[target])
+        for target in (
+            "totale_fattura",
+            "ritenuta",
+            "totale_netto_fattura",
+        )
+    ):
+        return None
     if totale < imponibile or imposta > totale or ritenuta >= totale or netto <= 0 or netto > totale:
         return None
     if _has_reused_incompatible_value_candidate(values):
@@ -1102,11 +1561,12 @@ def _score_economic_value_combination(
     score += 140
     notes.append("combinatorial_totale_minus_ritenuta_matches_netto")
 
-    if _money_matches(_ritenuta_from_imponibile(imponibile, percent), ritenuta):
+    if percent is not None and _money_matches(
+        _ritenuta_from_imponibile(imponibile, percent),
+        ritenuta,
+    ):
         score += 120
         notes.append("combinatorial_ritenuta_matches_imponibile_percent")
-    else:
-        score -= 40
 
     if _values_are_column_aligned(values):
         score += 30
@@ -1220,14 +1680,17 @@ def _best_anchor_hit_for_target(
 def _nearest_amount_to_the_right(
     page: DocumentPage,
     anchor_hit: _AnchorHit,
+    anchor_hits: list[_AnchorHit],
     amount_tokens: list[OcrToken],
 ) -> OcrToken | None:
+    column_bounds = _economic_column_bounds(anchor_hit, anchor_hits)
     candidate_tokens = [
         token
         for token in amount_tokens
         if token.bbox.x1 >= anchor_hit.bbox.x1
         and token.bbox.y1 >= anchor_hit.bbox.y1 - max(6, int(page.height * 0.004))
         and not _bbox_center_inside(token.bbox, anchor_hit.bbox)
+        and _bbox_center_x_inside(token.bbox, column_bounds)
     ]
     if not candidate_tokens:
         return None
@@ -1246,6 +1709,53 @@ def _nearest_amount_to_the_right(
     return min(
         candidate_tokens,
         key=lambda token: _field_link_distance(page, anchor_hit.bbox, token.bbox),
+    )
+
+
+def _economic_column_bounds(
+    anchor_hit: _AnchorHit,
+    anchor_hits: list[_AnchorHit],
+) -> tuple[float | None, float | None]:
+    """Infer local column ownership from aligned, non-overlapping labels."""
+    aligned_hits = [
+        hit
+        for hit in anchor_hits
+        if hit.bbox != anchor_hit.bbox
+        and _is_same_visual_row(anchor_hit.bbox, hit.bbox)
+        and (
+            hit.bbox.x2 <= anchor_hit.bbox.x1
+            or hit.bbox.x1 >= anchor_hit.bbox.x2
+        )
+    ]
+    if not aligned_hits:
+        return (None, None)
+
+    anchor_center = _bbox_center_x(anchor_hit.bbox)
+    centers = sorted({_bbox_center_x(hit.bbox) for hit in aligned_hits})
+    left_centers = [center for center in centers if center < anchor_center]
+    right_centers = [center for center in centers if center > anchor_center]
+    left_bound = (
+        (max(left_centers) + anchor_center) / 2 if left_centers else None
+    )
+    right_bound = (
+        (anchor_center + min(right_centers)) / 2 if right_centers else None
+    )
+    return (left_bound, right_bound)
+
+
+def _bbox_center_x(bbox: BoundingBox) -> float:
+    return (bbox.x1 + bbox.x2) / 2
+
+
+def _bbox_center_x_inside(
+    bbox: BoundingBox,
+    bounds: tuple[float | None, float | None],
+) -> bool:
+    center_x = _bbox_center_x(bbox)
+    left_bound, right_bound = bounds
+    return (
+        (left_bound is None or center_x >= left_bound)
+        and (right_bound is None or center_x < right_bound)
     )
 
 
@@ -1313,16 +1823,19 @@ def _anchor_definitions() -> list[tuple[str, str]]:
         ("totale_imponibile", "tot imponibile"),
         ("totale_imposta", "totale imposta"),
         ("totale_imposta", "tot iva"),
+        ("totale_fattura", "totale iva inclusa"),
         ("totale_fattura", "totale fattura euro"),
         ("totale_fattura", "totale fattura"),
+        ("totale_fattura", "tot fattura"),
+        ("totale_fattura", "totale documento"),
         ("totale_fattura", "tot documento"),
         ("ritenuta", "ritenuta"),
         ("ritenuta", "ritenuta 4"),
-        ("ritenuta", "ritenuta 20"),
+        ("ritenuta", "ritenuta 10"),
         ("ritenuta", "ra"),
         ("ritenuta", "rit acconto"),
         ("ritenuta", "rit acconto 4"),
-        ("ritenuta", "rit acconto 20"),
+        ("ritenuta", "rit acconto 10"),
         ("totale_netto_fattura", "totale netto fattura euro"),
         ("totale_netto_fattura", "totale netto fattura"),
         ("totale_netto_fattura", "netto fattura"),
@@ -1336,6 +1849,14 @@ def _anchor_definitions() -> list[tuple[str, str]]:
 
 def _is_ambiguous_economic_anchor(label: str, normalized_text: str) -> bool:
     words = normalized_text.split()
+    if (
+        label == "totale_imposta"
+        and "iva" in words
+        and "inclusa" in words
+        and ("totale" in words or "tot" in words)
+    ):
+        return True
+
     if label == "totale_imposta" and "imponibile" in words:
         return True
 

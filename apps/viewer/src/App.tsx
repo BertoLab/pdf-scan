@@ -1,12 +1,11 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode, RefObject } from 'react'
+import type { MouseEvent, ReactNode, RefObject } from 'react'
 import './App.css'
+import { normalizeMoneyValueForInput } from './moneyFormatting'
 import type {
   BoundingBox,
-  ImportedBatch,
   ImportedBatchImportPayload,
-  ImportedBatchListPayload,
   InvoiceField,
   PendingImportSource,
   PendingImportSourcePayload,
@@ -30,6 +29,18 @@ const REGISTRY_TABLE_ROW_HEIGHT = 64
 const REGISTRY_TABLE_HEADER_HEIGHT = 56
 const REGISTRY_TABLE_OVERSCAN_ROWS = 8
 const dateFieldKinds = new Set(['data_fattura', 'pagata_il'])
+const moneyFieldKinds = new Set([
+  'totale_fattura',
+  'ritenuta',
+  'totale_netto_fattura',
+  'economic_summary.totale_fattura.value',
+  'economic_summary.ritenuta.value',
+  'economic_summary.totale_netto_fattura.value',
+])
+const withholdingFieldKinds = new Set([
+  'ritenuta',
+  'economic_summary.ritenuta.value',
+])
 const isoDatePattern = /^(\d{4})-(\d{2})-(\d{2})$/
 
 function userErrorMessage(error: unknown, fallbackMessage: string) {
@@ -80,6 +91,28 @@ const expectedInvoiceFields: Pick<InvoiceField, 'kind' | 'label'>[] = [
 const expectedInvoiceFieldOrder = new Map(
   expectedInvoiceFields.map((field, index) => [field.kind, index]),
 )
+const expectedInvoiceFieldValidationGroups = [
+  { label: 'Codice fiscale emittente', kinds: ['codice_fiscale_emittente'] },
+  { label: 'Nome emittente', kinds: ['nome_emittente'] },
+  { label: 'P.IVA', kinds: ['p_iva'] },
+  { label: 'C.F. Condominio', kinds: ['codice_fiscale'] },
+  { label: 'Condominio', kinds: ['condominio'] },
+  { label: 'Numero fattura', kinds: ['numero_fattura'] },
+  { label: 'Data fattura', kinds: ['data_fattura'] },
+  { label: 'Pagata il', kinds: ['pagata_il'] },
+  {
+    label: 'Totale fattura',
+    kinds: ['economic_summary.totale_fattura.value', 'totale_fattura'],
+  },
+  { label: 'Ritenuta', kinds: ['economic_summary.ritenuta.value', 'ritenuta'] },
+  {
+    label: 'Totale netto fattura',
+    kinds: [
+      'economic_summary.totale_netto_fattura.value',
+      'totale_netto_fattura',
+    ],
+  },
+]
 const invoiceRegistryEditableFields = [
   { kind: 'codice_fiscale_emittente', label: 'C.F. emittente' },
   { kind: 'nome_emittente', label: 'Nome emittente' },
@@ -95,6 +128,15 @@ const invoiceRegistryEditableFields = [
 ] as const
 type InvoiceRegistryEditableFieldKind =
   (typeof invoiceRegistryEditableFields)[number]['kind']
+
+const invoiceFieldAliases: Record<string, string[]> = {
+  totale_fattura: ['totale_fattura', 'economic_summary.totale_fattura.value'],
+  ritenuta: ['ritenuta', 'economic_summary.ritenuta.value'],
+  totale_netto_fattura: [
+    'totale_netto_fattura',
+    'economic_summary.totale_netto_fattura.value',
+  ],
+}
 
 type FieldEvidence = {
   page: number
@@ -142,6 +184,7 @@ type RegistryRecordsPayload = {
 
 type AppView = 'review' | 'registry' | 'archive' | 'invoiceRegistry' | 'processing'
 type PdfArchiveViewMode = 'invoices' | 'sources'
+type InvoiceRegistryViewMode = 'saved' | 'exported' | 'discarded'
 
 type InvoiceArchiveRegistryPayload = {
   ok: boolean
@@ -154,27 +197,42 @@ type InvoiceArchiveRecord = {
   record_id: string
   status: string
   saved_at?: string
+  discarded_at?: string
   updated_at?: string
   source_batch_id?: string
   document_id?: string
   source_file_name?: string
+  display_name?: string
   archived_pdf_path?: string
   archived_pdf_url?: string
+  archived_pdf_page_numbers?: number[]
   archived_source_pdf_path?: string
   archived_source_pdf_url?: string
+  registry_visible?: boolean
+  invoice_archive_visible?: boolean
+  source_archive_visible?: boolean
   invoice?: {
     title?: string
     fields?: InvoiceField[]
   }
 }
 
-type ArchivedSourceRecord = InvoiceArchiveRecord & {
+type ArchivedSourceRecord = {
+  source_id: string
+  source_file_name: string
+  archived_at: string
+  size_bytes: number
+  archived_source_pdf_path: string
+  archived_source_pdf_url: string
   linked_invoice_count: number
 }
 
+type SourceArchivePayload = {
+  ok: boolean
+  records: ArchivedSourceRecord[]
+}
+
 type InvoiceArchiveFilters = {
-  issuer: string
-  condominium: string
   dateFrom: string
   dateTo: string
 }
@@ -188,6 +246,30 @@ type InvoiceArchiveSortKey =
   | 'condominio_asc'
   | 'totale_desc'
   | 'totale_asc'
+
+type ArchiveDeleteTarget = {
+  scope: 'invoice' | 'source' | 'registry' | 'all'
+  recordId?: string
+  recordIds?: string[]
+  archivedSourcePdfPath?: string
+  archivedSourcePdfPaths?: string[]
+  title: string
+  message: string
+}
+
+type ArchiveReferenceKind = 'invoice' | 'source'
+
+type ArchiveReferenceAction = {
+  record: InvoiceArchiveRecord
+  kind: ArchiveReferenceKind
+  error: string | null
+}
+
+type ArchiveReprocessDialogState = {
+  target: 'invoices' | 'sources'
+  phase: 'confirm' | 'starting' | 'success'
+  recordIds: string[]
+}
 
 type RegistryCleaningReportRecord = {
   registry_id: string
@@ -234,11 +316,72 @@ type InvoiceReviewActionState = {
   message: string
 } | null
 
+type FeedbackExportState =
+  | { kind: 'confirm' }
+  | { kind: 'exporting' }
+  | {
+      kind: 'success'
+      folderName: string
+      invoiceCount: number
+      missingPdfCount: number
+    }
+  | { kind: 'error'; message: string }
+  | null
+
+type PendingSegmentationAction =
+  | {
+      operation: 'move_boundary'
+      direction: 'first_to_previous' | 'last_to_next'
+      removesInvoice: boolean
+      title: string
+      message: string
+    }
+  | {
+      operation: 'split'
+      afterPosition: number
+      title: string
+      message: string
+    }
+
+type SegmentationProgressState = {
+  operation: PendingSegmentationAction['operation']
+  phase: 'saving' | 'reorganizing' | 'reloading'
+}
+
+type ReviewInvoiceDraft = {
+  draft_id: string
+  process_id: string
+  document_id: string
+  document_base_path: string
+  invoice_id: string
+  fields: InvoiceField[]
+  updated_at: string
+}
+
+type ReviewDraftsPayload = {
+  ok: boolean
+  drafts: ReviewInvoiceDraft[]
+}
+
+type PendingReviewDraftSave = {
+  invoice: ViewerInvoice
+  reviewBatchBasePath: string
+  version: number
+}
+
 type ProcessingJobPayload = {
   ok: boolean
   job_id: string
   batch_id: string
-  status: 'queued' | 'processing' | 'paused' | 'completed' | 'cancelled' | 'removed' | 'error'
+  status:
+    | 'queued'
+    | 'processing'
+    | 'finalizing'
+    | 'cancelling'
+    | 'completed'
+    | 'cancelled'
+    | 'removed'
+    | 'error'
   message: string
   progress_current?: number
   progress_total?: number
@@ -246,13 +389,27 @@ type ProcessingJobPayload = {
   elapsed_seconds?: number
   estimated_remaining_seconds?: number | null
   cancel_requested?: boolean
-  pause_requested?: boolean
+  created_at?: string
+  source_kind?:
+    | 'external_upload'
+    | 'source_archive'
+    | 'saved_invoice'
+    | 'discarded_invoice'
+  archive_sources?: boolean
+  files?: Array<{
+    document_id: string
+    source_id?: string
+    name: string
+    size_bytes: number
+  }>
   result?: {
     invoice_count: number
     review_batch_count: number
     errors?: string[]
   }
 }
+
+type ProcessingViewMode = 'active' | 'history'
 
 type ProcessingJobsPayload = {
   ok: boolean
@@ -267,7 +424,14 @@ type PendingRegistryRecord = {
 }
 
 type InvoiceSaveValidationIssue = {
-  kind: 'empty_fields' | 'invalid_fiscal' | 'new_registry_record' | 'registry_conflict'
+  kind:
+    | 'empty_fields'
+    | 'invalid_fiscal'
+    | 'invalid_date'
+    | 'invalid_amount'
+    | 'economic_mismatch'
+    | 'new_registry_record'
+    | 'registry_conflict'
   title: string
   detail: string
   record?: RegistryPreviewRecord
@@ -285,6 +449,9 @@ type PendingBatchReviewAction = {
   validationIssueCount: number
   emptyFieldIssueCount: number
   invalidFiscalIssueCount: number
+  invalidDateIssueCount: number
+  invalidAmountIssueCount: number
+  economicMismatchIssueCount: number
   newRegistryIssueCount: number
   registryConflictIssueCount: number
 }
@@ -308,6 +475,7 @@ type FieldSuggestion = {
   count: number
   score: number
   relatedFields: Record<string, string>
+  registryRecord?: RegistryPreviewRecord
 }
 
 type RegistryFieldConflict = {
@@ -391,6 +559,42 @@ function formatItalianDateValue(value: string) {
   return `${day}-${month}-${year}`
 }
 
+function formatProcessingDateTime(value: string | undefined) {
+  if (!value) {
+    return 'Data non disponibile'
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return 'Data non disponibile'
+  }
+
+  const day = String(date.getDate()).padStart(2, '0')
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const year = date.getFullYear()
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  return `${day}-${month}-${year}, ${hours}:${minutes}`
+}
+
+function compareProcessingJobsNewestFirst(
+  left: ProcessingJobPayload,
+  right: ProcessingJobPayload,
+) {
+  const leftTimestamp = left.created_at ? Date.parse(left.created_at) : Number.NaN
+  const rightTimestamp = right.created_at ? Date.parse(right.created_at) : Number.NaN
+  const leftHasDate = Number.isFinite(leftTimestamp)
+  const rightHasDate = Number.isFinite(rightTimestamp)
+
+  if (leftHasDate && rightHasDate && leftTimestamp !== rightTimestamp) {
+    return rightTimestamp - leftTimestamp
+  }
+  if (leftHasDate !== rightHasDate) {
+    return leftHasDate ? -1 : 1
+  }
+  return right.job_id.localeCompare(left.job_id, undefined, { numeric: true })
+}
+
 function normalizeDateValueForInput(value: string) {
   const trimmedValue = value.trim()
   if (!trimmedValue) {
@@ -431,12 +635,24 @@ function normalizeDateValueForInput(value: string) {
   return `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${fullYear}`
 }
 
-function formatFieldValueForDisplay(field: Pick<InvoiceField, 'kind' | 'value'>) {
-  if (!dateFieldKinds.has(field.kind)) {
-    return field.value
+function normalizeInvoiceFieldValueForInput(fieldKind: string, value: string) {
+  if (dateFieldKinds.has(fieldKind)) {
+    return normalizeDateValueForInput(value)
   }
+  if (moneyFieldKinds.has(fieldKind)) {
+    return normalizeMoneyValueForInput(value)
+  }
+  return value
+}
 
-  return formatItalianDateValue(field.value)
+function formatFieldValueForDisplay(field: Pick<InvoiceField, 'kind' | 'value'>) {
+  if (dateFieldKinds.has(field.kind)) {
+    return formatItalianDateValue(field.value)
+  }
+  if (moneyFieldKinds.has(field.kind)) {
+    return normalizeMoneyValueForInput(field.value)
+  }
+  return field.value
 }
 
 function DownloadIcon() {
@@ -459,6 +675,14 @@ function DownloadIcon() {
   )
 }
 
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M4 7h16M9 7V4h6v3m-9 0 1 13h8l1-13M10 11v5m4-5v5" />
+    </svg>
+  )
+}
+
 function EyeIcon() {
   return (
     <svg
@@ -474,6 +698,27 @@ function EyeIcon() {
     >
       <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
       <circle cx="12" cy="12" r="3" />
+    </svg>
+  )
+}
+
+function EyeClosedIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      width="15"
+      height="15"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m2 2 20 20" />
+      <path d="M6.7 6.7C3.8 8.6 2 12 2 12s3.5 7 10 7c1.8 0 3.4-.5 4.7-1.2" />
+      <path d="M10.7 5.1A8.2 8.2 0 0 1 12 5c6.5 0 10 7 10 7a14.2 14.2 0 0 1-2.1 3" />
+      <path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" />
     </svg>
   )
 }
@@ -526,6 +771,10 @@ function sortInvoiceFieldsForDisplay(fields: InvoiceField[]) {
 }
 
 function formatTargetValueForDisplay(kind: string, value: string) {
+  if (withholdingFieldKinds.has(kind)) {
+    const normalizedValue = normalizeMoneyValueForInput(value)
+    return normalizedValue.startsWith('-') ? normalizedValue.slice(1) : normalizedValue
+  }
   if (!dateFieldKinds.has(kind)) {
     return value
   }
@@ -699,6 +948,16 @@ function registryConflictTargetFieldKind(fieldKind: string) {
   return null
 }
 
+function registryConflictSourceFieldKind(fieldKind: string) {
+  if (fieldKind === 'condominio') {
+    return 'codice_fiscale'
+  }
+  if (fieldKind === 'nome_emittente') {
+    return 'codice_fiscale_emittente'
+  }
+  return null
+}
+
 function registryFieldGroupForFiscalField(fieldKind: string) {
   if (fieldKind === 'codice_fiscale' || fieldKind === 'condominio') {
     return ['condominio', 'codice_fiscale']
@@ -852,6 +1111,180 @@ function isValidItalianTaxCodeForUi(value: string) {
   return /^[A-Z0-9]{16}$/.test(normalized)
 }
 
+function isValidInvoiceDateValue(value: string) {
+  const normalizedValue = normalizeDateValueForInput(value)
+  const match = /^(\d{2})-(\d{2})-(\d{4})$/.exec(normalizedValue)
+  if (!match) {
+    return false
+  }
+
+  const [, rawDay, rawMonth, rawYear] = match
+  const day = Number(rawDay)
+  const month = Number(rawMonth)
+  const year = Number(rawYear)
+  const candidateDate = new Date(year, month - 1, day)
+  return (
+    candidateDate.getFullYear() === year &&
+    candidateDate.getMonth() === month - 1 &&
+    candidateDate.getDate() === day
+  )
+}
+
+function parseInvoiceMoneyValue(value: string) {
+  const normalizedValue = normalizeMoneyValueForInput(value)
+  if (!/^\d+\.\d{2}$/.test(normalizedValue)) {
+    return null
+  }
+
+  const amount = Number(normalizedValue)
+  return Number.isFinite(amount) ? amount : null
+}
+
+function normalizeLegacyWithholdingFields(fields: InvoiceField[]) {
+  const fieldsByKind = new Map(fields.map((field) => [field.kind, field]))
+  const total = parseInvoiceMoneyValue(
+    fieldsByKind.get('economic_summary.totale_fattura.value')?.value ??
+      fieldsByKind.get('totale_fattura')?.value ??
+      '',
+  )
+  const net = parseInvoiceMoneyValue(
+    fieldsByKind.get('economic_summary.totale_netto_fattura.value')?.value ??
+      fieldsByKind.get('totale_netto_fattura')?.value ??
+      '',
+  )
+  const derivedWithholding =
+    total !== null && net !== null && total >= net
+      ? (total - net).toFixed(2)
+      : ''
+
+  return fields.map((field) => {
+    if (!withholdingFieldKinds.has(field.kind)) {
+      return field
+    }
+
+    const isLegacyPercentage =
+      field.value.includes('%') || field.label.includes('%')
+    return {
+      ...field,
+      label: 'Ritenuta',
+      value: isLegacyPercentage ? derivedWithholding : field.value,
+    }
+  })
+}
+
+function isInvalidMoneyField(fieldKind: string, value: string) {
+  const amount = parseInvoiceMoneyValue(value)
+  return (
+    moneyFieldKinds.has(fieldKind) &&
+    Boolean(value.trim()) &&
+    (amount === null || amount < 0)
+  )
+}
+
+function validationHasBlockingIssue(validation: PendingInvoiceSaveValidation) {
+  return validation.issues.some(
+    (issue) => issue.kind === 'invalid_amount' || issue.kind === 'economic_mismatch',
+  )
+}
+
+function fieldValueByAnyKind(fieldsByKind: Map<string, InvoiceField>, kinds: string[]) {
+  for (const kind of kinds) {
+    const value = fieldsByKind.get(kind)?.value.trim()
+    if (value) {
+      return value
+    }
+  }
+
+  return ''
+}
+
+function validateInvoiceFields(fields: InvoiceField[]): InvoiceSaveValidationIssue[] {
+  const issues: InvoiceSaveValidationIssue[] = []
+  const fieldsByKind = new Map(fields.map((field) => [field.kind, field]))
+  const emptyFields = expectedInvoiceFieldValidationGroups
+    .filter((expectedField) => !fieldValueByAnyKind(fieldsByKind, expectedField.kinds))
+    .map((expectedField) => expectedField.label)
+
+  if (emptyFields.length > 0) {
+    issues.push({
+      kind: 'empty_fields',
+      title: 'Campi mancanti',
+      detail: emptyFields.join(', '),
+    })
+  }
+
+  for (const field of fields) {
+    const value = field.value.trim()
+    if (!value) {
+      continue
+    }
+
+    if (field.kind === 'p_iva' && !isValidItalianVatNumberForUi(value)) {
+      issues.push({
+        kind: 'invalid_fiscal',
+        title: 'P.IVA da controllare',
+        detail: `${field.label}: ${value}`,
+      })
+    }
+
+    if (
+      (field.kind === 'codice_fiscale' || field.kind === 'codice_fiscale_emittente') &&
+      !isValidItalianTaxCodeForUi(value)
+    ) {
+      issues.push({
+        kind: 'invalid_fiscal',
+        title: 'Codice fiscale da controllare',
+        detail: `${field.label}: ${value}`,
+      })
+    }
+
+    if (dateFieldKinds.has(field.kind) && !isValidInvoiceDateValue(value)) {
+      issues.push({
+        kind: 'invalid_date',
+        title: 'Data da controllare',
+        detail: `${field.label}: ${value}`,
+      })
+    }
+
+    if (moneyFieldKinds.has(field.kind) && parseInvoiceMoneyValue(value) === null) {
+      issues.push({
+        kind: 'invalid_amount',
+        title: 'Importo non valido',
+        detail: `${field.label}: inserisci un valore numerico senza segni o lettere`,
+      })
+    }
+  }
+
+  const totaleFattura = parseInvoiceMoneyValue(
+    fieldsByKind.get('economic_summary.totale_fattura.value')?.value ??
+      fieldsByKind.get('totale_fattura')?.value ??
+      '',
+  )
+  const ritenutaRaw =
+    fieldsByKind.get('economic_summary.ritenuta.value')?.value ??
+    fieldsByKind.get('ritenuta')?.value ??
+    ''
+  const ritenuta = parseInvoiceMoneyValue(ritenutaRaw)
+  const totaleNetto = parseInvoiceMoneyValue(
+    fieldsByKind.get('economic_summary.totale_netto_fattura.value')?.value ??
+      fieldsByKind.get('totale_netto_fattura')?.value ??
+      '',
+  )
+
+  if (totaleFattura !== null && ritenuta !== null && totaleNetto !== null) {
+    const expectedNet = totaleFattura - ritenuta
+    if (Math.abs(expectedNet - totaleNetto) > 0.01) {
+      issues.push({
+        kind: 'economic_mismatch',
+        title: 'Totali da controllare',
+        detail: `Totale ${totaleFattura.toFixed(2)} - ritenuta ${ritenuta.toFixed(2)} non corrisponde al netto ${totaleNetto.toFixed(2)}`,
+      })
+    }
+  }
+
+  return issues
+}
+
 function buildRegistryRecordFromInvoiceFields(
   field: InvoiceField,
   fields: InvoiceField[],
@@ -883,45 +1316,7 @@ function buildInvoiceSaveValidation(
   invoice: ViewerInvoice,
   registryRecords: RegistryPreviewRecord[],
 ): PendingInvoiceSaveValidation | null {
-  const issues: InvoiceSaveValidationIssue[] = []
-  const fieldsByKind = new Map(invoice.fields.map((field) => [field.kind, field]))
-  const emptyFields = expectedInvoiceFields
-    .filter((expectedField) => !fieldsByKind.get(expectedField.kind)?.value.trim())
-    .map((expectedField) => expectedField.label)
-
-  if (emptyFields.length > 0) {
-    issues.push({
-      kind: 'empty_fields',
-      title: 'Campi mancanti',
-      detail: emptyFields.join(', '),
-    })
-  }
-
-  for (const field of invoice.fields) {
-    const value = field.value.trim()
-    if (!value) {
-      continue
-    }
-
-    if (field.kind === 'p_iva' && !isValidItalianVatNumberForUi(value)) {
-      issues.push({
-        kind: 'invalid_fiscal',
-        title: 'P.IVA da controllare',
-        detail: `${field.label}: ${value}`,
-      })
-    }
-
-    if (
-      (field.kind === 'codice_fiscale' || field.kind === 'codice_fiscale_emittente') &&
-      !isValidItalianTaxCodeForUi(value)
-    ) {
-      issues.push({
-        kind: 'invalid_fiscal',
-        title: 'Codice fiscale da controllare',
-        detail: `${field.label}: ${value}`,
-      })
-    }
-  }
+  const issues = validateInvoiceFields(invoice.fields)
 
   let registryRecordToAdd: RegistryPreviewRecord | null = null
   if (registryRecords.length > 0) {
@@ -964,14 +1359,66 @@ function buildInvoiceSaveValidation(
   return issues.length > 0 ? { issues, registryRecordToAdd } : null
 }
 
+function invoiceRegistryRecordValidationLabel(record: InvoiceArchiveRecord, rowIndex: number) {
+  const invoiceNumber = archiveFieldValue(record, 'numero_fattura')
+  if (invoiceNumber) {
+    return `Fattura ${invoiceNumber}`
+  }
+
+  return `Riga ${rowIndex + 1}`
+}
+
+function buildInvoiceRegistrySaveValidation(
+  records: InvoiceArchiveRecord[],
+): PendingInvoiceSaveValidation | null {
+  const issues = records.flatMap((record, recordIndex) => {
+    const recordLabel = invoiceRegistryRecordValidationLabel(record, recordIndex)
+    return validateInvoiceFields(record.invoice?.fields ?? []).map((issue) => ({
+      ...issue,
+      detail: `${recordLabel}: ${issue.detail}`,
+    }))
+  })
+
+  return issues.length > 0 ? { issues, registryRecordToAdd: null } : null
+}
+
 function fieldValueDiffersForRegistry(fieldKind: string, leftValue: string, rightValue: string) {
   return normalizeSuggestionValue(fieldKind, leftValue) !== normalizeSuggestionValue(fieldKind, rightValue)
+}
+
+function normalizedNameIsPartialOfRegistryValue(extractedValue: string, registryValue: string) {
+  const normalizedExtracted = normalizeSuggestionValue('nome_emittente', extractedValue)
+  const normalizedRegistry = normalizeSuggestionValue('nome_emittente', registryValue)
+  if (!normalizedExtracted || !normalizedRegistry) {
+    return false
+  }
+
+  return normalizedRegistry.includes(normalizedExtracted)
+}
+
+function fieldNeedsRegistryReplacementReview(field: InvoiceField) {
+  const replacedValue = field.registry_replaced_value?.trim() ?? ''
+  const registryValue = field.value.trim()
+  if (!replacedValue || !registryValue) {
+    return false
+  }
+
+  if (field.kind === 'nome_emittente' || field.kind === 'condominio') {
+    return !normalizedNameIsPartialOfRegistryValue(replacedValue, registryValue)
+  }
+
+  return fieldValueDiffersForRegistry(field.kind, replacedValue, registryValue)
 }
 
 function fieldWithRegistryValue(
   field: InvoiceField,
   nextValue: string,
   record: RegistryPreviewRecord,
+  review?: {
+    interaction: 'registry_selection' | 'dependent_registry_fill'
+    actionId: string
+    sourceFieldKind: string
+  },
 ): InvoiceField {
   const currentValue = field.value.trim()
   const replacedValue =
@@ -979,6 +1426,7 @@ function fieldWithRegistryValue(
     (currentValue && fieldValueDiffersForRegistry(field.kind, currentValue, nextValue)
       ? currentValue
       : null)
+  const automaticReplacement = !review && currentValue !== nextValue
 
   return {
     ...field,
@@ -987,7 +1435,38 @@ function fieldWithRegistryValue(
     registry_id: record.registry_id,
     registry_source_row: record.source_row,
     registry_replaced_value: replacedValue,
+    review_interaction:
+      review?.interaction ??
+      (automaticReplacement ? 'automatic_replacement' : field.review_interaction),
+    review_value_origin: review
+      ? review.interaction === 'registry_selection'
+        ? 'explicit_registry'
+        : 'dependent_registry'
+      : 'automatic_registry',
+    review_action_id:
+      review?.actionId ??
+      (automaticReplacement ? newReviewActionId() : field.review_action_id),
+    review_source_field_kind:
+      review?.sourceFieldKind ??
+      (automaticReplacement ? field.kind : field.review_source_field_kind),
+    review_registry_snapshot: registryFeedbackSnapshot(record),
   }
+}
+
+function registryFeedbackSnapshot(record: RegistryPreviewRecord) {
+  return {
+    registry_id: record.registry_id,
+    source_row: record.source_row,
+    codice_anagrafica: record.codice_anagrafica,
+    nominativo: record.nominativo,
+    codice_fiscale: record.codice_fiscale,
+    partita_iva: record.partita_iva,
+    tipologia: record.tipologia,
+  }
+}
+
+function newReviewActionId() {
+  return globalThis.crypto?.randomUUID?.() ?? `review-${Date.now()}-${Math.random()}`
 }
 
 function buildRegistrySearchIndex(records: RegistryPreviewRecord[]): RegistrySearchIndexEntry[] {
@@ -1422,8 +1901,18 @@ const RegistrySearch = memo(function RegistrySearch({
 
 const InvoicePdfArchiveTable = memo(function InvoicePdfArchiveTable({
   records,
+  selectedKeys,
+  focusedKey,
+  onToggle,
+  onToggleAll,
+  onGoToSource,
 }: {
   records: InvoiceArchiveRecord[]
+  selectedKeys: Set<string>
+  focusedKey: string | null
+  onToggle: (record: InvoiceArchiveRecord) => void
+  onToggleAll: () => void
+  onGoToSource: (record: InvoiceArchiveRecord) => void
 }) {
   if (records.length === 0) {
     return (
@@ -1439,22 +1928,38 @@ const InvoicePdfArchiveTable = memo(function InvoicePdfArchiveTable({
       <table className="invoice-archive-table">
         <thead>
           <tr>
-            <th>Salvata il</th>
-            <th>Origine</th>
+            <th className="archive-selection-column">
+              <input
+                type="checkbox"
+                checked={records.length > 0 && records.every((record) => selectedKeys.has(record.record_id))}
+                onChange={onToggleAll}
+                aria-label="Seleziona tutte le fatture"
+              />
+            </th>
             <th>Fattura</th>
-            <th>Sorgente</th>
+            <th>Archiviata il</th>
+            <th>Nome file</th>
             <th>Emittente</th>
             <th>Condominio</th>
             <th>Numero</th>
+            <th>Origine</th>
           </tr>
         </thead>
         <tbody>
           {records.map((record) => (
-            <tr key={record.record_id}>
-              <td>
-                {formatItalianDateValue((record.saved_at ?? '').slice(0, 10)) || '-'}
+            <tr
+              key={record.record_id}
+              data-archive-key={record.record_id}
+              className={focusedKey === record.record_id ? 'archive-focused-row' : ''}
+            >
+              <td className="archive-selection-column">
+                <input
+                  type="checkbox"
+                  checked={selectedKeys.has(record.record_id)}
+                  onChange={() => onToggle(record)}
+                  aria-label={`Seleziona ${fileNameFromPath(record.archived_pdf_path) || 'fattura'}`}
+                />
               </td>
-              <td>{record.source_file_name || '-'}</td>
               <td>
                 {record.archived_pdf_url ? (
                   <a
@@ -1470,22 +1975,30 @@ const InvoicePdfArchiveTable = memo(function InvoicePdfArchiveTable({
                 )}
               </td>
               <td>
-                {record.archived_source_pdf_url ? (
-                  <a
-                    className="invoice-archive-pdf-link secondary"
-                    href={runtimeApiUrl(record.archived_source_pdf_url)}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Apri origine
-                  </a>
-                ) : (
-                  '-'
-                )}
+                {formatItalianDateValue(
+                  (record.saved_at ?? record.discarded_at ?? '').slice(0, 10),
+                ) || '-'}
+              </td>
+              <td title={fileNameFromPath(record.archived_pdf_path) ?? undefined}>
+                {fileNameFromPath(record.archived_pdf_path) || '-'}
               </td>
               <td>{archiveFieldValue(record, 'nome_emittente') || '-'}</td>
               <td>{archiveFieldValue(record, 'condominio') || '-'}</td>
               <td>{archiveFieldValue(record, 'numero_fattura') || '-'}</td>
+              <td>
+                {record.source_file_name ? (
+                  <button
+                    type="button"
+                    className="invoice-archive-pdf-link secondary"
+                    onClick={() => onGoToSource(record)}
+                    title={`Vai al file origine: ${fileNameFromPath(record.source_file_name)}`}
+                  >
+                    Vai al file origine
+                  </button>
+                ) : (
+                  '-'
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -1496,100 +2009,183 @@ const InvoicePdfArchiveTable = memo(function InvoicePdfArchiveTable({
 
 const SourcePdfArchiveTable = memo(function SourcePdfArchiveTable({
   records,
-  onReprocessSource,
+  selectedKeys,
+  focusedKey,
+  onToggle,
+  onToggleAll,
 }: {
-  records: InvoiceArchiveRecord[]
-  onReprocessSource: (record: ArchivedSourceRecord) => void
+  records: ArchivedSourceRecord[]
+  selectedKeys: Set<string>
+  focusedKey: string | null
+  onToggle: (record: ArchivedSourceRecord) => void
+  onToggleAll: () => void
 }) {
-  const sourceRecords = uniqueArchivedSourceRecords(records)
+  const sourceRecords = records
 
   if (sourceRecords.length === 0) {
     return (
       <div className="registry-empty-state">
         <h2>Nessun file origine archiviato</h2>
-        <p>I file origine compariranno qui dopo il salvataggio delle fatture.</p>
+        <p>I file origine compariranno qui al termine dell'elaborazione OCR.</p>
       </div>
     )
   }
 
   return (
-    <div className="source-archive-sections">
-      {sourceRecords.length > 0 ? (
-        <section className="source-archive-section">
-          <h2>File origine archiviati</h2>
-          <div className="invoice-archive-table-wrap">
-            <table className="invoice-archive-table">
-              <thead>
-                <tr>
-                  <th>Archiviato il</th>
-                  <th>File origine</th>
-                  <th>PDF origine</th>
-                  <th>Fatture collegate</th>
-                  <th>Gruppo origine</th>
-                  <th>Azioni</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sourceRecords.map((record) => (
-                  <tr key={record.archived_source_pdf_url ?? record.record_id}>
-                    <td>
-                      {formatItalianDateValue((record.saved_at ?? '').slice(0, 10)) || '-'}
-                    </td>
-                    <td>{record.source_file_name || '-'}</td>
-                    <td>
-                      {record.archived_source_pdf_url ? (
-                        <a
-                          className="invoice-archive-pdf-link secondary"
-                          href={runtimeApiUrl(record.archived_source_pdf_url)}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          Apri origine
-                        </a>
-                      ) : (
-                        '-'
-                      )}
-                    </td>
-                    <td>{record.linked_invoice_count}</td>
-                    <td>{record.source_batch_id || '-'}</td>
-                    <td>
-                      <button
-                        className="invoice-archive-pdf-link"
-                        onClick={() => onReprocessSource(record)}
-                        disabled={!record.archived_source_pdf_path}
-                      >
-                        Riprocessa
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      ) : null}
+    <div className="source-archive-list">
+      <label className="source-archive-select-all">
+        <input
+          type="checkbox"
+          checked={sourceRecords.every((record) => selectedKeys.has(record.source_id))}
+          onChange={onToggleAll}
+        />
+        Seleziona tutti i file origine
+      </label>
+      <div className="source-archive-records">
+        {sourceRecords.map((record) => (
+          <article
+            key={record.source_id}
+            data-archive-key={record.source_id}
+            className={`source-archive-record ${
+              focusedKey === record.source_id ? 'archive-focused-row' : ''
+            }`}
+          >
+            <input
+              className="source-archive-checkbox"
+              type="checkbox"
+              checked={selectedKeys.has(record.source_id)}
+              onChange={() => onToggle(record)}
+              aria-label={`Seleziona ${record.source_file_name || 'file origine'}`}
+            />
+            <div className="source-archive-identity">
+              <strong title={fileNameFromPath(record.source_file_name) || undefined}>
+                {fileNameFromPath(record.source_file_name) || '-'}
+              </strong>
+              <small>
+                Archiviato il {formatItalianDateValue(record.archived_at.slice(0, 10)) || '-'}
+              </small>
+            </div>
+            <div className="source-archive-record-action">
+              {record.archived_source_pdf_url ? (
+                <a
+                  className="invoice-archive-pdf-link secondary"
+                  href={runtimeApiUrl(record.archived_source_pdf_url)}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Apri origine
+                </a>
+              ) : (
+                <span>-</span>
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
     </div>
   )
 })
 
+function ArchiveReferenceDialog({
+  action,
+  onClose,
+  onOpenWindow,
+  onGoToArchive,
+}: {
+  action: ArchiveReferenceAction
+  onClose: () => void
+  onOpenWindow: () => void
+  onGoToArchive: () => void
+}) {
+  const isSource = action.kind === 'source'
+  const title = isSource ? 'File origine' : 'Fattura'
+  const fileName = isSource
+    ? fileNameFromPath(action.record.source_file_name) || 'File origine'
+    : `Fattura ${archiveFieldValue(action.record, 'numero_fattura') || ''}`.trim()
+
+  return (
+    <div className="registry-dialog-backdrop" role="presentation">
+      <section
+        className="registry-dialog archive-reference-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="archive-reference-title"
+      >
+        <header>
+          <div>
+            <h2 id="archive-reference-title">{title}</h2>
+            <p>{fileName}</p>
+          </div>
+          <button onClick={onClose} aria-label="Chiudi">
+            x
+          </button>
+        </header>
+        <div className="archive-reference-dialog-body">
+          <p>Scegli come visualizzare il documento.</p>
+          {action.error ? (
+            <p className="archive-reference-error" role="alert">
+              {action.error}
+            </p>
+          ) : null}
+        </div>
+        <div className="registry-cleaning-actions">
+          <button onClick={onClose}>Annulla</button>
+          <button onClick={onGoToArchive}>Vai al file in Archivio</button>
+          <button className="registry-save-button" onClick={onOpenWindow}>
+            Apri in finestra
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 const InvoiceRegistryTable = memo(function InvoiceRegistryTable({
   records,
+  viewMode,
   isEditMode,
   onUpdateRecordField,
+  selectedKeys,
+  onToggle,
+  onToggleAll,
+  onOpenArchiveReference,
 }: {
   records: InvoiceArchiveRecord[]
+  viewMode: InvoiceRegistryViewMode
   isEditMode: boolean
   onUpdateRecordField: (
     recordId: string,
     fieldKind: InvoiceRegistryEditableFieldKind,
     nextValue: string,
   ) => void
+  selectedKeys: Set<string>
+  onToggle: (record: InvoiceArchiveRecord) => void
+  onToggleAll: () => void
+  onOpenArchiveReference: (
+    record: InvoiceArchiveRecord,
+    kind: ArchiveReferenceKind,
+  ) => void
 }) {
   if (records.length === 0) {
+    const emptyState =
+      viewMode === 'saved'
+        ? {
+            title: 'Nessuna fattura da esportare',
+            description: 'I dati compariranno qui dopo il salvataggio dalla revisione.',
+          }
+        : viewMode === 'exported'
+          ? {
+              title: 'Nessuna fattura esportata',
+              description: 'Le fatture compariranno qui dopo la loro esportazione.',
+            }
+          : {
+              title: 'Nessuna fattura scartata',
+              description: 'Le fatture compariranno qui dopo lo scarto dalla revisione.',
+            }
     return (
       <div className="registry-empty-state">
-        <h2>Nessuna riga nel registro fatture</h2>
-        <p>I dati compariranno qui dopo il salvataggio dalla revisione.</p>
+        <h2>{emptyState.title}</h2>
+        <p>{emptyState.description}</p>
       </div>
     )
   }
@@ -1598,30 +2194,59 @@ const InvoiceRegistryTable = memo(function InvoiceRegistryTable({
     <VirtualDataTable
       rows={records}
       headerCells={[
-        'Salvata il',
+        <input
+          type="checkbox"
+          checked={records.length > 0 && records.every((record) => selectedKeys.has(record.record_id))}
+          onChange={onToggleAll}
+          aria-label="Seleziona tutte le righe"
+        />,
+        viewMode === 'saved' ? 'Salvata il' : 'Scartata il',
         ...invoiceRegistryEditableFields.map((field) => field.label),
-        'Origine',
-        'PDF origine',
+        viewMode === 'saved' ? 'File origine' : 'File origine e pagine',
+        'Fattura',
       ]}
       rowKey={(record) => record.record_id}
       className="invoice-registry-table-wrap"
       tableClassName="invoice-registry-table"
       rowClassName={(record) =>
-        invoiceRegistryRecordHasEmptyFields(record)
+        viewMode === 'saved' && invoiceRegistryRecordHasEmptyFields(record)
           ? 'invoice-registry-row-incomplete'
           : ''
       }
       renderRow={(record) => {
           return [
-            formatItalianDateValue((record.saved_at ?? '').slice(0, 10)) || '-',
+            <input
+              type="checkbox"
+              checked={selectedKeys.has(record.record_id)}
+              onChange={() => onToggle(record)}
+              aria-label={`Seleziona ${record.source_file_name || 'fattura'}`}
+            />,
+            formatItalianDateValue(
+              (
+                viewMode === 'saved'
+                  ? record.saved_at ?? ''
+                  : record.discarded_at ?? ''
+              ).slice(0, 10),
+            ) || '-',
             ...invoiceRegistryEditableFields.map((field) => {
                 const value = archiveFieldValue(record, field.kind)
-                const displayValue = dateFieldKinds.has(field.kind)
-                  ? formatItalianDateValue(value)
-                  : value
+                const displayValue = isEditMode
+                  ? dateFieldKinds.has(field.kind)
+                    ? formatItalianDateValue(value)
+                    : value
+                  : normalizeInvoiceFieldValueForInput(field.kind, value)
 
                 return (
-                  <span className={!value.trim() ? 'invoice-registry-empty-cell' : ''}>
+                  <span
+                    className={[
+                      !value.trim() ? 'invoice-registry-empty-cell' : '',
+                      isInvalidMoneyField(field.kind, value)
+                        ? 'invoice-registry-invalid-cell'
+                        : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                  >
                     {isEditMode ? (
                       <input
                         value={displayValue}
@@ -1633,11 +2258,18 @@ const InvoiceRegistryTable = memo(function InvoiceRegistryTable({
                           )
                         }
                         onBlur={(event) => {
-                          const normalizedValue = normalizeDateValueForInput(
+                          const normalizedValue = normalizeInvoiceFieldValueForInput(
+                            field.kind,
                             event.currentTarget.value,
                           )
-                          if (dateFieldKinds.has(field.kind)) {
+                          if (normalizedValue !== event.currentTarget.value) {
                             onUpdateRecordField(record.record_id, field.kind, normalizedValue)
+                          }
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault()
+                            event.currentTarget.blur()
                           }
                         }}
                       />
@@ -1647,17 +2279,32 @@ const InvoiceRegistryTable = memo(function InvoiceRegistryTable({
                   </span>
                 )
               }),
-            record.source_file_name || '-',
             <>
-                {record.archived_source_pdf_url ? (
-                  <a
+                {record.source_file_name || record.archived_source_pdf_path ? (
+                  <button
+                    type="button"
                     className="invoice-archive-pdf-link secondary"
-                    href={runtimeApiUrl(record.archived_source_pdf_url)}
-                    target="_blank"
-                    rel="noreferrer"
+                    onClick={() => onOpenArchiveReference(record, 'source')}
                   >
-                    Apri origine
-                  </a>
+                    {record.status === 'discarded'
+                      ? record.display_name || 'Apri origine'
+                      : fileNameFromPath(record.source_file_name) || 'Apri origine'}
+                  </button>
+                ) : (
+                  (record.status === 'discarded'
+                    ? record.display_name
+                    : fileNameFromPath(record.source_file_name)) || '-'
+                )}
+            </>,
+            <>
+                {record.archived_pdf_url || record.archived_pdf_path ? (
+                  <button
+                    type="button"
+                    className="invoice-archive-pdf-link"
+                    onClick={() => onOpenArchiveReference(record, 'invoice')}
+                  >
+                    Apri fattura
+                  </button>
                 ) : (
                   '-'
                 )}
@@ -1703,10 +2350,6 @@ function RegistryCleaningReportDialog({
     () => new Set(allMergedGroupKeys),
   )
   const selectedMergedGroupsCount = selectedMergeGroupKeys.size
-
-  useEffect(() => {
-    setSelectedMergeGroupKeys(new Set(allMergedGroupKeys))
-  }, [allMergedGroupKeys])
 
   function toggleMergedGroup(groupKey: string) {
     setSelectedMergeGroupKeys((currentKeys) => {
@@ -1916,6 +2559,111 @@ function RegistryImportErrorDialog({
   )
 }
 
+function FeedbackExportDialog({
+  state,
+  onCancel,
+  onConfirm,
+}: {
+  state: Exclude<FeedbackExportState, null>
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const isExporting = state.kind === 'exporting'
+
+  return (
+    <div className="registry-dialog-backdrop" role="presentation">
+      <section
+        className="registry-dialog feedback-export-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="feedback-export-title"
+      >
+        <header>
+          <h2 id="feedback-export-title">
+            {state.kind === 'success'
+              ? 'Pacchetto completato'
+              : state.kind === 'error'
+                ? 'Esportazione non completata'
+                : 'Esporta dati per miglioramento'}
+          </h2>
+          {!isExporting ? (
+            <button onClick={onCancel} aria-label="Chiudi">
+              x
+            </button>
+          ) : null}
+        </header>
+        <div className="feedback-export-dialog-body">
+          {state.kind === 'confirm' ? (
+            <>
+              <p>
+                Verrà creato un pacchetto contenente i risultati dell'estrazione,
+                le correzioni effettuate e i PDF disponibili.
+              </p>
+              <p>
+                Questi dati servono esclusivamente allo sviluppatore per analizzare
+                e migliorare il riconoscimento delle fatture.
+              </p>
+              <div className="feedback-export-destination">
+                <strong>Destinazione</strong>
+                <span>Desktop</span>
+              </div>
+            </>
+          ) : state.kind === 'exporting' ? (
+            <div className="feedback-export-progress" role="status">
+              <strong>Preparazione del pacchetto...</strong>
+              <div className="registry-import-progress-bar" aria-hidden="true">
+                <span />
+              </div>
+              <p>Verifica dei dati e copia dei PDF disponibili.</p>
+            </div>
+          ) : state.kind === 'success' ? (
+            <>
+              <p>Il pacchetto è stato salvato sul Desktop.</p>
+              <div className="feedback-export-result">
+                <strong>{state.folderName}</strong>
+                <span>{state.invoiceCount} fatture raccolte</span>
+                {state.missingPdfCount > 0 ? (
+                  <small>
+                    {state.missingPdfCount} PDF non erano più disponibili e sono
+                    segnalati nel pacchetto.
+                  </small>
+                ) : (
+                  <small>I PDF disponibili sono stati inclusi.</small>
+                )}
+              </div>
+            </>
+          ) : (
+            <p className="feedback-export-error">{state.message}</p>
+          )}
+        </div>
+        {!isExporting ? (
+          <div className="registry-cleaning-actions">
+            {state.kind === 'confirm' ? (
+              <>
+                <button onClick={onCancel}>Annulla</button>
+                <button className="registry-save-button" onClick={onConfirm}>
+                  Esporta
+                </button>
+              </>
+            ) : state.kind === 'error' ? (
+              <>
+                <button onClick={onCancel}>Chiudi</button>
+                <button className="registry-save-button" onClick={onConfirm}>
+                  Riprova
+                </button>
+              </>
+            ) : (
+              <button className="registry-save-button" onClick={onCancel}>
+                Chiudi
+              </button>
+            )}
+          </div>
+        ) : null}
+      </section>
+    </div>
+  )
+}
+
 function RegistryDeleteConfirmDialog({
   onCancel,
   onConfirm,
@@ -2000,6 +2748,8 @@ function InvoiceSaveValidationDialog({
   onContinue: () => void
   onAddRegistryRecord: () => void
 }) {
+  const hasBlockingIssue = validationHasBlockingIssue(validation)
+
   return (
     <div className="registry-dialog-backdrop" role="presentation">
       <section className="registry-dialog invoice-save-validation-dialog" role="dialog" aria-modal="true">
@@ -2011,8 +2761,9 @@ function InvoiceSaveValidationDialog({
         </header>
         <div className="invoice-save-validation-body">
           <p>
-            La fattura contiene dati da controllare. Puoi continuare comunque
-            oppure sistemare prima le informazioni.
+            {hasBlockingIssue
+              ? 'Correggi la ritenuta prima di salvare.'
+              : 'La fattura contiene dati da controllare. Puoi continuare comunque oppure sistemare prima le informazioni.'}
           </p>
           <div className="invoice-save-validation-issues">
             {validation.issues.map((issue, issueIndex) => (
@@ -2046,9 +2797,11 @@ function InvoiceSaveValidationDialog({
           {validation.registryRecordToAdd ? (
             <button onClick={onAddRegistryRecord}>Aggiungi in anagrafica</button>
           ) : null}
-          <button className="registry-save-button" onClick={onContinue}>
-            Continua e salva
-          </button>
+          {!hasBlockingIssue ? (
+            <button className="registry-save-button" onClick={onContinue}>
+              Continua e salva
+            </button>
+          ) : null}
         </div>
       </section>
     </div>
@@ -2061,6 +2814,9 @@ function BatchReviewActionConfirmDialog({
   validationIssueCount,
   emptyFieldIssueCount,
   invalidFiscalIssueCount,
+  invalidDateIssueCount,
+  invalidAmountIssueCount,
+  economicMismatchIssueCount,
   newRegistryIssueCount,
   registryConflictIssueCount,
   onCancel,
@@ -2071,12 +2827,14 @@ function BatchReviewActionConfirmDialog({
   onConfirm: () => void
 }) {
   const isDiscard = action === 'discard'
+  const hasBlockingIssue =
+    !isDiscard && (invalidAmountIssueCount > 0 || economicMismatchIssueCount > 0)
 
   return (
     <div className="registry-dialog-backdrop" role="presentation">
       <section className="registry-dialog batch-review-action-dialog" role="dialog" aria-modal="true">
         <header>
-          <h2>{isDiscard ? 'Elimina gruppo' : 'Salva gruppo'}</h2>
+          <h2>{isDiscard ? 'Scarta gruppo' : 'Salva gruppo'}</h2>
           <button onClick={onCancel} aria-label="Chiudi">
             x
           </button>
@@ -2084,7 +2842,7 @@ function BatchReviewActionConfirmDialog({
         <div className="batch-review-action-body">
           <p>
             {isDiscard
-              ? `Sei sicuro di voler eliminare ${invoiceCount} fatture dalla revisione?`
+              ? `Sei sicuro di voler scartare ${invoiceCount} fatture dalla revisione?`
               : `Stai per salvare ${invoiceCount} fatture nel registro.`}
           </p>
           {!isDiscard && validationIssueCount > 0 ? (
@@ -2092,6 +2850,9 @@ function BatchReviewActionConfirmDialog({
               <strong>Controlli da verificare</strong>
               <span>Campi mancanti: {emptyFieldIssueCount}</span>
               <span>C.F. o P.IVA sospetti: {invalidFiscalIssueCount}</span>
+              <span>Date da controllare: {invalidDateIssueCount}</span>
+              <span>Importi non validi: {invalidAmountIssueCount}</span>
+              <span>Quadrature contabili sospette: {economicMismatchIssueCount}</span>
               <span>Nuovi valori non presenti in anagrafica: {newRegistryIssueCount}</span>
               <span>Possibili conflitti anagrafica: {registryConflictIssueCount}</span>
             </div>
@@ -2107,8 +2868,13 @@ function BatchReviewActionConfirmDialog({
           <button
             className={isDiscard ? 'registry-delete-button' : 'registry-save-button'}
             onClick={onConfirm}
+            disabled={hasBlockingIssue}
           >
-            {isDiscard ? 'Elimina gruppo' : 'Continua e salva gruppo'}
+            {isDiscard
+              ? 'Scarta gruppo'
+              : hasBlockingIssue
+                ? 'Correggi gli importi'
+                : 'Continua e salva gruppo'}
           </button>
         </div>
       </section>
@@ -2152,48 +2918,6 @@ function ProcessingCancelConfirmDialog({
   )
 }
 
-function ImportedBatchDeleteConfirmDialog({
-  batch,
-  onCancel,
-  onConfirm,
-}: {
-  batch: ImportedBatch
-  onCancel: () => void
-  onConfirm: () => void
-}) {
-  return (
-    <div className="registry-dialog-backdrop" role="presentation">
-      <section className="registry-dialog imported-batch-delete-dialog" role="dialog" aria-modal="true">
-        <header>
-          <h2>Elimina PDF caricati</h2>
-          <button onClick={onCancel} aria-label="Chiudi">
-            x
-          </button>
-        </header>
-        <div className="batch-review-action-body">
-          <p>
-            Sei sicuro di voler eliminare questo gruppo di PDF caricati?
-          </p>
-          <div className="imported-batch-delete-summary">
-            <strong>{batch.label}</strong>
-            <span>Origine: {batch.source_label ?? batch.label}</span>
-            <span>{batch.document_count} PDF caricati</span>
-          </div>
-          <p>
-            Verranno rimossi solo i file copiati dentro l'app, non i file originali sul disco.
-          </p>
-        </div>
-        <div className="registry-cleaning-actions">
-          <button onClick={onCancel}>Annulla</button>
-          <button className="registry-delete-button" onClick={onConfirm}>
-            Elimina
-          </button>
-        </div>
-      </section>
-    </div>
-  )
-}
-
 function DestructiveActionConfirmDialog({
   title,
   message,
@@ -2230,28 +2954,199 @@ function DestructiveActionConfirmDialog({
   )
 }
 
-function DocumentImportDialog({
-  sources,
-  isImporting,
-  onAddFiles,
-  onAddFolder,
-  onRemoveSource,
+function ArchiveReprocessDialog({
+  state,
+  onCancel,
+  onConfirm,
+  onClose,
+}: {
+  state: ArchiveReprocessDialogState
+  onCancel: () => void
+  onConfirm: () => void
+  onClose: () => void
+}) {
+  const isSuccess = state.phase === 'success'
+  const isStarting = state.phase === 'starting'
+  const isSourceReprocess = state.target === 'sources'
+
+  return (
+    <div className="registry-dialog-backdrop" role="presentation">
+      <section className="registry-dialog" role="dialog" aria-modal="true">
+        <header>
+          <h2>
+            {isSuccess
+              ? 'Riprocessamento avviato'
+              : isSourceReprocess
+                ? 'Riprocessa file origine'
+                : 'Riprocessa fatture'}
+          </h2>
+          {state.phase === 'confirm' ? (
+            <button onClick={onCancel} aria-label="Chiudi">
+              x
+            </button>
+          ) : null}
+        </header>
+        <div className="batch-review-action-body">
+          {isSuccess ? (
+            <>
+              <p>
+                {isSourceReprocess
+                  ? 'I file origine selezionati sono stati aggiunti alle lavorazioni OCR.'
+                  : 'Le fatture selezionate sono state aggiunte alle lavorazioni OCR.'}
+              </p>
+              <p>Puoi seguirne lo stato nella pagina Processi dalla schermata principale.</p>
+            </>
+          ) : (
+            <p>
+              {isStarting
+                ? 'Avvio del riprocessamento in corso...'
+                : isSourceReprocess
+                  ? `Vuoi riprocessare ${state.recordIds.length} file origine selezionati?`
+                  : `Vuoi riprocessare ${state.recordIds.length} fatture selezionate?`}
+            </p>
+          )}
+        </div>
+        <div className="registry-cleaning-actions">
+          {isSuccess ? (
+            <button className="registry-save-button" onClick={onClose}>
+              OK
+            </button>
+          ) : (
+            <>
+              <button onClick={onCancel} disabled={isStarting}>Annulla</button>
+              <button className="registry-save-button" onClick={onConfirm} disabled={isStarting}>
+                {isStarting ? 'Avvio...' : 'Procedi'}
+              </button>
+            </>
+          )}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function SegmentationConfirmDialog({
+  action,
   onCancel,
   onConfirm,
 }: {
-  sources: PendingImportSource[]
-  isImporting: boolean
-  onAddFiles: () => void
-  onAddFolder: () => void
-  onRemoveSource: (sourceId: string) => void
+  action: PendingSegmentationAction
   onCancel: () => void
   onConfirm: () => void
 }) {
-  const totalPdfCount = sources.reduce(
-    (total, source) => total + source.document_count,
-    0,
+  return (
+    <div className="registry-dialog-backdrop" role="presentation">
+      <section className="registry-dialog segmentation-confirm-dialog" role="dialog" aria-modal="true">
+        <header>
+          <h2>{action.title}</h2>
+          <button onClick={onCancel} aria-label="Chiudi">
+            x
+          </button>
+        </header>
+        <div className="batch-review-action-body">
+          <p>{action.message}</p>
+          <p className="segmentation-confirm-note">
+            I campi non ancora salvati verranno ricalcolati dai dati OCR delle pagine risultanti.
+          </p>
+        </div>
+        <div className="registry-cleaning-actions">
+          <button onClick={onCancel}>Annulla</button>
+          <button className="registry-save-button" onClick={onConfirm}>
+            Conferma
+          </button>
+        </div>
+      </section>
+    </div>
   )
+}
 
+function SegmentationProgressDialog({
+  state,
+}: {
+  state: SegmentationProgressState
+}) {
+  const message =
+    state.phase === 'saving'
+      ? 'Sto mettendo al sicuro le modifiche gia compilate.'
+      : state.phase === 'reloading'
+      ? 'Sto preparando la revisione aggiornata.'
+      : state.operation === 'split'
+        ? 'Sto dividendo la fattura e aggiornando l\'ordine delle pagine.'
+        : 'Sto spostando le pagine e aggiornando l\'ordine delle fatture.'
+
+  return (
+    <div className="registry-dialog-backdrop segmentation-progress-backdrop">
+      <section
+        className="registry-dialog segmentation-progress-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-busy="true"
+        aria-live="polite"
+      >
+        <div className="segmentation-progress-content">
+          <h2>Modifica delle pagine in corso</h2>
+          <p>{message}</p>
+          <div className="segmentation-progress-bar" aria-hidden="true">
+            <span />
+          </div>
+          <small>Attendi il completamento prima di continuare.</small>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function ProcessingFilesDialog({
+  job,
+  onClose,
+}: {
+  job: ProcessingJobPayload
+  onClose: () => void
+}) {
+  return (
+    <div className="registry-dialog-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="registry-dialog processing-files-dialog"
+        role="dialog"
+        aria-modal="true"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header>
+          <h2>File del processo</h2>
+          <button onClick={onClose} aria-label="Chiudi">x</button>
+        </header>
+        <div className="processing-files-list">
+          {(job.files ?? []).length > 0 ? (
+            <ol>
+              {(job.files ?? []).map((file) => (
+                <li key={`${file.document_id}-${file.name}`}>
+                  {fileNameFromPath(file.name) || file.name}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p>Elenco dei file non disponibile per questo processo precedente.</p>
+          )}
+        </div>
+        <div className="registry-cleaning-actions">
+          <button onClick={onClose}>Chiudi</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function DocumentImportDialog({
+  isImporting,
+  onSelectFiles,
+  onSelectFolder,
+  onCancel,
+}: {
+  isImporting: boolean
+  onSelectFiles: () => void
+  onSelectFolder: () => void
+  onCancel: () => void
+}) {
   return (
     <div className="registry-dialog-backdrop" role="presentation">
       <section className="registry-dialog document-import-dialog" role="dialog" aria-modal="true">
@@ -2262,52 +3157,21 @@ function DocumentImportDialog({
           </button>
         </header>
         <div className="document-import-body">
+          <p className="document-import-empty">
+            Scegli più PDF oppure una cartella. La lavorazione OCR partirà subito.
+          </p>
           <div className="document-import-actions">
-            <button onClick={onAddFiles} disabled={isImporting}>
-              Aggiungi PDF
+            <button onClick={onSelectFiles} disabled={isImporting}>
+              File
             </button>
-            <button onClick={onAddFolder} disabled={isImporting}>
-              Aggiungi cartella
+            <button onClick={onSelectFolder} disabled={isImporting}>
+              Cartella
             </button>
           </div>
-          {sources.length > 0 ? (
-            <div className="document-import-source-list">
-              {sources.map((source) => (
-                <div className="document-import-source-item" key={source.source_id}>
-                  <span>{source.kind === 'folder' ? 'Cartella' : 'PDF'}</span>
-                  <strong title={source.label}>{source.label}</strong>
-                  <span>{source.document_count} PDF</span>
-                  <button
-                    onClick={() => onRemoveSource(source.source_id)}
-                    disabled={isImporting}
-                    aria-label="Rimuovi sorgente"
-                  >
-                    x
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="document-import-empty">
-              Aggiungi PDF o cartelle prima di importare.
-            </p>
-          )}
-          {sources.length > 0 ? (
-            <p className="document-import-total">
-              Totale: {totalPdfCount} PDF da importare
-            </p>
-          ) : null}
         </div>
         <div className="registry-cleaning-actions">
           <button onClick={onCancel} disabled={isImporting}>
-            Annulla
-          </button>
-          <button
-            className="registry-save-button"
-            onClick={onConfirm}
-            disabled={isImporting || sources.length === 0}
-          >
-            {isImporting ? 'Importazione...' : `Importa ${totalPdfCount} PDF`}
+            Chiudi
           </button>
         </div>
       </section>
@@ -2344,6 +3208,71 @@ function getFieldSuggestions(
         left.value.localeCompare(right.value),
     )
     .slice(0, 6)
+}
+
+function getOrderedFieldSuggestions(
+  suggestionIndex: SuggestionIndex,
+  records: RegistryPreviewRecord[],
+  invoice: ViewerInvoice | undefined,
+  field: InvoiceField,
+) {
+  const genericSuggestions = getFieldSuggestions(
+    suggestionIndex,
+    field.kind,
+    field.value,
+  )
+  const sourceFieldKind = registryConflictSourceFieldKind(field.kind)
+  const selectedRecordKey =
+    field.registry_id &&
+    field.registry_source_row !== null &&
+    field.registry_source_row !== undefined
+      ? `${field.registry_id}-${field.registry_source_row}`
+      : null
+  if (!invoice || !sourceFieldKind || !selectedRecordKey) {
+    return genericSuggestions
+  }
+
+  const fiscalCode =
+    invoice.fields.find((candidate) => candidate.kind === sourceFieldKind)?.value ?? ''
+  const matchingRecords = registryRecordsForFiscalCode(
+    records,
+    sourceFieldKind,
+    fiscalCode,
+  )
+  if (
+    matchingRecords.length < 2 ||
+    !registryRecordsHaveDifferentFill(matchingRecords) ||
+    !matchingRecords.some((record) => registryRecordKey(record) === selectedRecordKey)
+  ) {
+    return genericSuggestions
+  }
+
+  const contextualSuggestions = [...matchingRecords]
+    .sort((left, right) => {
+      const leftSelected = registryRecordKey(left) === selectedRecordKey ? 1 : 0
+      const rightSelected = registryRecordKey(right) === selectedRecordKey ? 1 : 0
+      return rightSelected - leftSelected
+    })
+    .map((record, index): FieldSuggestion => ({
+      value: registryFieldValueForInvoiceKind(record, field.kind),
+      count: 1,
+      score: 200 - index,
+      relatedFields: {},
+      registryRecord: record,
+    }))
+  const contextualValues = new Set(
+    contextualSuggestions.map((suggestion) =>
+      normalizeSuggestionValue(field.kind, suggestion.value),
+    ),
+  )
+
+  return [
+    ...contextualSuggestions,
+    ...genericSuggestions.filter(
+      (suggestion) =>
+        !contextualValues.has(normalizeSuggestionValue(field.kind, suggestion.value)),
+    ),
+  ].slice(0, 6)
 }
 
 function scoreSuggestion(normalizedInput: string, normalizedCandidate: string) {
@@ -2399,22 +3328,10 @@ function fileNameFromPath(filePath: string | null | undefined) {
   return filePath.split(/[\\/]/).pop() || filePath
 }
 
-function formatOcrDisplay(invoice: ViewerInvoice | undefined) {
-  const parts = [invoice?.ocrLang, invoice?.ocrProfile].filter(Boolean)
-
-  if (parts.length === 0) {
-    return 'non disponibile'
-  }
-
-  const variant =
-    invoice?.variantLabel && invoice.variantLabel !== 'standard'
-      ? ` / ${invoice.variantLabel}`
-      : ''
-
-  return `${parts.join('/')}${variant}`
-}
-
 function getInvoiceNumberForSort(invoice: ViewerInvoice) {
+  if (typeof invoice.displayNumber === 'number' && invoice.displayNumber > 0) {
+    return invoice.displayNumber
+  }
   const match = /(\d+)/.exec(invoice.title)
 
   return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER
@@ -2477,15 +3394,27 @@ function sortInvoicesForReview(invoices: ViewerInvoice[]) {
   })
 }
 
-function sortedUniqueNumbers(values: number[]) {
-  return [...new Set(values)].sort((left, right) => left - right)
+function archiveFieldValue(record: InvoiceArchiveRecord, fieldKind: string) {
+  const candidateKinds = invoiceFieldAliases[fieldKind] ?? [fieldKind]
+  for (const candidateKind of candidateKinds) {
+    const value = record.invoice?.fields
+      ?.find((field) => field.kind === candidateKind)
+      ?.value?.trim()
+    if (value) {
+      return value
+    }
+  }
+
+  return ''
 }
 
-function archiveFieldValue(record: InvoiceArchiveRecord, fieldKind: string) {
-  return (
-    record.invoice?.fields?.find((field) => field.kind === fieldKind)?.value?.trim() ??
-    ''
+function openArchivedPdfWindow(pdfUrl: string, windowName: string) {
+  const previewWindow = window.open(
+    runtimeApiUrl(pdfUrl),
+    windowName,
+    'width=980,height=860,left=120,top=80,resizable=yes,scrollbars=yes',
   )
+  previewWindow?.focus()
 }
 
 function invoiceRegistryRecordHasEmptyFields(record: InvoiceArchiveRecord) {
@@ -2540,6 +3469,7 @@ function archiveRecordSearchText(record: InvoiceArchiveRecord) {
   return [
     record.invoice?.title,
     record.source_file_name,
+    fileNameFromPath(record.archived_pdf_path),
     archiveFieldValue(record, 'nome_emittente'),
     archiveFieldValue(record, 'codice_fiscale_emittente'),
     archiveFieldValue(record, 'p_iva'),
@@ -2554,6 +3484,17 @@ function archiveRecordSearchText(record: InvoiceArchiveRecord) {
     .toLowerCase()
 }
 
+function invoicePdfArchiveSearchText(record: InvoiceArchiveRecord) {
+  return [
+    archiveFieldValue(record, 'nome_emittente'),
+    archiveFieldValue(record, 'condominio'),
+    archiveFieldValue(record, 'numero_fattura'),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+}
+
 function filterInvoiceArchiveRecords(
   records: InvoiceArchiveRecord[],
   searchValue: string,
@@ -2561,8 +3502,7 @@ function filterInvoiceArchiveRecords(
   sortKey: InvoiceArchiveSortKey,
 ) {
   const normalizedSearch = searchValue.trim().toLowerCase()
-  const savedRecords = records.filter((record) => record.status === 'saved')
-  const filteredRecords = savedRecords.filter((record) =>
+  const filteredRecords = records.filter((record) =>
     archiveRecordMatchesFilters(record, normalizedSearch, filters),
   )
 
@@ -2579,19 +3519,6 @@ function archiveRecordMatchesFilters(
   if (
     normalizedSearch &&
     !archiveRecordSearchText(record).includes(normalizedSearch)
-  ) {
-    return false
-  }
-
-  const issuer = archiveFieldValue(record, 'nome_emittente').toLowerCase()
-  if (filters.issuer.trim() && !issuer.includes(filters.issuer.trim().toLowerCase())) {
-    return false
-  }
-
-  const condominium = archiveFieldValue(record, 'condominio').toLowerCase()
-  if (
-    filters.condominium.trim() &&
-    !condominium.includes(filters.condominium.trim().toLowerCase())
   ) {
     return false
   }
@@ -2650,7 +3577,7 @@ function compareInvoiceArchiveRecords(
 }
 
 function archiveSavedAt(record: InvoiceArchiveRecord) {
-  return record.saved_at ?? record.updated_at ?? ''
+  return record.saved_at ?? record.discarded_at ?? record.updated_at ?? ''
 }
 
 function archiveComparableDate(value: string) {
@@ -2671,44 +3598,18 @@ function archiveAmount(value: string) {
   return Number.isFinite(amount) ? amount : 0
 }
 
-function uniqueArchivedSourceRecords(records: InvoiceArchiveRecord[]) {
-  const recordsBySource = new Map<string, ArchivedSourceRecord>()
-
-  for (const record of records) {
-    const key =
-      record.archived_source_pdf_url ||
-      record.archived_source_pdf_path ||
-      `${record.source_batch_id ?? ''}:${record.document_id ?? ''}`
-    if (!key.trim()) {
-      continue
-    }
-
-    const existingRecord = recordsBySource.get(key)
-    if (existingRecord) {
-      existingRecord.linked_invoice_count += 1
-      continue
-    }
-
-    recordsBySource.set(key, {
-      ...record,
-      linked_invoice_count: 1,
-    })
-  }
-
-  return Array.from(recordsBySource.values()).sort((leftRecord, rightRecord) =>
-    archiveSavedAt(rightRecord).localeCompare(archiveSavedAt(leftRecord)),
-  )
-}
-
 function sourceArchiveProcessingStatusLabel(job: ProcessingJobPayload) {
   if (job.status === 'queued') {
     return 'in coda'
   }
   if (job.status === 'processing') {
-    return job.pause_requested ? 'pausa richiesta' : 'in corso'
+    return 'in corso'
   }
-  if (job.status === 'paused') {
-    return 'in pausa'
+  if (job.status === 'finalizing') {
+    return job.archive_sources === false ? 'completamento' : 'archiviazione'
+  }
+  if (job.status === 'cancelling') {
+    return 'annullamento in corso'
   }
   if (job.status === 'completed') {
     return 'completato'
@@ -2720,6 +3621,20 @@ function sourceArchiveProcessingStatusLabel(job: ProcessingJobPayload) {
     return 'rimossa dalla coda'
   }
   return 'errore'
+}
+
+function processingSourceKindLabel(job: ProcessingJobPayload) {
+  switch (job.source_kind) {
+    case 'source_archive':
+      return 'Libreria - File origine'
+    case 'saved_invoice':
+      return 'Libreria - Fatture salvate'
+    case 'discarded_invoice':
+      return 'Libreria - Fatture scartate'
+    case 'external_upload':
+    default:
+      return 'File caricati'
+  }
 }
 
 function runtimeApiUrl(relativeUrl: string) {
@@ -2743,7 +3658,7 @@ function getFieldsFromManifest(manifest: ViewerManifest): InvoiceField[] {
     page.targets.map((target) => ({ ...target, page: target.page ?? page.page })),
   )
 
-  return expectedInvoiceFields.map((expectedField) => {
+  return normalizeLegacyWithholdingFields(expectedInvoiceFields.map((expectedField) => {
     const bestTarget = targets
       .filter((target) => target.kind === expectedField.kind)
       .sort((leftTarget, rightTarget) => rightTarget.score - leftTarget.score)[0]
@@ -2761,7 +3676,7 @@ function getFieldsFromManifest(manifest: ViewerManifest): InvoiceField[] {
       bbox: bestTarget?.bbox ?? null,
       role: bestTarget?.role ?? null,
     }
-  })
+  }))
 }
 
 function getFieldEvidence(
@@ -2846,6 +3761,7 @@ function getInvoicesFromManifest(
     invoiceId: `${documentEntry.id}:${invoice.invoice_id}`,
     manifestInvoiceId: invoice.invoice_id,
     title: invoice.title,
+    displayNumber: invoice.display_number,
     documentId: documentEntry.id,
     variantLabel: getVariantLabel(documentEntry.id),
     sourceFile: manifest.source_file,
@@ -2863,8 +3779,38 @@ function getInvoicesFromManifest(
     pages: manifest.pages.filter((page) =>
       invoice.page_numbers.includes(page.page),
     ),
-    fields: sortInvoiceFieldsForDisplay(invoice.fields.map(getDisplayInvoiceField)),
+    fields: sortInvoiceFieldsForDisplay(
+      normalizeLegacyWithholdingFields(invoice.fields).map(getDisplayInvoiceField),
+    ),
   }))
+}
+
+function reviewDraftIdForInvoice(invoice: ViewerInvoice) {
+  const basePathMatch = invoice.basePath?.match(
+    /^\/runtime\/manifests\/([^/]+)\/documents\/([^/]+)$/,
+  )
+  if (
+    !basePathMatch ||
+    !invoice.documentId ||
+    basePathMatch[2] !== invoice.documentId ||
+    !invoice.manifestInvoiceId
+  ) {
+    return null
+  }
+  return `${basePathMatch[1]}:${invoice.documentId}:${invoice.manifestInvoiceId}`
+}
+
+function reviewDraftIdForRelatedInvoice(
+  invoice: ViewerInvoice,
+  manifestInvoiceId: string,
+) {
+  const basePathMatch = invoice.basePath?.match(
+    /^\/runtime\/manifests\/([^/]+)\/documents\/([^/]+)$/,
+  )
+  if (!basePathMatch || !invoice.documentId || basePathMatch[2] !== invoice.documentId) {
+    return null
+  }
+  return `${basePathMatch[1]}:${invoice.documentId}:${manifestInvoiceId}`
 }
 
 function App() {
@@ -2879,34 +3825,61 @@ function App() {
   const [showCropBoxes, setShowCropBoxes] = useState(false)
   const [showTableBoxes, setShowTableBoxes] = useState(false)
   const [showBoxLabels, setShowBoxLabels] = useState(false)
+  const [isDeveloperMenuOpen, setIsDeveloperMenuOpen] = useState(false)
+  const [feedbackExportState, setFeedbackExportState] =
+    useState<FeedbackExportState>(null)
   const documentViewportRef = useRef<HTMLDivElement | null>(null)
+  const invoiceFieldsPanelRef = useRef<HTMLElement | null>(null)
+  const developerMenuRef = useRef<HTMLDivElement | null>(null)
   const registryTableViewportRef = useRef<HTMLDivElement | null>(null)
   const registryFileInputRef = useRef<HTMLInputElement | null>(null)
   const [registryImportState, setRegistryImportState] =
     useState<RegistryImportState>(null)
   const [pdfImportState, setPdfImportState] = useState<PdfImportState>(null)
   const [isDocumentImportDialogOpen, setIsDocumentImportDialogOpen] = useState(false)
-  const [pendingImportSources, setPendingImportSources] = useState<
-    PendingImportSource[]
-  >([])
+  const [isDocumentPickerOpen, setIsDocumentPickerOpen] = useState(false)
   const [isDocumentImportRunning, setIsDocumentImportRunning] = useState(false)
   const [invoiceReviewActionState, setInvoiceReviewActionState] =
     useState<InvoiceReviewActionState>(null)
-  const [processingJobsByBatchId, setProcessingJobsByBatchId] = useState<
+  const [pendingSegmentationAction, setPendingSegmentationAction] =
+    useState<PendingSegmentationAction | null>(null)
+  const [segmentationProgressState, setSegmentationProgressState] =
+    useState<SegmentationProgressState | null>(null)
+  const reviewDraftsRef = useRef<Map<string, ReviewInvoiceDraft>>(new Map())
+  const pendingReviewDraftSavesRef = useRef<Map<string, PendingReviewDraftSave>>(
+    new Map(),
+  )
+  const reviewDraftSaveTimersRef = useRef<Map<string, number>>(new Map())
+  const dirtyReviewInvoiceIdsRef = useRef<Set<string>>(new Set())
+  const [reviewDraftChangeVersion, setReviewDraftChangeVersion] = useState(0)
+  const [splitAfterPosition, setSplitAfterPosition] = useState(1)
+  const [processingJobsById, setProcessingJobsById] = useState<
     Record<string, ProcessingJobPayload>
   >({})
+  const [processingViewMode, setProcessingViewMode] =
+    useState<ProcessingViewMode>('active')
+  const [selectedProcessingHistoryIds, setSelectedProcessingHistoryIds] =
+    useState<Set<string>>(() => new Set())
+  const [processingJobInfo, setProcessingJobInfo] =
+    useState<ProcessingJobPayload | null>(null)
+  const [isProcessingHistoryDeleteConfirmOpen, setIsProcessingHistoryDeleteConfirmOpen] =
+    useState(false)
   const processingJobsPollIntervalRef = useRef<number | null>(null)
   const [processingJobIdToCancel, setProcessingJobIdToCancel] = useState<string | null>(null)
   const [isProcessingCancelConfirmOpen, setIsProcessingCancelConfirmOpen] =
     useState(false)
   const [processingJobIdToRemove, setProcessingJobIdToRemove] = useState<string | null>(null)
-  const [batchIdToDelete, setBatchIdToDelete] = useState<string | null>(null)
-  const [pendingImportSourceIdToRemove, setPendingImportSourceIdToRemove] =
-    useState<string | null>(null)
   const [registryDraftRecordIndexToDelete, setRegistryDraftRecordIndexToDelete] =
     useState<number | null>(null)
   const [isInvoiceDiscardConfirmOpen, setIsInvoiceDiscardConfirmOpen] = useState(false)
   const [isRegistryDeleteConfirmOpen, setIsRegistryDeleteConfirmOpen] = useState(false)
+  const [isReviewActionsMenuOpen, setIsReviewActionsMenuOpen] = useState(false)
+  const [reviewActionsMenuPosition, setReviewActionsMenuPosition] = useState<{
+    top: number
+    left: number
+  } | null>(null)
+  const [isClearReviewBatchesConfirmOpen, setIsClearReviewBatchesConfirmOpen] =
+    useState(false)
   const [registryStatus, setRegistryStatus] = useState<RegistryStatus | null>(null)
   const [registryStatusError, setRegistryStatusError] = useState<string | null>(null)
   const [registryPreviewRecords, setRegistryPreviewRecords] = useState<
@@ -2934,6 +3907,8 @@ function App() {
   const [pendingRegistryRecord, setPendingRegistryRecord] =
     useState<PendingRegistryRecord | null>(null)
   const [pendingInvoiceSaveValidation, setPendingInvoiceSaveValidation] =
+    useState<PendingInvoiceSaveValidation | null>(null)
+  const [pendingInvoiceRegistrySaveValidation, setPendingInvoiceRegistrySaveValidation] =
     useState<PendingInvoiceSaveValidation | null>(null)
   const [pendingBatchReviewAction, setPendingBatchReviewAction] =
     useState<PendingBatchReviewAction | null>(null)
@@ -2966,10 +3941,12 @@ function App() {
   const [manifestError, setManifestError] = useState<string | null>(null)
   const [batches, setBatches] = useState<ViewerBatchIndexEntry[]>([])
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null)
-  const [importedBatches, setImportedBatches] = useState<ImportedBatch[]>([])
   const [appView, setAppView] = useState<AppView>('review')
   const [invoiceArchiveRecords, setInvoiceArchiveRecords] = useState<
     InvoiceArchiveRecord[]
+  >([])
+  const [sourceArchiveRecords, setSourceArchiveRecords] = useState<
+    ArchivedSourceRecord[]
   >([])
   const [invoiceRegistryDraftRecords, setInvoiceRegistryDraftRecords] = useState<
     InvoiceArchiveRecord[]
@@ -2980,8 +3957,6 @@ function App() {
   const [invoiceArchiveSearch, setInvoiceArchiveSearch] = useState('')
   const [invoiceArchiveFilters, setInvoiceArchiveFilters] =
     useState<InvoiceArchiveFilters>({
-      issuer: '',
-      condominium: '',
       dateFrom: '',
       dateTo: '',
     })
@@ -2989,6 +3964,18 @@ function App() {
     useState<InvoiceArchiveSortKey>('saved_at_desc')
   const [pdfArchiveViewMode, setPdfArchiveViewMode] =
     useState<PdfArchiveViewMode>('invoices')
+  const [invoiceRegistryViewMode, setInvoiceRegistryViewMode] =
+    useState<InvoiceRegistryViewMode>('saved')
+  const [archiveDeleteTarget, setArchiveDeleteTarget] =
+    useState<ArchiveDeleteTarget | null>(null)
+  const [archiveReferenceAction, setArchiveReferenceAction] =
+    useState<ArchiveReferenceAction | null>(null)
+  const [archiveReprocessDialog, setArchiveReprocessDialog] =
+    useState<ArchiveReprocessDialogState | null>(null)
+  const [focusedArchiveKey, setFocusedArchiveKey] = useState<string | null>(null)
+  const [selectedArchiveKeys, setSelectedArchiveKeys] = useState<Set<string>>(
+    () => new Set(),
+  )
   const [activeSuggestionFieldKind, setActiveSuggestionFieldKind] = useState<string | null>(null)
   const [highlightedSuggestionIndex, setHighlightedSuggestionIndex] = useState(-1)
   const [registryFieldConflicts, setRegistryFieldConflicts] = useState<
@@ -3003,26 +3990,36 @@ function App() {
     () => buildRegistrySearchIndex(registryPreviewRecords),
     [registryPreviewRecords],
   )
-  const selectedBatch = batches.find((batch) => batch.id === selectedBatchId)
+  const selectedBatch = batches.find((batch) => batch.base_path === selectedBatchId)
   const processingJobs = useMemo(
     () =>
-      Object.values(processingJobsByBatchId).sort((left, right) =>
-        right.job_id.localeCompare(left.job_id),
-      ),
-    [processingJobsByBatchId],
+      Object.values(processingJobsById).sort(compareProcessingJobsNewestFirst),
+    [processingJobsById],
+  )
+  const activeProcessingJobs = processingJobs
+    .filter((job) =>
+      ['queued', 'processing', 'finalizing', 'cancelling'].includes(job.status),
+    )
+    .sort((left, right) => {
+      const leftActive = left.status === 'queued' ? 1 : 0
+      const rightActive = right.status === 'queued' ? 1 : 0
+      return leftActive - rightActive
+    })
+  const processingHistoryJobs = processingJobs.filter((job) =>
+    ['completed', 'cancelled', 'removed', 'error'].includes(job.status),
   )
   const hasActiveProcessingJob = processingJobs.some(
-    (job) => job.status === 'queued' || job.status === 'processing',
+    (job) =>
+      job.status === 'queued' ||
+      job.status === 'processing' ||
+      job.status === 'finalizing' ||
+      job.status === 'cancelling',
   )
   const shouldShowPdfImportState =
     pdfImportState !== null &&
     (pdfImportState.kind === 'error' || !hasActiveProcessingJob)
-  const batchToDelete = importedBatches.find((batch) => batch.batch_id === batchIdToDelete)
   const processingJobToRemove = processingJobs.find(
     (job) => job.job_id === processingJobIdToRemove,
-  )
-  const pendingImportSourceToRemove = pendingImportSources.find(
-    (source) => source.source_id === pendingImportSourceIdToRemove,
   )
   const registryDraftRecordToDelete =
     registryDraftRecordIndexToDelete === null
@@ -3036,13 +4033,21 @@ function App() {
     hasSelectedBatchWithInvoices &&
     Boolean(selectedBatch?.base_path?.startsWith('/runtime/manifests/'))
   const filteredInvoiceArchiveRecords = useMemo(
-    () =>
-      filterInvoiceArchiveRecords(
-        invoiceArchiveRecords,
-        invoiceArchiveSearch,
+    () => {
+      const normalizedSearch = invoiceArchiveSearch.trim().toLowerCase()
+      return filterInvoiceArchiveRecords(
+        invoiceArchiveRecords.filter(
+          (record) =>
+            record.invoice_archive_visible !== false &&
+            Boolean(record.archived_pdf_url || record.archived_pdf_path) &&
+            (!normalizedSearch ||
+              invoicePdfArchiveSearchText(record).includes(normalizedSearch)),
+        ),
+        '',
         invoiceArchiveFilters,
         invoiceArchiveSortKey,
-      ),
+      )
+    },
     [
       invoiceArchiveRecords,
       invoiceArchiveSearch,
@@ -3050,34 +4055,328 @@ function App() {
       invoiceArchiveSortKey,
     ],
   )
+  const filteredSourceArchiveRecords = useMemo(
+    () => {
+      const query = invoiceArchiveSearch.trim().toLocaleLowerCase('it')
+      return sourceArchiveRecords.filter((record) =>
+        !query || record.source_file_name.toLocaleLowerCase('it').includes(query),
+      )
+    },
+    [
+      sourceArchiveRecords,
+      invoiceArchiveSearch,
+    ],
+  )
+  useEffect(() => {
+    if (appView !== 'archive' || !focusedArchiveKey) {
+      return
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      const destinationRow = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-archive-key]'),
+      ).find((row) => row.dataset.archiveKey === focusedArchiveKey)
+      destinationRow?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [appView, pdfArchiveViewMode, focusedArchiveKey])
   const filteredInvoiceRegistryRecords = useMemo(
     () =>
-      filterInvoiceArchiveRecords(
-        isInvoiceRegistryEditMode ? invoiceRegistryDraftRecords : invoiceArchiveRecords,
-        invoiceArchiveSearch,
-        invoiceArchiveFilters,
-        invoiceArchiveSortKey,
-      ),
+      invoiceRegistryViewMode === 'exported'
+        ? []
+        : filterInvoiceArchiveRecords(
+            (isInvoiceRegistryEditMode ? invoiceRegistryDraftRecords : invoiceArchiveRecords).filter(
+              (record) =>
+                record.status === invoiceRegistryViewMode &&
+                record.registry_visible !== false,
+            ),
+            invoiceArchiveSearch,
+            invoiceArchiveFilters,
+            invoiceArchiveSortKey,
+          ),
     [
       invoiceArchiveRecords,
       invoiceRegistryDraftRecords,
       isInvoiceRegistryEditMode,
+      invoiceRegistryViewMode,
       invoiceArchiveSearch,
       invoiceArchiveFilters,
       invoiceArchiveSortKey,
     ],
   )
 
+  function applyReviewDraftsToInvoices(sourceInvoices: ViewerInvoice[]) {
+    return sourceInvoices.map((invoice) => {
+      const draftId = reviewDraftIdForInvoice(invoice)
+      const draft = draftId ? reviewDraftsRef.current.get(draftId) : null
+      if (!draft) {
+        return invoice
+      }
+      const draftFieldsByKind = new Map(
+        draft.fields.map((field) => [field.kind, field]),
+      )
+      return {
+        ...invoice,
+        fields: normalizeLegacyWithholdingFields(
+          invoice.fields.map((field) =>
+            mergeManifestFieldWithReviewDraft(
+              field,
+              draftFieldsByKind.get(field.kind),
+            ),
+          ),
+        ),
+      }
+    })
+  }
+
+  function mergeManifestFieldWithReviewDraft(
+    manifestField: InvoiceField,
+    draftField: InvoiceField | undefined,
+  ) {
+    if (!draftField) {
+      return manifestField
+    }
+
+    const isUnresolvedDraftPlaceholder =
+      !draftField.value.trim() &&
+      Number(draftField.score || 0) <= 0 &&
+      (draftField.ocr_confidence === null ||
+        draftField.ocr_confidence === undefined) &&
+      (draftField.page === null || draftField.page === undefined) &&
+      !draftField.bbox &&
+      !draftField.role &&
+      !draftField.registry_id &&
+      (draftField.registry_source_row === null ||
+        draftField.registry_source_row === undefined) &&
+      !draftField.registry_match_group &&
+      !draftField.registry_replaced_value
+
+    const isStaleBlankExtraction =
+      !draftField.value.trim() &&
+      Boolean(manifestField.value.trim()) &&
+      draftField.role === 'target' &&
+      manifestField.role === 'target' &&
+      Boolean(draftField.bbox) &&
+      Boolean(manifestField.bbox) &&
+      (
+        draftField.page !== manifestField.page ||
+        draftField.score !== manifestField.score ||
+        draftField.bbox?.x1 !== manifestField.bbox?.x1 ||
+        draftField.bbox?.y1 !== manifestField.bbox?.y1 ||
+        draftField.bbox?.x2 !== manifestField.bbox?.x2 ||
+        draftField.bbox?.y2 !== manifestField.bbox?.y2
+      )
+
+    if (
+      (isUnresolvedDraftPlaceholder || isStaleBlankExtraction) &&
+      manifestField.value.trim()
+    ) {
+      return manifestField
+    }
+
+    return { ...manifestField, ...draftField }
+  }
+
+  function loadReviewDrafts() {
+    return fetch(`${registryApiBaseUrl}/viewer/drafts`, { cache: 'no-store' })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error ?? `HTTP ${response.status}`)
+        }
+        if (!payload || !Array.isArray(payload.drafts)) {
+          throw new Error('Risposta bozze non valida')
+        }
+        return payload as ReviewDraftsPayload
+      })
+      .then((payload) => {
+        reviewDraftsRef.current = new Map(
+          (payload.drafts ?? []).map((draft) => [draft.draft_id, draft]),
+        )
+      })
+  }
+
+  function markSelectedInvoiceDraftDirty() {
+    if (!selectedInvoiceId) {
+      return
+    }
+    dirtyReviewInvoiceIdsRef.current.add(selectedInvoiceId)
+    setReviewDraftChangeVersion((version) => version + 1)
+  }
+
+  function persistPendingReviewDraftSave(draftId: string) {
+    const pendingSave = pendingReviewDraftSavesRef.current.get(draftId)
+    if (!pendingSave) {
+      return Promise.resolve()
+    }
+    const { invoice, reviewBatchBasePath, version } = pendingSave
+    return fetch(`${registryApiBaseUrl}/viewer/drafts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        review_batch_base_path: reviewBatchBasePath,
+        document_id: invoice.documentId,
+        invoice_id: invoice.manifestInvoiceId,
+        fields: invoice.fields,
+      }),
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error ?? `HTTP ${response.status}`)
+        }
+        return payload.draft as ReviewInvoiceDraft
+      })
+      .then((draft) => {
+        const currentPending = pendingReviewDraftSavesRef.current.get(draftId)
+        if (currentPending?.version === version) {
+          pendingReviewDraftSavesRef.current.delete(draftId)
+          reviewDraftsRef.current.set(draftId, draft)
+        }
+      })
+      .catch((error) => {
+        setInvoiceReviewActionState({
+          kind: 'error',
+          message: `Bozza non aggiornata. ${userErrorMessage(
+            error,
+            'Non riesco a conservare le ultime modifiche.',
+          )}`,
+        })
+        throw error
+      })
+  }
+
+  function flushReviewDraftSaves() {
+    for (const timerId of reviewDraftSaveTimersRef.current.values()) {
+      window.clearTimeout(timerId)
+    }
+    reviewDraftSaveTimersRef.current.clear()
+    return Promise.all(
+      Array.from(pendingReviewDraftSavesRef.current.keys()).map((draftId) =>
+        persistPendingReviewDraftSave(draftId),
+      ),
+    )
+  }
+
+  function removeReviewDraftsLocally(draftIds: string[]) {
+    for (const draftId of draftIds) {
+      const timerId = reviewDraftSaveTimersRef.current.get(draftId)
+      if (timerId !== undefined) {
+        window.clearTimeout(timerId)
+      }
+      reviewDraftSaveTimersRef.current.delete(draftId)
+      pendingReviewDraftSavesRef.current.delete(draftId)
+      reviewDraftsRef.current.delete(draftId)
+    }
+  }
+
+  function deleteReviewDrafts(draftIds: string[]) {
+    const uniqueDraftIds = Array.from(new Set(draftIds.filter(Boolean)))
+    if (uniqueDraftIds.length === 0) {
+      return Promise.resolve()
+    }
+    return fetch(`${registryApiBaseUrl}/viewer/drafts`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draft_ids: uniqueDraftIds }),
+    }).then(async (response) => {
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `HTTP ${response.status}`)
+      }
+      removeReviewDraftsLocally(uniqueDraftIds)
+    })
+  }
+
+  const loadProcessedReviewBatchesRef = useRef(loadProcessedReviewBatches)
+  const loadSampleViewerBatchesRef = useRef(loadSampleViewerBatches)
+  const pollProcessingJobsRef = useRef(pollProcessingJobs)
+  loadProcessedReviewBatchesRef.current = loadProcessedReviewBatches
+  loadSampleViewerBatchesRef.current = loadSampleViewerBatches
+  pollProcessingJobsRef.current = pollProcessingJobs
+
   useEffect(() => {
-    loadProcessedReviewBatches()
+    loadReviewDrafts()
+      .catch((error) => {
+        setInvoiceReviewActionState({
+          kind: 'error',
+          message: `Bozze non disponibili. ${userErrorMessage(
+            error,
+            'Non riesco a recuperare le compilazioni non ancora salvate.',
+          )}`,
+        })
+      })
+      .then(() => loadProcessedReviewBatchesRef.current())
       .then((hasReviewBatches) => {
         if (!hasReviewBatches) {
-          loadSampleViewerBatches()
+          loadSampleViewerBatchesRef.current()
         }
       })
       .catch(() => {
-        loadSampleViewerBatches()
+        loadSampleViewerBatchesRef.current()
       })
+  }, [])
+
+  useEffect(() => {
+    const dirtyInvoiceIds = Array.from(dirtyReviewInvoiceIdsRef.current)
+    dirtyReviewInvoiceIdsRef.current.clear()
+    if (!selectedBatch?.base_path) {
+      return
+    }
+
+    for (const invoiceId of dirtyInvoiceIds) {
+      const invoice = invoices.find((candidate) => candidate.invoiceId === invoiceId)
+      if (!invoice) {
+        continue
+      }
+      const draftId = reviewDraftIdForInvoice(invoice)
+      if (!draftId) {
+        continue
+      }
+      const previousVersion =
+        pendingReviewDraftSavesRef.current.get(draftId)?.version ?? 0
+      pendingReviewDraftSavesRef.current.set(draftId, {
+        invoice,
+        reviewBatchBasePath: selectedBatch.base_path,
+        version: previousVersion + 1,
+      })
+      const existingTimer = reviewDraftSaveTimersRef.current.get(draftId)
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer)
+      }
+      const timerId = window.setTimeout(() => {
+        reviewDraftSaveTimersRef.current.delete(draftId)
+        void persistPendingReviewDraftSave(draftId).catch(() => undefined)
+      }, 350)
+      reviewDraftSaveTimersRef.current.set(draftId, timerId)
+    }
+  }, [invoices, reviewDraftChangeVersion, selectedBatch?.base_path])
+
+  useEffect(() => {
+    function persistDraftsBeforeClose() {
+      for (const pendingSave of pendingReviewDraftSavesRef.current.values()) {
+        navigator.sendBeacon(
+          `${registryApiBaseUrl}/viewer/drafts`,
+          new Blob(
+            [
+              JSON.stringify({
+                review_batch_base_path: pendingSave.reviewBatchBasePath,
+                document_id: pendingSave.invoice.documentId,
+                invoice_id: pendingSave.invoice.manifestInvoiceId,
+                fields: pendingSave.invoice.fields,
+              }),
+            ],
+            { type: 'application/json' },
+          ),
+        )
+      }
+    }
+
+    window.addEventListener('beforeunload', persistDraftsBeforeClose)
+    return () => {
+      window.removeEventListener('beforeunload', persistDraftsBeforeClose)
+    }
   }, [])
 
   function loadSampleViewerBatches() {
@@ -3092,7 +4391,7 @@ function App() {
       .then((index: ViewerBatchIndex) => {
         const batchEntries = index.batches ?? []
         setBatches(batchEntries)
-        setSelectedBatchId(batchEntries[0]?.id ?? null)
+        setSelectedBatchId(batchEntries[0]?.base_path ?? null)
         if (batchEntries[0]) {
           loadBatch(batchEntries[0])
           return
@@ -3105,11 +4404,7 @@ function App() {
   }
 
   useEffect(() => {
-    loadImportedBatches()
-  }, [])
-
-  useEffect(() => {
-    pollProcessingJobs()
+    pollProcessingJobsRef.current()
     return () => {
       stopProcessingJobsPolling()
     }
@@ -3124,6 +4419,54 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!isDeveloperMenuOpen) {
+      return
+    }
+
+    function closeDeveloperMenu(event: PointerEvent) {
+      if (
+        event.target instanceof Node &&
+        !developerMenuRef.current?.contains(event.target)
+      ) {
+        setIsDeveloperMenuOpen(false)
+      }
+    }
+
+    function closeDeveloperMenuWithKeyboard(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setIsDeveloperMenuOpen(false)
+      }
+    }
+
+    document.addEventListener('pointerdown', closeDeveloperMenu)
+    document.addEventListener('keydown', closeDeveloperMenuWithKeyboard)
+    return () => {
+      document.removeEventListener('pointerdown', closeDeveloperMenu)
+      document.removeEventListener('keydown', closeDeveloperMenuWithKeyboard)
+    }
+  }, [isDeveloperMenuOpen])
+
+  useEffect(() => {
+    if (!segmentationProgressState) {
+      return
+    }
+
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur()
+    }
+
+    function blockKeyboardInteraction(event: KeyboardEvent) {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+    }
+
+    window.addEventListener('keydown', blockKeyboardInteraction, true)
+    return () => {
+      window.removeEventListener('keydown', blockKeyboardInteraction, true)
+    }
+  }, [segmentationProgressState])
+
+  useEffect(() => {
     loadRegistryStatus()
     loadRegistryRecords()
   }, [])
@@ -3133,18 +4476,24 @@ function App() {
       return
     }
 
-    setInvoices((currentInvoices) => {
-      if (currentInvoices.length === 0) {
-        return currentInvoices
-      }
+    const applyRegistryMatchesTimeout = window.setTimeout(() => {
+      setInvoices((currentInvoices) => {
+        if (currentInvoices.length === 0) {
+          return currentInvoices
+        }
 
-      const registryMatchedInvoices = applyRegistryMatchesToInvoices(
-        currentInvoices,
-        registryPreviewRecords,
-      )
-      setRegistryFieldConflicts(registryMatchedInvoices.conflicts)
-      return registryMatchedInvoices.invoices
-    })
+        const registryMatchedInvoices = applyRegistryMatchesToInvoices(
+          currentInvoices,
+          registryPreviewRecords,
+        )
+        setRegistryFieldConflicts(registryMatchedInvoices.conflicts)
+        return registryMatchedInvoices.invoices
+      })
+    }, 0)
+
+    return () => {
+      window.clearTimeout(applyRegistryMatchesTimeout)
+    }
   }, [registryPreviewRecords])
 
   useEffect(() => {
@@ -3152,30 +4501,36 @@ function App() {
       return
     }
 
-    const manifestInvoices = sortInvoicesForReview(
-      loadedManifests.flatMap(({ manifest, documentEntry }) =>
-        getInvoicesFromManifest(manifest, documentEntry),
-      ),
-    )
-    if (registryPreviewRecords.length === 0) {
-      setInvoices(manifestInvoices)
-      setRegistryFieldConflicts({})
-      setSelectedInvoiceId((currentInvoiceId) =>
-        currentInvoiceId ?? manifestInvoices[0]?.invoiceId ?? null,
+    const applyLoadedManifestsTimeout = window.setTimeout(() => {
+      const manifestInvoices = sortInvoicesForReview(
+        loadedManifests.flatMap(({ manifest, documentEntry }) =>
+          getInvoicesFromManifest(manifest, documentEntry),
+        ),
       )
-      return
-    }
+      if (registryPreviewRecords.length === 0) {
+        setInvoices(applyReviewDraftsToInvoices(manifestInvoices))
+        setRegistryFieldConflicts({})
+        setSelectedInvoiceId((currentInvoiceId) =>
+          currentInvoiceId ?? manifestInvoices[0]?.invoiceId ?? null,
+        )
+        return
+      }
 
-    const registryMatchedInvoices = applyRegistryMatchesToInvoices(
-      manifestInvoices,
-      registryPreviewRecords,
-    )
-    setInvoices(registryMatchedInvoices.invoices)
-    setRegistryFieldConflicts(registryMatchedInvoices.conflicts)
-    setSelectedInvoiceId((currentInvoiceId) =>
-      currentInvoiceId ?? registryMatchedInvoices.invoices[0]?.invoiceId ?? null,
-    )
-  }, [loadedManifests])
+      const registryMatchedInvoices = applyRegistryMatchesToInvoices(
+        manifestInvoices,
+        registryPreviewRecords,
+      )
+      setInvoices(applyReviewDraftsToInvoices(registryMatchedInvoices.invoices))
+      setRegistryFieldConflicts(registryMatchedInvoices.conflicts)
+      setSelectedInvoiceId((currentInvoiceId) =>
+        currentInvoiceId ?? registryMatchedInvoices.invoices[0]?.invoiceId ?? null,
+      )
+    }, 0)
+
+    return () => {
+      window.clearTimeout(applyLoadedManifestsTimeout)
+    }
+  }, [loadedManifests, registryPreviewRecords])
 
   function loadLegacyDocumentIndex() {
     fetch(`${sampleIndexPath}?v=${manifestCacheKey}`, { cache: 'no-store' })
@@ -3201,8 +4556,11 @@ function App() {
       })
   }
 
-  function loadBatch(batch: ViewerBatchIndexEntry) {
-    fetch(`${batch.base_path}/viewer_index.json?v=${manifestCacheKey}`, {
+  function loadBatch(
+    batch: ViewerBatchIndexEntry,
+    preferredManifestInvoiceId?: string,
+  ) {
+    return fetch(`${batch.base_path}/viewer_index.json?v=${manifestCacheKey}`, {
       cache: 'no-store',
     })
       .then((response) => {
@@ -3213,7 +4571,7 @@ function App() {
         return response.json()
       })
       .then((index: ViewerDocumentIndex) => {
-        loadDocumentEntries(index.documents)
+        return loadDocumentEntries(index.documents, preferredManifestInvoiceId)
       })
       .catch((error) => {
         setInvoices([])
@@ -3223,10 +4581,14 @@ function App() {
         setManifestError(
           userErrorMessage(error, "Non riesco ad aprire questo gruppo di fatture."),
         )
+        return false
       })
   }
 
-  function loadProcessedReviewBatches() {
+  function loadProcessedReviewBatches(
+    preferredBatchBasePath?: string,
+    preferredManifestInvoiceId?: string,
+  ) {
     return fetch(`${registryApiBaseUrl}/viewer/review-batches`, { cache: 'no-store' })
       .then(async (response) => {
         const payload = await response.json().catch(() => null)
@@ -3243,20 +4605,98 @@ function App() {
           return false
         }
 
+        const selectedBatch =
+          batchEntries.find(
+            (batch) => batch.base_path === preferredBatchBasePath,
+          ) ?? batchEntries[0]
         setBatches(batchEntries)
-        setSelectedBatchId(batchEntries[0].id)
-        loadBatch(batchEntries[0])
-        return true
+        setSelectedBatchId(selectedBatch.base_path)
+        return loadBatch(selectedBatch, preferredManifestInvoiceId).then(() => true)
+      })
+  }
+
+  function requestClearReviewBatches() {
+    setIsReviewActionsMenuOpen(false)
+    setIsClearReviewBatchesConfirmOpen(true)
+  }
+
+  function toggleReviewActionsMenu(event: MouseEvent<HTMLButtonElement>) {
+    if (isReviewActionsMenuOpen) {
+      setIsReviewActionsMenuOpen(false)
+      return
+    }
+
+    const buttonRect = event.currentTarget.getBoundingClientRect()
+    const menuWidth = 220
+    const gap = 8
+    const left =
+      buttonRect.right + gap + menuWidth <= window.innerWidth
+        ? buttonRect.right + gap
+        : Math.max(8, buttonRect.left - menuWidth - gap)
+    const top = Math.min(
+      Math.max(8, buttonRect.top),
+      Math.max(8, window.innerHeight - 76),
+    )
+
+    setReviewActionsMenuPosition({ top, left })
+    setIsReviewActionsMenuOpen(true)
+  }
+
+  function confirmClearReviewBatches() {
+    setIsClearReviewBatchesConfirmOpen(false)
+    setInvoiceReviewActionState({
+      kind: 'discarding',
+      message: 'Eliminazione revisioni...',
+    })
+
+    fetch(`${registryApiBaseUrl}/viewer/review-batches/clear`, {
+      method: 'POST',
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error ?? `HTTP ${response.status}`)
+        }
+        return payload
+      })
+      .then(() => {
+        setBatches([])
+        setSelectedBatchId(null)
+        setInvoices([])
+        setSelectedInvoiceId(null)
+        setLoadedManifests([])
+        setManifestSourceFile(null)
+        setSelectedFieldKind(null)
+        setActiveSuggestionFieldKind(null)
+        setManifestError('Nessuna revisione da mostrare')
+        setInvoiceReviewActionState({
+          kind: 'success',
+          message: 'Revisioni eliminate.',
+        })
+        window.setTimeout(() => {
+          setInvoiceReviewActionState((currentState) =>
+            currentState?.kind === 'success' ? null : currentState,
+          )
+        }, 1400)
+      })
+      .catch((error) => {
+        setInvoiceReviewActionState({
+          kind: 'error',
+          message: `Revisioni non eliminate. ${userErrorMessage(
+            error,
+            'Non riesco a eliminare le revisioni.',
+          )}`,
+        })
       })
   }
 
   function selectBatch(batchId: string) {
-    const batch = batches.find((candidate) => candidate.id === batchId)
+    const batch = batches.find((candidate) => candidate.base_path === batchId)
     if (!batch) {
       return
     }
 
-    setSelectedBatchId(batch.id)
+    setSelectedBatchId(batch.base_path)
     setSelectedFieldKind(null)
     setActiveSuggestionFieldKind(null)
     resetDocumentView()
@@ -3272,9 +4712,7 @@ function App() {
     if (isDocumentImportRunning) {
       return
     }
-    discardPendingImportSources(pendingImportSources)
     setIsDocumentImportDialogOpen(false)
-    setPendingImportSources([])
   }
 
   function discardPendingImportSources(sources: PendingImportSource[]) {
@@ -3293,25 +4731,8 @@ function App() {
     })
   }
 
-  function addPendingImportSource(source: PendingImportSource) {
-    if (
-      pendingImportSources.some(
-        (currentSource) => currentSource.duplicate_key === source.duplicate_key,
-      )
-    ) {
-      discardPendingImportSources([source])
-      setPdfImportState({
-        kind: 'error',
-        message: 'Questa sorgente e gia presente nella lista.',
-      })
-      return
-    }
-
-    setPdfImportState(null)
-    setPendingImportSources((currentSources) => [...currentSources, source])
-  }
-
   function addPdfImportSource() {
+    setIsDocumentPickerOpen(true)
     setPdfImportState({
       kind: 'loading',
       message: 'Seleziona i PDF nella finestra Windows...',
@@ -3333,7 +4754,7 @@ function App() {
           return
         }
         if (payload.source) {
-          addPendingImportSource(payload.source)
+          importAndStartSource(payload.source)
         }
       })
       .catch((error) => {
@@ -3345,9 +4766,13 @@ function App() {
           )}`,
         })
       })
+      .finally(() => {
+        setIsDocumentPickerOpen(false)
+      })
   }
 
   function addFolderImportSource() {
+    setIsDocumentPickerOpen(true)
     setPdfImportState({
       kind: 'loading',
       message: 'Seleziona una cartella PDF nella finestra Windows...',
@@ -3369,7 +4794,7 @@ function App() {
           return
         }
         if (payload.source) {
-          addPendingImportSource(payload.source)
+          importAndStartSource(payload.source)
         }
       })
       .catch((error) => {
@@ -3381,64 +4806,27 @@ function App() {
           )}`,
         })
       })
-  }
-
-  function removePendingImportSource(sourceId: string) {
-    const removedSource = pendingImportSources.find(
-      (source) => source.source_id === sourceId,
-    )
-    if (removedSource) {
-      discardPendingImportSources([removedSource])
-    }
-    setPendingImportSources((currentSources) =>
-      currentSources.filter((source) => source.source_id !== sourceId),
-    )
-    setPdfImportState(null)
-  }
-
-  function loadImportedBatches() {
-    return fetch(`${registryApiBaseUrl}/batches`, { cache: 'no-store' })
-      .then(async (response) => {
-        const payload = await response.json().catch(() => null)
-        if (!response.ok) {
-          throw new Error(payload?.error ?? `HTTP ${response.status}`)
-        }
-        return payload as ImportedBatchListPayload
-      })
-      .then((payload) => {
-        setImportedBatches(payload.batches ?? [])
-      })
-      .catch((error) => {
-        setPdfImportState({
-          kind: 'error',
-          message: `Gruppi PDF non disponibili. ${userErrorMessage(
-            error,
-            "Non riesco a leggere i PDF caricati nell'app.",
-          )}`,
-        })
+      .finally(() => {
+        setIsDocumentPickerOpen(false)
       })
   }
 
-  function confirmImportSources() {
-    if (pendingImportSources.length === 0 || isDocumentImportRunning) {
+  function importAndStartSource(source: PendingImportSource) {
+    if (isDocumentImportRunning) {
       return
     }
 
-    const totalPdfCount = pendingImportSources.reduce(
-      (total, source) => total + source.document_count,
-      0,
-    )
     setIsDocumentImportRunning(true)
     setPdfImportState({
       kind: 'loading',
-      message: `Importazione di ${totalPdfCount} PDF in corso...`,
+      message: `Caricamento di ${source.document_count} PDF e avvio OCR...`,
     })
 
-    fetch(`${registryApiBaseUrl}/batches/import-sources`, {
+    fetch(`${registryApiBaseUrl}/batches/import-and-process`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        source_ids: pendingImportSources.map((source) => source.source_id),
+        source_ids: [source.source_id],
       }),
     })
       .then(async (response) => {
@@ -3446,31 +4834,30 @@ function App() {
         if (!response.ok) {
           throw new Error(payload?.error ?? `HTTP ${response.status}`)
         }
-        return payload as ImportedBatchImportPayload
+        return payload as ImportedBatchImportPayload & { job: ProcessingJobPayload }
       })
       .then((payload) => {
-        setImportedBatches((currentBatches) => [
-          payload.batch,
-          ...currentBatches.filter((batch) => batch.batch_id !== payload.batch.batch_id),
-        ])
-        setPendingImportSources([])
+        setProcessingJobsById((currentJobs) => ({
+          ...currentJobs,
+          [payload.job.job_id]: payload.job,
+        }))
         setIsDocumentImportDialogOpen(false)
         setPdfImportState({
-          kind: 'success',
-          message: `PDF caricati: ${payload.batch.document_count}`,
+          kind: 'loading',
+          message: processingJobMessage(
+            payload.job,
+            `OCR avviato su ${payload.batch.document_count} PDF`,
+          ),
         })
-        window.setTimeout(() => {
-          setPdfImportState((currentState) =>
-            currentState?.kind === 'success' ? null : currentState,
-          )
-        }, 1400)
+        startProcessingJobsPolling()
       })
       .catch((error) => {
+        discardPendingImportSources([source])
         setPdfImportState({
           kind: 'error',
-          message: `PDF non caricati. ${userErrorMessage(
+          message: `Lavorazione non avviata. ${userErrorMessage(
             error,
-            'Controlla che i file selezionati siano PDF validi.',
+            'Controlla che i PDF selezionati siano validi.',
           )}`,
         })
       })
@@ -3479,109 +4866,35 @@ function App() {
       })
   }
 
-  function cancelDeleteImportedBatch() {
-    setBatchIdToDelete(null)
-  }
-
-  function confirmDeleteImportedBatch() {
-    const batchId = batchIdToDelete
-    if (!batchId) {
-      return
-    }
-
-    setPdfImportState({
-      kind: 'loading',
-      message: 'Eliminazione PDF caricati in corso...',
-    })
-
-    fetch(`${registryApiBaseUrl}/batches/${encodeURIComponent(batchId)}`, {
-      method: 'DELETE',
-    })
-      .then(async (response) => {
-        const payload = await response.json().catch(() => null)
-        if (!response.ok) {
-          throw new Error(payload?.error ?? `HTTP ${response.status}`)
-        }
-        return payload as ImportedBatchListPayload
-      })
-      .then((payload) => {
-        setImportedBatches(payload.batches ?? [])
-        setProcessingJobsByBatchId((currentJobs) => {
-          const nextJobs = { ...currentJobs }
-          delete nextJobs[batchId]
-          return nextJobs
-        })
-        setBatchIdToDelete(null)
-        setPdfImportState({
-          kind: 'success',
-          message: 'PDF caricati eliminati.',
-        })
-        window.setTimeout(() => {
-          setPdfImportState((currentState) =>
-            currentState?.kind === 'success' ? null : currentState,
-          )
-        }, 1400)
-      })
-      .catch((error) => {
-        setPdfImportState({
-          kind: 'error',
-          message: `PDF caricati non eliminati. ${userErrorMessage(
-            error,
-            "Non riesco a eliminare la copia interna dei PDF.",
-          )}`,
-        })
-      })
-  }
-
-  function processImportedBatch(batchId: string) {
-    setPdfImportState({
-      kind: 'loading',
-      message: 'Processamento OCR avviato...',
-    })
-
-    fetch(`${registryApiBaseUrl}/batches/process`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ batch_id: batchId }),
-    })
-      .then(async (response) => {
-        const payload = await response.json().catch(() => null)
-        if (!response.ok) {
-          throw new Error(payload?.error ?? `HTTP ${response.status}`)
-        }
-        return payload as ProcessingJobPayload
-      })
-      .then((job) => {
-        setProcessingJobsByBatchId((currentJobs) => ({
-          ...currentJobs,
-          [job.batch_id]: job,
-        }))
-        setPdfImportState({
-          kind: 'loading',
-          message: processingJobMessage(job, 'Processamento OCR avviato...'),
-        })
-        startProcessingJobsPolling()
-      })
-      .catch((error) => {
-        setPdfImportState({
-          kind: 'error',
-          message: `Processamento non avviato. ${userErrorMessage(
-            error,
-            'Non riesco ad avviare la lavorazione OCR.',
-          )}`,
-        })
-      })
-  }
-
-  function reprocessArchivedSource(record: ArchivedSourceRecord) {
-    if (!record.archived_source_pdf_path) {
+  function requestReprocessSelectedArchivedSources() {
+    const sourceIds = Array.from(selectedArchiveKeys)
+    if (sourceIds.length === 0) {
       setPdfImportState({
         kind: 'error',
-        message: 'PDF origine non disponibile per il riprocessamento.',
+        message: 'Seleziona almeno un file origine da riprocessare.',
       })
       return
     }
 
+    setArchiveReprocessDialog({
+      target: 'sources',
+      phase: 'confirm',
+      recordIds: sourceIds,
+    })
+  }
+
+  function confirmReprocessSelectedArchivedSources() {
+    const sourceIds = archiveReprocessDialog?.recordIds ?? []
+    if (sourceIds.length === 0) {
+      setArchiveReprocessDialog(null)
+      return
+    }
+
+    setArchiveReprocessDialog({
+      target: 'sources',
+      phase: 'starting',
+      recordIds: sourceIds,
+    })
     setPdfImportState({
       kind: 'loading',
       message: 'Riprocessamento OCR avviato...',
@@ -3591,8 +4904,7 @@ function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        archived_source_pdf_path: record.archived_source_pdf_path,
-        source_file_name: record.source_file_name,
+        source_ids: sourceIds,
       }),
     })
       .then(async (response) => {
@@ -3603,17 +4915,24 @@ function App() {
         return payload as ProcessingJobPayload
       })
       .then((job) => {
-        setProcessingJobsByBatchId((currentJobs) => ({
+        setProcessingJobsById((currentJobs) => ({
           ...currentJobs,
-          [job.batch_id]: job,
+          [job.job_id]: job,
         }))
         setPdfImportState({
           kind: 'loading',
           message: processingJobMessage(job, 'Riprocessamento OCR avviato...'),
         })
+        setSelectedArchiveKeys(new Set())
+        setArchiveReprocessDialog({
+          target: 'sources',
+          phase: 'success',
+          recordIds: sourceIds,
+        })
         startProcessingJobsPolling()
       })
       .catch((error) => {
+        setArchiveReprocessDialog(null)
         setPdfImportState({
           kind: 'error',
           message: `Riprocessamento non avviato. ${userErrorMessage(
@@ -3621,6 +4940,75 @@ function App() {
             'Non riesco ad avviare la nuova lavorazione OCR.',
           )}`,
         })
+      })
+  }
+
+  function requestReprocessSelectedArchivedInvoices() {
+    const recordIds = Array.from(selectedArchiveKeys)
+    if (recordIds.length === 0) {
+      setInvoiceArchiveError('Seleziona almeno una fattura da riprocessare.')
+      return
+    }
+
+    const selectedStatuses = new Set(
+      invoiceArchiveRecords
+        .filter((record) => selectedArchiveKeys.has(record.record_id))
+        .map((record) => record.status),
+    )
+    if (selectedStatuses.size > 1) {
+      setInvoiceArchiveError(
+        'Seleziona solo fatture salvate oppure solo fatture scartate.',
+      )
+      return
+    }
+
+    setInvoiceArchiveError(null)
+    setArchiveReprocessDialog({ target: 'invoices', phase: 'confirm', recordIds })
+  }
+
+  function confirmReprocessSelectedArchivedInvoices() {
+    const recordIds = archiveReprocessDialog?.recordIds ?? []
+    if (recordIds.length === 0) {
+      setArchiveReprocessDialog(null)
+      return
+    }
+
+    setArchiveReprocessDialog({ target: 'invoices', phase: 'starting', recordIds })
+    setInvoiceArchiveError('Avvio del riprocessamento OCR...')
+    fetch(`${registryApiBaseUrl}/archive/invoices/reprocess`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ record_ids: recordIds }),
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error ?? `HTTP ${response.status}`)
+        }
+        return payload as ProcessingJobPayload
+      })
+      .then((job) => {
+        setProcessingJobsById((currentJobs) => ({
+          ...currentJobs,
+          [job.job_id]: job,
+        }))
+        setSelectedArchiveKeys(new Set())
+        setInvoiceArchiveError(null)
+        setPdfImportState({
+          kind: 'loading',
+          message: processingJobMessage(job, 'Riprocessamento OCR avviato...'),
+        })
+        setArchiveReprocessDialog({ target: 'invoices', phase: 'success', recordIds })
+        startProcessingJobsPolling()
+      })
+      .catch((error) => {
+        setArchiveReprocessDialog(null)
+        setInvoiceArchiveError(
+          `Riprocessamento non avviato. ${userErrorMessage(
+            error,
+            'Non riesco ad avviare la nuova lavorazione OCR.',
+          )}`,
+        )
       })
   }
 
@@ -3653,16 +5041,20 @@ function App() {
         })
         .then((payload) => {
           if (payload.jobs.length === 0) {
-            setProcessingJobsByBatchId({})
+            setProcessingJobsById({})
             stopProcessingJobsPolling()
             return
           }
-          const jobsByBatchId = Object.fromEntries(
-            payload.jobs.map((job) => [job.batch_id, job]),
+          const jobsById = Object.fromEntries(
+            payload.jobs.map((job) => [job.job_id, job]),
           )
-          setProcessingJobsByBatchId(jobsByBatchId)
-          const activeJobs = payload.jobs.filter((job) =>
-            job.status === 'queued' || job.status === 'processing',
+          setProcessingJobsById(jobsById)
+          const activeJobs = payload.jobs.filter(
+            (job) =>
+              job.status === 'queued' ||
+              job.status === 'processing' ||
+              job.status === 'finalizing' ||
+              job.status === 'cancelling',
           )
           const latestActiveJob = activeJobs.at(-1)
           if (latestActiveJob) {
@@ -3760,7 +5152,13 @@ function App() {
       return userErrorMessage(cleanMessage, 'lavorazione non completata')
     }
     if (job.status === 'processing' && job.current_file) {
-      return `File corrente: ${job.current_file}`
+      return `File corrente: ${fileNameFromPath(job.current_file) ?? job.current_file}`
+    }
+    if (job.status === 'cancelling') {
+      return 'Annullamento della lavorazione in corso.'
+    }
+    if (job.status === 'finalizing') {
+      return 'Archiviazione dei file origine in corso.'
     }
     if (cleanMessage && !/\d+\s*\/\s*\d+\s+file elaborati/i.test(cleanMessage)) {
       return cleanMessage
@@ -3770,9 +5168,6 @@ function App() {
     }
     if (job.status === 'queued') {
       return 'In attesa di avvio.'
-    }
-    if (job.status === 'paused') {
-      return 'Lavorazione in pausa.'
     }
     if (job.status === 'cancelled') {
       return 'Lavorazione annullata.'
@@ -3821,11 +5216,10 @@ function App() {
   }
 
   function isProcessingCancellationPending(job: ProcessingJobPayload) {
-    return job.status === 'processing' && job.cancel_requested === true
-  }
-
-  function isProcessingPausePending(job: ProcessingJobPayload) {
-    return job.status === 'processing' && job.pause_requested === true
+    return (
+      job.status === 'cancelling' ||
+      (job.status === 'processing' && job.cancel_requested === true)
+    )
   }
 
   function requestCancelProcessing(jobId: string) {
@@ -3861,9 +5255,9 @@ function App() {
         return payload as ProcessingJobPayload
       })
       .then((job) => {
-        setProcessingJobsByBatchId((currentJobs) => ({
+        setProcessingJobsById((currentJobs) => ({
           ...currentJobs,
-          [job.batch_id]: job,
+          [job.job_id]: job,
         }))
         setPdfImportState({
           kind: 'loading',
@@ -3880,14 +5274,6 @@ function App() {
           )}`,
         })
       })
-  }
-
-  function pauseProcessingJob(jobId: string) {
-    updateProcessingJobAction(jobId, 'pause', 'Pausa richiesta...')
-  }
-
-  function resumeProcessingJob(jobId: string) {
-    updateProcessingJobAction(jobId, 'resume', 'Lavorazione rimessa in coda...')
   }
 
   function requestRemoveProcessingJobFromQueue(jobId: string) {
@@ -3909,7 +5295,7 @@ function App() {
 
   function updateProcessingJobAction(
     jobId: string,
-    action: 'pause' | 'resume' | 'remove',
+    action: 'remove',
     fallbackMessage: string,
   ) {
     fetch(`${registryApiBaseUrl}/processing/jobs/${jobId}/${action}`, {
@@ -3923,15 +5309,20 @@ function App() {
         return payload as ProcessingJobPayload
       })
       .then((job) => {
-        setProcessingJobsByBatchId((currentJobs) => ({
+        setProcessingJobsById((currentJobs) => ({
           ...currentJobs,
-          [job.batch_id]: job,
+          [job.job_id]: job,
         }))
         setPdfImportState({
           kind: 'loading',
           message: processingJobMessage(job, fallbackMessage),
         })
-        if (job.status === 'queued' || job.status === 'processing') {
+        if (
+          job.status === 'queued' ||
+          job.status === 'processing' ||
+          job.status === 'finalizing' ||
+          job.status === 'cancelling'
+        ) {
           startProcessingJobsPolling()
         }
       })
@@ -3977,15 +5368,16 @@ function App() {
     const isDiscard = action === 'discard'
     setInvoiceReviewActionState({
       kind: isDiscard ? 'discarding' : 'saving',
-      message: isDiscard ? 'Eliminazione fattura...' : 'Salvataggio fattura...',
+      message: isDiscard ? 'Archiviazione fattura scartata...' : 'Salvataggio fattura...',
     })
 
-    persistInvoiceReviewAction(currentInvoice, action)
+    flushReviewDraftSaves()
+      .then(() => persistInvoiceReviewAction(currentInvoice, action))
       .then(() => {
         removeInvoiceFromReview(currentInvoice.invoiceId)
         setInvoiceReviewActionState({
           kind: 'success',
-          message: isDiscard ? 'Fattura eliminata dalla revisione.' : 'Fattura salvata.',
+          message: isDiscard ? 'Fattura spostata tra le scartate.' : 'Fattura salvata.',
         })
         window.setTimeout(() => {
           setInvoiceReviewActionState((currentState) =>
@@ -4023,11 +5415,21 @@ function App() {
       if (!response.ok) {
         throw new Error(payload?.error ?? `HTTP ${response.status}`)
       }
+      const draftId = reviewDraftIdForInvoice(invoice)
+      if (draftId) {
+        removeReviewDraftsLocally([draftId])
+      }
       return payload
     })
   }
 
   function continueInvoiceSaveAfterValidation() {
+    if (
+      pendingInvoiceSaveValidation &&
+      validationHasBlockingIssue(pendingInvoiceSaveValidation)
+    ) {
+      return
+    }
     setPendingInvoiceSaveValidation(null)
     persistCurrentInvoice('save')
   }
@@ -4075,6 +5477,12 @@ function App() {
       validationIssueCount: issues.length,
       emptyFieldIssueCount: issues.filter((issue) => issue.kind === 'empty_fields').length,
       invalidFiscalIssueCount: issues.filter((issue) => issue.kind === 'invalid_fiscal').length,
+      invalidDateIssueCount: issues.filter((issue) => issue.kind === 'invalid_date').length,
+      invalidAmountIssueCount: issues.filter(
+        (issue) => issue.kind === 'invalid_amount',
+      ).length,
+      economicMismatchIssueCount: issues.filter((issue) => issue.kind === 'economic_mismatch')
+        .length,
       newRegistryIssueCount: issues.filter((issue) => issue.kind === 'new_registry_record').length,
       registryConflictIssueCount: issues.filter((issue) => issue.kind === 'registry_conflict').length,
     })
@@ -4085,17 +5493,26 @@ function App() {
       return
     }
 
+    if (
+      pendingBatchReviewAction.action === 'save' &&
+      (pendingBatchReviewAction.invalidAmountIssueCount > 0 ||
+        pendingBatchReviewAction.economicMismatchIssueCount > 0)
+    ) {
+      return
+    }
+
     const { action, invoices: targetInvoices } = pendingBatchReviewAction
     const isDiscard = action === 'discard'
     setPendingBatchReviewAction(null)
     setInvoiceReviewActionState({
       kind: isDiscard ? 'discarding' : 'saving',
       message: isDiscard
-        ? `Eliminazione di ${targetInvoices.length} fatture...`
+        ? `Archiviazione di ${targetInvoices.length} fatture scartate...`
         : `Salvataggio di ${targetInvoices.length} fatture...`,
     })
 
     ;(async () => {
+      await flushReviewDraftSaves()
       for (const invoice of targetInvoices) {
         await persistInvoiceReviewAction(invoice, action)
       }
@@ -4111,7 +5528,7 @@ function App() {
         setInvoiceReviewActionState({
           kind: 'success',
           message: isDiscard
-            ? `${targetInvoices.length} fatture eliminate dalla revisione.`
+            ? `${targetInvoices.length} fatture spostate tra le scartate.`
             : `${targetInvoices.length} fatture salvate.`,
         })
         window.setTimeout(() => {
@@ -4144,6 +5561,44 @@ function App() {
     loadRegistryRecords()
   }
 
+  function requestFeedbackExport() {
+    setIsDeveloperMenuOpen(false)
+    setFeedbackExportState({ kind: 'confirm' })
+  }
+
+  function exportFeedbackToDesktop() {
+    setFeedbackExportState({ kind: 'exporting' })
+    fetch(`${registryApiBaseUrl}/feedback/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null)
+        if (!response.ok || !payload?.ok) {
+          throw new Error(payload?.error ?? `HTTP ${response.status}`)
+        }
+        return payload
+      })
+      .then((payload) => {
+        setFeedbackExportState({
+          kind: 'success',
+          folderName: String(payload.folder_name ?? 'Dati per miglioramento'),
+          invoiceCount: Number(payload.stats?.invoices ?? 0),
+          missingPdfCount: Number(payload.missing_pdf_count ?? 0),
+        })
+      })
+      .catch((error) => {
+        setFeedbackExportState({
+          kind: 'error',
+          message: userErrorMessage(
+            error,
+            'Non è stato possibile creare il pacchetto. Riprova o contatta lo sviluppatore.',
+          ),
+        })
+      })
+  }
+
   function toggleArchiveMenu() {
     setIsArchiveMenuOpen((isOpen) => {
       if (!isOpen) {
@@ -4170,19 +5625,6 @@ function App() {
     }
   }
 
-  function requestRemovePendingImportSource(sourceId: string) {
-    setPendingImportSourceIdToRemove(sourceId)
-  }
-
-  function confirmRemovePendingImportSource() {
-    if (!pendingImportSourceIdToRemove) {
-      return
-    }
-    const sourceId = pendingImportSourceIdToRemove
-    setPendingImportSourceIdToRemove(null)
-    removePendingImportSource(sourceId)
-  }
-
   function scheduleArchiveMenuClose() {
     if (archiveMenuCloseTimeoutRef.current !== null) {
       window.clearTimeout(archiveMenuCloseTimeoutRef.current)
@@ -4195,13 +5637,109 @@ function App() {
 
   function openInvoiceArchive() {
     setIsArchiveMenuOpen(false)
+    setPdfArchiveViewMode('invoices')
+    setSelectedArchiveKeys(new Set())
+    setFocusedArchiveKey(null)
     setAppView('archive')
     setInvoiceArchiveError(null)
     loadInvoiceArchive()
   }
 
+  function requestArchiveReference(
+    record: InvoiceArchiveRecord,
+    kind: ArchiveReferenceKind,
+  ) {
+    setArchiveReferenceAction({ record, kind, error: null })
+  }
+
+  function resolveArchiveReference(action: ArchiveReferenceAction) {
+    if (action.kind === 'invoice') {
+      const record = invoiceArchiveRecords.find(
+        (candidate) =>
+          candidate.record_id === action.record.record_id &&
+          candidate.invoice_archive_visible !== false &&
+          Boolean(candidate.archived_pdf_url),
+      )
+      return record?.archived_pdf_url
+        ? { key: record.record_id, url: record.archived_pdf_url, mode: 'invoices' as const }
+        : null
+    }
+
+    const record = sourceArchiveRecords.find(
+      (candidate) =>
+        (Boolean(action.record.archived_source_pdf_path) &&
+          candidate.archived_source_pdf_path === action.record.archived_source_pdf_path) ||
+        (Boolean(action.record.archived_source_pdf_url) &&
+          candidate.archived_source_pdf_url === action.record.archived_source_pdf_url),
+    )
+    return record?.archived_source_pdf_url
+      ? { key: record.source_id, url: record.archived_source_pdf_url, mode: 'sources' as const }
+      : null
+  }
+
+  function showMissingArchiveReference() {
+    setArchiveReferenceAction((currentAction) =>
+      currentAction
+        ? {
+            ...currentAction,
+            error: "Scusami, il file non è stato trovato nell'archivio.",
+          }
+        : currentAction,
+    )
+  }
+
+  function openArchiveReferenceWindow() {
+    if (!archiveReferenceAction) {
+      return
+    }
+    const reference = resolveArchiveReference(archiveReferenceAction)
+    if (!reference) {
+      showMissingArchiveReference()
+      return
+    }
+
+    openArchivedPdfWindow(
+      reference.url,
+      `${archiveReferenceAction.kind}-${reference.key}`,
+    )
+    setArchiveReferenceAction(null)
+  }
+
+  function goToArchiveReference() {
+    if (!archiveReferenceAction) {
+      return
+    }
+    navigateToArchiveReference(archiveReferenceAction)
+  }
+
+  function navigateToArchiveReference(action: ArchiveReferenceAction) {
+    const reference = resolveArchiveReference(action)
+    if (!reference) {
+      setArchiveReferenceAction({
+        ...action,
+        error: "Il file non è stato trovato nell'archivio.",
+      })
+      return
+    }
+
+    setInvoiceArchiveSearch('')
+    setInvoiceArchiveFilters({
+      dateFrom: '',
+      dateTo: '',
+    })
+    setPdfArchiveViewMode(reference.mode)
+    setSelectedArchiveKeys(new Set([reference.key]))
+    setFocusedArchiveKey(reference.key)
+    setInvoiceArchiveError(null)
+    setAppView('archive')
+    setArchiveReferenceAction(null)
+  }
+
   function openInvoiceRegistry() {
     setIsArchiveMenuOpen(false)
+    setInvoiceRegistryViewMode('saved')
+    setIsInvoiceRegistryEditMode(false)
+    setSelectedArchiveKeys(new Set())
     setAppView('invoiceRegistry')
     setInvoiceArchiveError(null)
     loadInvoiceArchive()
@@ -4209,25 +5747,86 @@ function App() {
 
   function openProcessingJobsPage() {
     setIsArchiveMenuOpen(false)
+    setProcessingViewMode('active')
     setAppView('processing')
     pollProcessingJobs()
   }
 
-  function loadInvoiceArchive() {
-    return fetch(`${registryApiBaseUrl}/invoices/registry`, { cache: 'no-store' })
+  function toggleProcessingHistorySelection(jobId: string) {
+    setSelectedProcessingHistoryIds((current) => {
+      const next = new Set(current)
+      if (next.has(jobId)) next.delete(jobId)
+      else next.add(jobId)
+      return next
+    })
+  }
+
+  function toggleAllProcessingHistory() {
+    const ids = processingHistoryJobs.map((job) => job.job_id)
+    setSelectedProcessingHistoryIds((current) =>
+      ids.length > 0 && ids.every((id) => current.has(id))
+        ? new Set()
+        : new Set(ids),
+    )
+  }
+
+  function deleteProcessingHistory(deleteAll = false) {
+    fetch(`${registryApiBaseUrl}/processing/history/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        all: deleteAll,
+        job_ids: deleteAll ? [] : Array.from(selectedProcessingHistoryIds),
+      }),
+    })
       .then(async (response) => {
         const payload = await response.json().catch(() => null)
-        if (!response.ok) {
-          throw new Error(payload?.error ?? `HTTP ${response.status}`)
-        }
-
-        return payload as InvoiceArchiveRegistryPayload
+        if (!response.ok) throw new Error(payload?.error ?? `HTTP ${response.status}`)
       })
-      .then((payload) => {
+      .then(() => {
+        setSelectedProcessingHistoryIds(new Set())
+        setIsProcessingHistoryDeleteConfirmOpen(false)
+        pollProcessingJobs()
+      })
+      .catch((error) => {
+        setIsProcessingHistoryDeleteConfirmOpen(false)
+        setPdfImportState({
+          kind: 'error',
+          message: `Cronologia non eliminata. ${userErrorMessage(
+            error,
+            'Non riesco a eliminare le righe selezionate.',
+          )}`,
+        })
+      })
+  }
+
+  function loadInvoiceArchive() {
+    return Promise.all([
+      fetch(`${registryApiBaseUrl}/invoices/registry`, { cache: 'no-store' }),
+      fetch(`${registryApiBaseUrl}/archive/sources`, { cache: 'no-store' }),
+    ])
+      .then(async ([invoiceResponse, sourceResponse]) => {
+        const invoicePayload = await invoiceResponse.json().catch(() => null)
+        const sourcePayload = await sourceResponse.json().catch(() => null)
+        if (!invoiceResponse.ok) {
+          throw new Error(invoicePayload?.error ?? `HTTP ${invoiceResponse.status}`)
+        }
+        if (!sourceResponse.ok) {
+          throw new Error(sourcePayload?.error ?? `HTTP ${sourceResponse.status}`)
+        }
+        return {
+          invoices: invoicePayload as InvoiceArchiveRegistryPayload,
+          sources: sourcePayload as SourceArchivePayload,
+        }
+      })
+      .then(({ invoices: payload, sources }) => {
         const records = payload.registry.records ?? []
         setInvoiceArchiveRecords(records)
+        setSourceArchiveRecords(sources.records ?? [])
         if (!isInvoiceRegistryEditMode) {
-          setInvoiceRegistryDraftRecords(records)
+          setInvoiceRegistryDraftRecords(
+            records.filter((record) => record.status === 'saved'),
+          )
         }
         setInvoiceArchiveError(null)
       })
@@ -4242,14 +5841,115 @@ function App() {
       })
   }
 
+  function toggleArchiveSelection(key: string) {
+    if (!key) {
+      return
+    }
+    setFocusedArchiveKey(null)
+    setSelectedArchiveKeys((currentKeys) => {
+      const nextKeys = new Set(currentKeys)
+      if (nextKeys.has(key)) {
+        nextKeys.delete(key)
+      } else {
+        nextKeys.add(key)
+      }
+      return nextKeys
+    })
+  }
+
+  function toggleAllArchiveSelections(keys: string[]) {
+    const validKeys = keys.filter(Boolean)
+    if (validKeys.length === 0) {
+      return
+    }
+    setFocusedArchiveKey(null)
+
+    setSelectedArchiveKeys((currentKeys) => {
+      const nextKeys = new Set(currentKeys)
+      const areAllSelected = validKeys.every((key) => currentKeys.has(key))
+      for (const key of validKeys) {
+        if (areAllSelected) {
+          nextKeys.delete(key)
+        } else {
+          nextKeys.add(key)
+        }
+      }
+      return nextKeys
+    })
+  }
+
+  function requestDeleteSelectedArchives(scope: 'invoice' | 'source' | 'registry') {
+    if (selectedArchiveKeys.size === 0) {
+      return
+    }
+
+    setArchiveDeleteTarget({
+      scope,
+      recordIds: scope !== 'source' ? Array.from(selectedArchiveKeys) : undefined,
+      archivedSourcePdfPaths: undefined,
+      title: 'Elimina elementi selezionati',
+      message:
+        scope === 'source'
+          ? `Vuoi eliminare ${selectedArchiveKeys.size} file origine selezionati dall’archivio? I PDF fattura e il registro non verranno modificati.`
+          : scope === 'registry'
+            ? `Vuoi eliminare ${selectedArchiveKeys.size} righe selezionate dal registro? I PDF fattura e i file origine non verranno modificati.`
+            : `Vuoi eliminare ${selectedArchiveKeys.size} PDF fattura selezionati dall’archivio? Il registro e i file origine non verranno modificati.`,
+    })
+  }
+
+  function confirmDeleteArchive() {
+    const target = archiveDeleteTarget
+    if (!target) {
+      return
+    }
+
+    setArchiveDeleteTarget(null)
+    setInvoiceArchiveError('Eliminazione archivio in corso...')
+    fetch(`${registryApiBaseUrl}/archive/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scope: target.scope,
+        record_id: target.recordId,
+        record_ids: target.recordIds,
+        archived_source_pdf_path: target.archivedSourcePdfPath,
+        archived_source_pdf_paths: target.archivedSourcePdfPaths,
+        source_ids: target.scope === 'source' ? Array.from(selectedArchiveKeys) : undefined,
+      }),
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error ?? `HTTP ${response.status}`)
+        }
+        return payload
+      })
+      .then(() => {
+        setSelectedArchiveKeys(new Set())
+        return loadInvoiceArchive()
+      })
+      .catch((error) => {
+        setInvoiceArchiveError(
+          `Archivio non eliminato. ${userErrorMessage(
+            error,
+            'Non riesco a eliminare le copie interne dell’archivio.',
+          )}`,
+        )
+      })
+  }
+
   function startInvoiceRegistryEdit() {
-    setInvoiceRegistryDraftRecords(invoiceArchiveRecords)
+    setInvoiceRegistryDraftRecords(
+      invoiceArchiveRecords.filter((record) => record.status === 'saved'),
+    )
     setInvoiceRegistrySaveStatus(null)
     setIsInvoiceRegistryEditMode(true)
   }
 
   function cancelInvoiceRegistryEdit() {
-    setInvoiceRegistryDraftRecords(invoiceArchiveRecords)
+    setInvoiceRegistryDraftRecords(
+      invoiceArchiveRecords.filter((record) => record.status === 'saved'),
+    )
     setInvoiceRegistrySaveStatus(null)
     setIsInvoiceRegistryEditMode(false)
   }
@@ -4270,6 +5970,16 @@ function App() {
   }
 
   function saveInvoiceRegistryDraft() {
+    const validation = buildInvoiceRegistrySaveValidation(invoiceRegistryDraftRecords)
+    if (validation) {
+      setPendingInvoiceRegistrySaveValidation(validation)
+      return
+    }
+
+    persistInvoiceRegistryDraft()
+  }
+
+  function persistInvoiceRegistryDraft() {
     setInvoiceRegistrySaveStatus('Salvataggio registro in corso...')
     fetch(`${registryApiBaseUrl}/invoices/registry`, {
       method: 'POST',
@@ -4286,7 +5996,9 @@ function App() {
       .then((payload) => {
         const records = payload.registry.records ?? []
         setInvoiceArchiveRecords(records)
-        setInvoiceRegistryDraftRecords(records)
+        setInvoiceRegistryDraftRecords(
+          records.filter((record) => record.status === 'saved'),
+        )
         setIsInvoiceRegistryEditMode(false)
         setInvoiceRegistrySaveStatus('Registro fatture salvato.')
         window.setTimeout(() => {
@@ -4301,6 +6013,17 @@ function App() {
           )}`,
         )
       })
+  }
+
+  function continueInvoiceRegistrySaveAfterValidation() {
+    if (
+      pendingInvoiceRegistrySaveValidation &&
+      validationHasBlockingIssue(pendingInvoiceRegistrySaveValidation)
+    ) {
+      return
+    }
+    setPendingInvoiceRegistrySaveValidation(null)
+    persistInvoiceRegistryDraft()
   }
 
   function downloadInvoiceArchiveExcel() {
@@ -4838,17 +6561,20 @@ function App() {
       })
   }
 
-  function loadDocumentEntries(documentEntries: ViewerDocumentIndexEntry[]) {
+  function loadDocumentEntries(
+    documentEntries: ViewerDocumentIndexEntry[],
+    preferredManifestInvoiceId?: string,
+  ) {
     if (documentEntries.length === 0) {
       setInvoices([])
       setSelectedInvoiceId(null)
       setManifestSourceFile(null)
       setLoadedManifests([])
       setManifestError('Nessun documento nel viewer_index.json')
-      return
+      return Promise.resolve(false)
     }
 
-    Promise.all(
+    return Promise.all(
       documentEntries.map((documentEntry) =>
         fetch(`${documentEntry.base_path}/viewer_manifest.json?v=${manifestCacheKey}`, {
           cache: 'no-store',
@@ -4873,18 +6599,27 @@ function App() {
           manifestInvoices,
           registryPreviewRecords,
         )
+        const invoicesWithDrafts = applyReviewDraftsToInvoices(
+          registryMatchedInvoices.invoices,
+        )
         setLoadedManifests(loadedDocuments)
         setManifestSourceFile(
           loadedDocuments.length === 1
             ? loadedDocuments[0].manifest.source_file
             : `${loadedDocuments.length} documenti`,
         )
-        setInvoices(registryMatchedInvoices.invoices)
+        setInvoices(invoicesWithDrafts)
         setRegistryFieldConflicts(registryMatchedInvoices.conflicts)
-        setSelectedInvoiceId(registryMatchedInvoices.invoices[0]?.invoiceId ?? null)
+        const preferredInvoice = invoicesWithDrafts.find(
+          (invoice) => invoice.manifestInvoiceId === preferredManifestInvoiceId,
+        )
+        setSelectedInvoiceId(
+          preferredInvoice?.invoiceId ?? invoicesWithDrafts[0]?.invoiceId ?? null,
+        )
         setSelectedFieldKind(null)
         setActiveSuggestionFieldKind(null)
         setManifestError(null)
+        return true
       })
       .catch((error) => {
         setInvoices([])
@@ -4894,6 +6629,7 @@ function App() {
         setManifestError(
           userErrorMessage(error, 'Non riesco a leggere i dati di questa fattura.'),
         )
+        return false
       })
   }
 
@@ -4970,9 +6706,15 @@ function App() {
     return { invoices: invoicesWithRegistryMatches, conflicts }
   }
 
-  function updateFieldValue(fieldKind: string, nextValue: string) {
+  function updateFieldValue(
+    fieldKind: string,
+    nextValue: string,
+    interaction: 'manual_input' | 'formatting_only' | 'suggestion_selection' =
+      'manual_input',
+  ) {
     setActiveSuggestionFieldKind(fieldKind)
     setHighlightedSuggestionIndex(-1)
+    markSelectedInvoiceDraftDirty()
     setInvoices((currentInvoices) =>
       currentInvoices.map((invoice) => {
         if (invoice.invoiceId !== selectedInvoiceId) {
@@ -4981,27 +6723,54 @@ function App() {
 
         return {
           ...invoice,
-          fields: invoice.fields.map((field) =>
-            field.kind === fieldKind ? { ...field, value: nextValue } : field,
-          ),
+          fields: invoice.fields.map((field) => {
+            if (field.kind !== fieldKind) {
+              return field
+            }
+            const effectiveInteraction =
+              interaction === 'formatting_only' && field.review_interaction
+                ? field.review_interaction
+                : !nextValue && field.value
+                  ? 'cleared'
+                  : interaction
+            return {
+              ...field,
+              value: nextValue,
+              review_interaction: effectiveInteraction,
+              review_value_origin:
+                effectiveInteraction === 'suggestion_selection'
+                  ? 'suggestion'
+                  : effectiveInteraction === 'formatting_only'
+                    ? field.review_value_origin
+                    : 'manual_input',
+              review_action_id:
+                field.review_action_id &&
+                effectiveInteraction === field.review_interaction
+                  ? field.review_action_id
+                  : newReviewActionId(),
+              review_source_field_kind: fieldKind,
+            }
+          }),
         }
       }),
     )
   }
 
-  function normalizeDateFieldValue(fieldKind: string, value: string) {
-    if (!dateFieldKinds.has(fieldKind)) {
-      return value
-    }
-
-    const normalizedValue = normalizeDateValueForInput(value)
+  function normalizeInvoiceFieldValue(fieldKind: string, value: string) {
+    const normalizedValue = normalizeInvoiceFieldValueForInput(fieldKind, value)
     if (normalizedValue !== value) {
-      updateFieldValue(fieldKind, normalizedValue)
+      updateFieldValue(fieldKind, normalizedValue, 'formatting_only')
     }
     return normalizedValue
   }
 
   function acceptFieldSuggestion(fieldKind: string, suggestion: FieldSuggestion) {
+    if (suggestion.registryRecord) {
+      applyRegistryRecordToSelectedInvoice(fieldKind, suggestion.registryRecord)
+      setActiveSuggestionFieldKind(null)
+      setHighlightedSuggestionIndex(-1)
+      return
+    }
     const matchingRecords = registryRecordsForExactFieldValue(
       registryPreviewRecords,
       fieldKind,
@@ -5014,7 +6783,7 @@ function App() {
     } else if (relatedFieldGroups.some((group) => group.includes(fieldKind))) {
       completeRelatedFieldValues(fieldKind, suggestion)
     } else {
-      updateFieldValue(fieldKind, suggestion.value)
+      updateFieldValue(fieldKind, suggestion.value, 'suggestion_selection')
     }
     setActiveSuggestionFieldKind(null)
     setHighlightedSuggestionIndex(-1)
@@ -5056,6 +6825,7 @@ function App() {
       matchingRecords.length > 1 &&
       registryRecordsHaveDifferentFill(matchingRecords)
     ) {
+      markSelectedInvoiceDraftDirty()
       setRegistryFieldConflicts((currentConflicts) => ({
         ...currentConflicts,
         [conflictKey as string]: {
@@ -5119,6 +6889,7 @@ function App() {
     }
 
     const fieldGroup = registryFieldGroupForFiscalField(sourceFieldKind)
+    const reviewActionId = newReviewActionId()
     const sourceValue = registryFieldValueForInvoiceKind(record, sourceFieldKind)
     const targetFieldKind = registryConflictTargetFieldKind(sourceFieldKind)
     const conflictKey = targetFieldKind
@@ -5133,6 +6904,15 @@ function App() {
       })
     }
 
+    setReviewedOriginalScanFields((currentFields) => {
+      const nextFields = { ...currentFields }
+      for (const fieldKind of fieldGroup) {
+        delete nextFields[registryConflictKey(selectedInvoiceId, fieldKind)]
+      }
+      return nextFields
+    })
+
+    markSelectedInvoiceDraftDirty()
     setInvoices((currentInvoices) =>
       currentInvoices.map((invoice) =>
         invoice.invoiceId !== selectedInvoiceId
@@ -5149,7 +6929,14 @@ function App() {
                     ? sourceValue
                     : registryFieldValueForInvoiceKind(record, field.kind)
 
-                return fieldWithRegistryValue(field, nextValue, record)
+                return fieldWithRegistryValue(field, nextValue, record, {
+                  interaction:
+                    field.kind === sourceFieldKind
+                      ? 'registry_selection'
+                      : 'dependent_registry_fill',
+                  actionId: reviewActionId,
+                  sourceFieldKind,
+                })
               }),
             },
       ),
@@ -5161,7 +6948,9 @@ function App() {
     if (!relatedGroup) {
       return
     }
+    const reviewActionId = newReviewActionId()
 
+    markSelectedInvoiceDraftDirty()
     setInvoices((currentInvoices) =>
       currentInvoices.map((invoice) => {
         if (invoice.invoiceId !== selectedInvoiceId) {
@@ -5175,6 +6964,10 @@ function App() {
               return {
                 ...field,
                 value: suggestion.value,
+                review_interaction: 'suggestion_selection',
+                review_value_origin: 'suggestion',
+                review_action_id: reviewActionId,
+                review_source_field_kind: fieldKind,
               }
             }
 
@@ -5191,6 +6984,10 @@ function App() {
               ...field,
               value: relatedValue,
               role: 'suggestion_enriched',
+              review_interaction: 'dependent_suggestion_fill',
+              review_value_origin: 'dependent_suggestion',
+              review_action_id: reviewActionId,
+              review_source_field_kind: fieldKind,
             }
           }),
         }
@@ -5199,28 +6996,75 @@ function App() {
   }
 
   function resetFieldValues() {
-    if (loadedManifests.length > 0) {
-      const manifestInvoices = sortInvoicesForReview(
-        loadedManifests.flatMap(({ manifest, documentEntry }) =>
-          getInvoicesFromManifest(manifest, documentEntry),
-        ),
-      )
-      const registryMatchedInvoices = applyRegistryMatchesToInvoices(
-        manifestInvoices,
-        registryPreviewRecords,
-      )
-      setInvoices(registryMatchedInvoices.invoices)
-      setRegistryFieldConflicts(registryMatchedInvoices.conflicts)
-      setSelectedInvoiceId(registryMatchedInvoices.invoices[0]?.invoiceId ?? null)
-      setSelectedFieldKind(null)
-      setActiveSuggestionFieldKind(null)
+    if (!selectedInvoiceId || loadedManifests.length === 0) {
       return
     }
 
-    setInvoices([])
-    setSelectedInvoiceId(null)
-    setSelectedFieldKind(null)
-    setActiveSuggestionFieldKind(null)
+    const manifestInvoices = sortInvoicesForReview(
+      loadedManifests.flatMap(({ manifest, documentEntry }) =>
+        getInvoicesFromManifest(manifest, documentEntry),
+      ),
+    )
+    const registryMatchedInvoices = applyRegistryMatchesToInvoices(
+      manifestInvoices,
+      registryPreviewRecords,
+    )
+    const restoredInvoice = registryMatchedInvoices.invoices.find(
+      (invoice) => invoice.invoiceId === selectedInvoiceId,
+    )
+    const selectedInvoice = invoices.find(
+      (invoice) => invoice.invoiceId === selectedInvoiceId,
+    )
+    if (!restoredInvoice || !selectedInvoice) {
+      return
+    }
+
+    const draftId = reviewDraftIdForInvoice(selectedInvoice)
+    flushReviewDraftSaves()
+      .then(() => deleteReviewDrafts(draftId ? [draftId] : []))
+      .then(() => {
+        setInvoices((currentInvoices) =>
+          currentInvoices.map((invoice) =>
+            invoice.invoiceId === selectedInvoiceId ? restoredInvoice : invoice,
+          ),
+        )
+        setRegistryFieldConflicts((currentConflicts) => {
+          const conflictPrefix = `${selectedInvoiceId}:`
+          const nextConflicts = Object.fromEntries(
+            Object.entries(currentConflicts).filter(
+              ([conflictKey]) => !conflictKey.startsWith(conflictPrefix),
+            ),
+          )
+          for (const [conflictKey, conflict] of Object.entries(
+            registryMatchedInvoices.conflicts,
+          )) {
+            if (conflictKey.startsWith(conflictPrefix)) {
+              nextConflicts[conflictKey] = conflict
+            }
+          }
+          return nextConflicts
+        })
+        setReviewedOriginalScanFields((currentFields) => {
+          const fieldPrefix = `${selectedInvoiceId}:`
+          return Object.fromEntries(
+            Object.entries(currentFields).filter(
+              ([fieldKey]) => !fieldKey.startsWith(fieldPrefix),
+            ),
+          )
+        })
+        setSelectedFieldKind(null)
+        setOriginalScanFieldKind(null)
+        setActiveSuggestionFieldKind(null)
+      })
+      .catch((error) => {
+        setInvoiceReviewActionState({
+          kind: 'error',
+          message: `Ripristino non completato. ${userErrorMessage(
+            error,
+            'Non riesco a eliminare la bozza salvata.',
+          )}`,
+        })
+      })
   }
 
   function resetDocumentViewportScroll() {
@@ -5267,8 +7111,15 @@ function App() {
     selectInvoice(invoices[nextIndex].invoiceId)
   }
 
+  const selectInvoiceByOffsetRef = useRef(selectInvoiceByOffset)
+  selectInvoiceByOffsetRef.current = selectInvoiceByOffset
+
+  useEffect(() => {
+    invoiceFieldsPanelRef.current?.scrollTo({ top: 0, behavior: 'auto' })
+  }, [selectedInvoiceId])
+
   function currentInvoiceBoundaryPageMoveState(
-    direction: 'firstToPrevious' | 'lastToNext',
+    direction: 'first_to_previous' | 'last_to_next',
   ) {
     if (!canPersistCurrentBatch) {
       return {
@@ -5279,36 +7130,27 @@ function App() {
     if (!currentInvoice || currentInvoiceIndex < 0) {
       return { enabled: false, reason: 'Nessuna fattura selezionata.' }
     }
-    if ((currentInvoice.pageNumbers?.length ?? 0) <= 1) {
-      return {
-        enabled: false,
-        reason: 'Questa fattura ha una sola pagina: spostarla lascerebbe la fattura vuota.',
-      }
-    }
-
+    const loadedDocument = loadedManifests.find(
+      ({ documentEntry }) => documentEntry.id === currentInvoice.documentId,
+    )
+    const manifestInvoices = loadedDocument?.manifest.invoices ?? []
+    const manifestInvoiceIndex = manifestInvoices.findIndex(
+      (invoice) => invoice.invoice_id === currentInvoice.manifestInvoiceId,
+    )
     const neighborIndex =
-      direction === 'firstToPrevious' ? currentInvoiceIndex - 1 : currentInvoiceIndex + 1
-    const neighborInvoice = invoices[neighborIndex]
-    if (!neighborInvoice) {
+      direction === 'first_to_previous'
+        ? manifestInvoiceIndex - 1
+        : manifestInvoiceIndex + 1
+    if (manifestInvoiceIndex < 0 || !manifestInvoices[neighborIndex]) {
       return {
         enabled: false,
         reason:
-          direction === 'firstToPrevious'
+          direction === 'first_to_previous'
             ? 'Non esiste una fattura precedente.'
             : 'Non esiste una fattura successiva.',
       }
     }
-    if (
-      !neighborInvoice.documentId ||
-      !currentInvoice.documentId ||
-      neighborInvoice.documentId !== currentInvoice.documentId
-    ) {
-      return {
-        enabled: false,
-        reason: 'Puoi spostare pagine solo tra fatture consecutive dello stesso file origine.',
-      }
-    }
-    if (!currentInvoice.manifestInvoiceId || !neighborInvoice.manifestInvoiceId) {
+    if (!currentInvoice.manifestInvoiceId) {
       return {
         enabled: false,
         reason: 'Questa revisione non contiene i riferimenti necessari per spostare pagine.',
@@ -5318,52 +7160,86 @@ function App() {
     return { enabled: true, reason: '' }
   }
 
-  function moveCurrentInvoiceBoundaryPage(direction: 'firstToPrevious' | 'lastToNext') {
-    if (!currentInvoice || !selectedBatch?.base_path || currentInvoiceIndex < 0) {
+  function requestCurrentInvoiceBoundaryMove(
+    direction: 'first_to_previous' | 'last_to_next',
+  ) {
+    if (!currentInvoice) {
       return
     }
-
-    const pageNumbers = [...(currentInvoice.pageNumbers ?? [])].sort((left, right) => left - right)
-    if (pageNumbers.length <= 1) {
+    const pageCount = currentInvoice.pageNumbers?.length ?? 0
+    if (pageCount < 1) {
       return
     }
+    const movesToPrevious = direction === 'first_to_previous'
+    const removesInvoice = pageCount === 1
+    setPendingSegmentationAction({
+      operation: 'move_boundary',
+      direction,
+      removesInvoice,
+      title: removesInvoice ? 'Unisci fattura' : 'Sposta pagina',
+      message: removesInvoice
+        ? `${currentInvoice.title} contiene una sola pagina: verra unita alla fattura ${movesToPrevious ? 'precedente' : 'successiva'} e le fatture successive verranno rinumerate.`
+        : `La pagina ${movesToPrevious ? 'iniziale' : 'finale'} verra spostata nella fattura ${movesToPrevious ? 'precedente' : 'successiva'}.`,
+    })
+  }
 
-    const neighborIndex =
-      direction === 'firstToPrevious' ? currentInvoiceIndex - 1 : currentInvoiceIndex + 1
-    const neighborInvoice = invoices[neighborIndex]
+  function requestCurrentInvoiceSplit() {
+    if (!currentInvoice) {
+      return
+    }
+    const pageCount = currentInvoice.pageNumbers?.length ?? 0
+    const afterPosition = Math.min(Math.max(splitAfterPosition, 1), pageCount - 1)
+    if (pageCount < 2 || afterPosition < 1) {
+      return
+    }
+    setPendingSegmentationAction({
+      operation: 'split',
+      afterPosition,
+      title: 'Dividi fattura',
+      message: `${currentInvoice.title} verra divisa in due fatture da ${afterPosition} e ${pageCount - afterPosition} pagine. Le fatture successive verranno rinumerate.`,
+    })
+  }
+
+  function confirmSegmentationAction() {
     if (
-      !neighborInvoice ||
-      !currentInvoice.documentId ||
-      !neighborInvoice.documentId ||
-      currentInvoice.documentId !== neighborInvoice.documentId ||
+      !pendingSegmentationAction ||
+      !currentInvoice?.documentId ||
       !currentInvoice.manifestInvoiceId ||
-      !neighborInvoice.manifestInvoiceId
+      !selectedBatch?.base_path
     ) {
       return
     }
 
-    const documentId = currentInvoice.documentId
-    const fromManifestInvoiceId = currentInvoice.manifestInvoiceId
-    const toManifestInvoiceId = neighborInvoice.manifestInvoiceId
-    const pageNumber =
-      direction === 'firstToPrevious' ? pageNumbers[0] : pageNumbers[pageNumbers.length - 1]
-    setInvoiceReviewActionState({
-      kind: 'saving',
-      message: 'Aggiornamento pagine fattura...',
-    })
+    const operation = pendingSegmentationAction.operation
+    const segmentationInvoice = currentInvoice
+    const requestBody =
+      pendingSegmentationAction.operation === 'move_boundary'
+        ? {
+            operation: 'move_boundary',
+            direction: pendingSegmentationAction.direction,
+          }
+        : {
+            operation: 'split',
+            after_position: pendingSegmentationAction.afterPosition,
+          }
+    setPendingSegmentationAction(null)
+    setSegmentationProgressState({ operation, phase: 'saving' })
+    setInvoiceReviewActionState(null)
 
-    fetch(`${registryApiBaseUrl}/viewer/move-page`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        selected_batch_id: selectedBatchId,
-        review_batch_base_path: selectedBatch.base_path,
-        document_id: documentId,
-        from_invoice_id: fromManifestInvoiceId,
-        to_invoice_id: toManifestInvoiceId,
-        page_number: pageNumber,
-      }),
-    })
+    flushReviewDraftSaves()
+      .then(() => {
+        setSegmentationProgressState({ operation, phase: 'reorganizing' })
+        return fetch(`${registryApiBaseUrl}/viewer/segmentation`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            review_batch_base_path: selectedBatch.base_path,
+            document_id: segmentationInvoice.documentId,
+            invoice_id: segmentationInvoice.manifestInvoiceId,
+            ...requestBody,
+          }),
+        })
+      })
       .then(async (response) => {
         const payload = await response.json().catch(() => null)
         if (!response.ok) {
@@ -5371,21 +7247,27 @@ function App() {
         }
         return payload
       })
-      .then(() => {
-        applyBoundaryPageMove(
-          currentInvoice.invoiceId,
-          neighborInvoice.invoiceId,
-          fromManifestInvoiceId,
-          toManifestInvoiceId,
-          pageNumber,
+      .then((payload) => {
+        const affectedDraftIds = (payload.affected_invoice_ids ?? [])
+          .map((invoiceId: string) =>
+            reviewDraftIdForRelatedInvoice(segmentationInvoice, invoiceId),
+          )
+          .filter((draftId: string | null): draftId is string => Boolean(draftId))
+        removeReviewDraftsLocally(affectedDraftIds)
+        setSegmentationProgressState({ operation, phase: 'reloading' })
+        return loadProcessedReviewBatches(
+          payload.selected_batch_id,
+          payload.selected_invoice_id,
         )
+      })
+      .then(() => {
         setSelectedFieldKind(null)
         setActiveSuggestionFieldKind(null)
         setOriginalScanFieldKind(null)
         resetDocumentView()
         setInvoiceReviewActionState({
           kind: 'success',
-          message: 'Pagine fattura aggiornate.',
+          message: 'Segmentazione aggiornata.',
         })
         window.setTimeout(() => {
           setInvoiceReviewActionState((currentState) =>
@@ -5396,86 +7278,15 @@ function App() {
       .catch((error) => {
         setInvoiceReviewActionState({
           kind: 'error',
-          message: `Pagine non aggiornate. ${userErrorMessage(
+          message: `Segmentazione non aggiornata. ${userErrorMessage(
             error,
-            'Non riesco a spostare la pagina richiesta.',
+            'Non riesco a modificare le pagine della fattura.',
           )}`,
         })
       })
-  }
-
-  function applyBoundaryPageMove(
-    fromInvoiceId: string,
-    toInvoiceId: string,
-    fromManifestInvoiceId: string,
-    toManifestInvoiceId: string,
-    pageNumber: number,
-  ) {
-    setInvoices((currentInvoices) =>
-      currentInvoices.map((invoice) => {
-        if (invoice.invoiceId === fromInvoiceId) {
-          const nextPageNumbers = (invoice.pageNumbers ?? []).filter(
-            (currentPageNumber) => currentPageNumber !== pageNumber,
-          )
-          return {
-            ...invoice,
-            pageNumbers: nextPageNumbers,
-            pages: invoice.pages.filter((page) => page.page !== pageNumber),
-          }
-        }
-
-        if (invoice.invoiceId === toInvoiceId) {
-          const movedPage = currentInvoices
-            .find((candidate) => candidate.invoiceId === fromInvoiceId)
-            ?.pages.find((page) => page.page === pageNumber)
-          const nextPageNumbers = sortedUniqueNumbers([
-            ...(invoice.pageNumbers ?? []),
-            pageNumber,
-          ])
-          return {
-            ...invoice,
-            pageNumbers: nextPageNumbers,
-            pages: movedPage
-              ? [...invoice.pages, movedPage].sort((left, right) => left.page - right.page)
-              : invoice.pages,
-          }
-        }
-
-        return invoice
-      }),
-    )
-    setLoadedManifests((currentLoadedManifests) =>
-      currentLoadedManifests.map((entry) => {
-        const manifestInvoices = entry.manifest.invoices
-        if (!manifestInvoices) {
-          return entry
-        }
-
-        return {
-          ...entry,
-          manifest: {
-            ...entry.manifest,
-            invoices: manifestInvoices.map((invoice) => {
-              if (invoice.invoice_id === fromManifestInvoiceId) {
-                return {
-                  ...invoice,
-                  page_numbers: invoice.page_numbers.filter(
-                    (currentPageNumber) => currentPageNumber !== pageNumber,
-                  ),
-                }
-              }
-              if (invoice.invoice_id === toManifestInvoiceId) {
-                return {
-                  ...invoice,
-                  page_numbers: sortedUniqueNumbers([...invoice.page_numbers, pageNumber]),
-                }
-              }
-              return invoice
-            }),
-          },
-        }
-      }),
-    )
+      .finally(() => {
+        setSegmentationProgressState(null)
+      })
   }
 
   function setZoomScale(nextScale: number) {
@@ -5555,6 +7366,7 @@ function App() {
     const evidence = getFieldEvidence(field, currentInvoice)
 
     if (!evidence) {
+      resetDocumentView()
       return
     }
 
@@ -5662,13 +7474,13 @@ function App() {
 
       if (event.ctrlKey && event.key === 'ArrowDown') {
         event.preventDefault()
-        selectInvoiceByOffset(1)
+        selectInvoiceByOffsetRef.current(1)
         return
       }
 
       if (event.ctrlKey && event.key === 'ArrowUp') {
         event.preventDefault()
-        selectInvoiceByOffset(-1)
+        selectInvoiceByOffsetRef.current(-1)
         return
       }
 
@@ -5720,11 +7532,97 @@ function App() {
                 ? 'Archivio PDF'
                 : appView === 'invoiceRegistry'
                   ? 'Registro'
-                  : 'Cronologia'}
+                  : 'Processi'}
             </h2>
             <button className="registry-sidebar-back-button" onClick={closeInvoiceArchive}>
               Torna alle fatture
             </button>
+            {appView === 'archive' ? (
+              <div className="registry-sidebar-view-switch" role="tablist" aria-label="Vista archivio PDF">
+                <button
+                  className={pdfArchiveViewMode === 'invoices' ? 'active' : ''}
+                  onClick={() => {
+                    setSelectedArchiveKeys(new Set())
+                    setFocusedArchiveKey(null)
+                    setPdfArchiveViewMode('invoices')
+                  }}
+                  role="tab"
+                  aria-selected={pdfArchiveViewMode === 'invoices'}
+                >
+                  PDF fatture
+                </button>
+                <button
+                  className={pdfArchiveViewMode === 'sources' ? 'active' : ''}
+                  onClick={() => {
+                    setSelectedArchiveKeys(new Set())
+                    setFocusedArchiveKey(null)
+                    setPdfArchiveViewMode('sources')
+                  }}
+                  role="tab"
+                  aria-selected={pdfArchiveViewMode === 'sources'}
+                >
+                  File origine
+                </button>
+              </div>
+            ) : appView === 'invoiceRegistry' ? (
+              <div className="registry-sidebar-view-switch" role="tablist" aria-label="Vista registro fatture">
+                <button
+                  className={invoiceRegistryViewMode === 'saved' ? 'active' : ''}
+                  onClick={() => {
+                    setInvoiceRegistryViewMode('saved')
+                    setSelectedArchiveKeys(new Set())
+                    setIsInvoiceRegistryEditMode(false)
+                  }}
+                  role="tab"
+                  aria-selected={invoiceRegistryViewMode === 'saved'}
+                >
+                  Fatture da esportare
+                </button>
+                <button
+                  className={invoiceRegistryViewMode === 'exported' ? 'active' : ''}
+                  onClick={() => {
+                    setInvoiceRegistryViewMode('exported')
+                    setSelectedArchiveKeys(new Set())
+                    setIsInvoiceRegistryEditMode(false)
+                  }}
+                  role="tab"
+                  aria-selected={invoiceRegistryViewMode === 'exported'}
+                >
+                  Fatture esportate
+                </button>
+                <button
+                  className={invoiceRegistryViewMode === 'discarded' ? 'active' : ''}
+                  onClick={() => {
+                    setInvoiceRegistryViewMode('discarded')
+                    setSelectedArchiveKeys(new Set())
+                    setIsInvoiceRegistryEditMode(false)
+                  }}
+                  role="tab"
+                  aria-selected={invoiceRegistryViewMode === 'discarded'}
+                >
+                  Fatture scartate
+                </button>
+              </div>
+            ) : (
+              <div className="registry-sidebar-view-switch" role="tablist" aria-label="Vista processi">
+                <button
+                  className={processingViewMode === 'active' ? 'active' : ''}
+                  onClick={() => setProcessingViewMode('active')}
+                  role="tab"
+                  aria-selected={processingViewMode === 'active'}
+                >
+                  In corso
+                </button>
+                <button
+                  className={processingViewMode === 'history' ? 'active' : ''}
+                  onClick={() => setProcessingViewMode('history')}
+                  role="tab"
+                  aria-selected={processingViewMode === 'history'}
+                >
+                  Cronologia
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           <>
@@ -5737,11 +7635,6 @@ function App() {
               {shouldShowPdfImportState ? (
                 <p className={`pdf-import-status ${pdfImportState.kind}`}>
                   {pdfImportState.message}
-                </p>
-              ) : null}
-              {importedBatches.length > 0 ? (
-                <p className="pdf-import-summary">
-                  {importedBatches.length} gruppi PDF caricati
                 </p>
               ) : null}
             </div>
@@ -5803,22 +7696,51 @@ function App() {
               ) : null}
             </div>
             <button className="pdf-import-button" onClick={openProcessingJobsPage}>
-              Cronologia
+              Processi
             </button>
             {batches.length > 0 ? (
-              <label className="batch-select">
-                <span>Da revisionare:</span>
-                <select
-                  value={selectedBatchId ?? ''}
-                  onChange={(event) => selectBatch(event.target.value)}
-                >
-                  {batches.map((batch) => (
-                    <option key={batch.id} value={batch.id}>
-                      {reviewBatchDisplayLabel(batch.label)}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <div className="batch-select-row">
+                <label className="batch-select">
+                  <span>Da revisionare:</span>
+                  <select
+                    value={selectedBatchId ?? ''}
+                    onChange={(event) => selectBatch(event.target.value)}
+                  >
+                    {batches.map((batch) => (
+                      <option key={batch.base_path} value={batch.base_path}>
+                        {reviewBatchDisplayLabel(batch.label)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="review-actions-menu-wrap">
+                  <button
+                    type="button"
+                    className="review-actions-menu-button"
+                    aria-label="Azioni revisioni"
+                    title="Azioni revisioni"
+                    onClick={toggleReviewActionsMenu}
+                  >
+                    ...
+                  </button>
+                  {isReviewActionsMenuOpen ? (
+                    <div
+                      className="review-actions-menu"
+                      role="menu"
+                      style={reviewActionsMenuPosition ?? undefined}
+                    >
+                      <button
+                        type="button"
+                        className="review-actions-menu-danger"
+                        onClick={requestClearReviewBatches}
+                        role="menuitem"
+                      >
+                        Elimina tutte le revisioni
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
             ) : null}
             <div className="page-list">
               {invoices.length > 0 ? (
@@ -5857,7 +7779,7 @@ function App() {
                     invoiceReviewActionState?.kind === 'discarding'
                   }
                 >
-                  Elimina gruppo
+                  Scarta gruppo
                 </button>
                 {!canPersistCurrentBatch ? (
                   <p className="batch-review-actions-note">
@@ -6005,6 +7927,7 @@ function App() {
           ) : null}
           {registryCleaningReport ? (
             <RegistryCleaningReportDialog
+              key={`${registryCleaningReportMode}-${registryCleaningReport.groups.map((group) => group.group_key).join('|')}`}
               report={registryCleaningReport}
               mode={registryCleaningReportMode}
               isRunning={isRegistryCleaningRunning}
@@ -6016,54 +7939,86 @@ function App() {
           ) : null}
         </section>
       ) : appView === 'archive' ? (
-        <section className="registry-page archive-page">
+        <section className="registry-page archive-page pdf-archive-page">
           <header>
             <div>
               <h1>Archivio PDF</h1>
               <p>
                 {pdfArchiveViewMode === 'invoices'
-                  ? `${filteredInvoiceArchiveRecords.length} PDF fatture salvate`
-                  : `${uniqueArchivedSourceRecords(filteredInvoiceArchiveRecords).length} file origine archiviati`}
+                  ? `${filteredInvoiceArchiveRecords.length} PDF fatture archiviate`
+                  : `${filteredSourceArchiveRecords.length} file origine archiviati`}
               </p>
             </div>
-            <div className="archive-search">
-              <input
-                value={invoiceArchiveSearch}
-                placeholder="Cerca PDF, origine, emittente"
-                onChange={(event) => setInvoiceArchiveSearch(event.target.value)}
-              />
-            </div>
-            <div className="registry-page-actions">
-              <div className="archive-view-switch" role="tablist" aria-label="Vista archivio PDF">
-                <button
-                  className={pdfArchiveViewMode === 'invoices' ? 'active' : ''}
-                  onClick={() => setPdfArchiveViewMode('invoices')}
-                  role="tab"
-                  aria-selected={pdfArchiveViewMode === 'invoices'}
-                >
-                  PDF fatture
-                </button>
-                <button
-                  className={pdfArchiveViewMode === 'sources' ? 'active' : ''}
-                  onClick={() => setPdfArchiveViewMode('sources')}
-                  role="tab"
-                  aria-selected={pdfArchiveViewMode === 'sources'}
-                >
-                  File origine
-                </button>
+            <div className="registry-page-actions pdf-archive-page-actions">
+              <div className="archive-search">
+                <input
+                  value={invoiceArchiveSearch}
+                  placeholder={
+                    pdfArchiveViewMode === 'invoices'
+                      ? 'Cerca emittente, condominio, numero'
+                      : 'Cerca file origine'
+                  }
+                  onChange={(event) => setInvoiceArchiveSearch(event.target.value)}
+                />
               </div>
-              <button onClick={loadInvoiceArchive}>Aggiorna</button>
+              <button
+                type="button"
+                onClick={
+                  pdfArchiveViewMode === 'sources'
+                    ? requestReprocessSelectedArchivedSources
+                    : requestReprocessSelectedArchivedInvoices
+                }
+                disabled={selectedArchiveKeys.size === 0}
+              >
+                Riprocessa
+              </button>
+              <button
+                type="button"
+                className="archive-trash-button"
+                onClick={() =>
+                  requestDeleteSelectedArchives(
+                    pdfArchiveViewMode === 'sources' ? 'source' : 'invoice',
+                  )
+                }
+                disabled={selectedArchiveKeys.size === 0}
+                aria-label="Elimina elementi selezionati"
+                title="Elimina elementi selezionati"
+              >
+                <TrashIcon />
+              </button>
             </div>
           </header>
           {invoiceArchiveError ? (
             <p className="registry-page-message">{invoiceArchiveError}</p>
           ) : pdfArchiveViewMode === 'sources' ? (
             <SourcePdfArchiveTable
-              records={filteredInvoiceArchiveRecords}
-              onReprocessSource={reprocessArchivedSource}
+              records={filteredSourceArchiveRecords}
+              selectedKeys={selectedArchiveKeys}
+              focusedKey={focusedArchiveKey}
+              onToggle={(record) =>
+                toggleArchiveSelection(record.source_id)
+              }
+              onToggleAll={() =>
+                toggleAllArchiveSelections(
+                  filteredSourceArchiveRecords.map((record) => record.source_id),
+                )
+              }
             />
           ) : (
-            <InvoicePdfArchiveTable records={filteredInvoiceArchiveRecords} />
+            <InvoicePdfArchiveTable
+              records={filteredInvoiceArchiveRecords}
+              selectedKeys={selectedArchiveKeys}
+              focusedKey={focusedArchiveKey}
+              onGoToSource={(record) =>
+                navigateToArchiveReference({ record, kind: 'source', error: null })
+              }
+              onToggle={(record) => toggleArchiveSelection(record.record_id)}
+              onToggleAll={() =>
+                toggleAllArchiveSelections(
+                  filteredInvoiceArchiveRecords.map((record) => record.record_id),
+                )
+              }
+            />
           )}
         </section>
       ) : appView === 'invoiceRegistry' ? (
@@ -6072,9 +8027,14 @@ function App() {
             <div>
               <h1>Registro fatture</h1>
               <p>
-                {filteredInvoiceRegistryRecords.length} righe
+                {filteredInvoiceRegistryRecords.length}{' '}
+                {invoiceRegistryViewMode === 'saved'
+                  ? 'fatture da esportare'
+                  : invoiceRegistryViewMode === 'exported'
+                    ? 'fatture esportate'
+                    : 'fatture scartate'}
                 {invoiceArchiveSearch.trim()
-                  ? ` / ${invoiceArchiveRecords.filter((record) => record.status === 'saved').length} totali`
+                  ? ` / ${invoiceRegistryViewMode === 'exported' ? 0 : invoiceArchiveRecords.filter((record) => record.status === invoiceRegistryViewMode && record.registry_visible !== false).length} totali`
                   : ''}
               </p>
               {invoiceRegistrySaveStatus ? (
@@ -6088,70 +8048,8 @@ function App() {
                 </div>
               ) : null}
             </div>
-            <div className="archive-search">
-              <input
-                value={invoiceArchiveSearch}
-                placeholder="Cerca emittente, condominio, numero, totale"
-                onChange={(event) => setInvoiceArchiveSearch(event.target.value)}
-              />
-            </div>
-            <div className="registry-page-actions">
-              {isInvoiceRegistryEditMode ? (
-                <>
-                  <button
-                    className="registry-save-button"
-                    onClick={saveInvoiceRegistryDraft}
-                    disabled={invoiceRegistrySaveStatus?.includes('corso')}
-                  >
-                    Salva
-                  </button>
-                  <button onClick={cancelInvoiceRegistryEdit}>Annulla</button>
-                </>
-              ) : (
-                <button onClick={startInvoiceRegistryEdit}>Modifica</button>
-              )}
-              <button
-                className="registry-download-button"
-                onClick={downloadInvoiceArchiveExcel}
-                aria-label="Esporta registro fatture in Excel"
-                title="Esporta registro fatture in Excel"
-                disabled={
-                  invoiceArchiveRecords.filter((record) => record.status === 'saved')
-                    .length === 0
-                }
-              >
-                <DownloadIcon />
-              </button>
-              <button onClick={loadInvoiceArchive}>Aggiorna</button>
-            </div>
-          </header>
-          <div className="archive-filter-bar invoice-registry-filter-bar">
-            <label>
-              <span>Emittente</span>
-              <input
-                value={invoiceArchiveFilters.issuer}
-                onChange={(event) =>
-                  setInvoiceArchiveFilters((currentFilters) => ({
-                    ...currentFilters,
-                    issuer: event.target.value,
-                  }))
-                }
-              />
-            </label>
-            <label>
-              <span>Condominio</span>
-              <input
-                value={invoiceArchiveFilters.condominium}
-                onChange={(event) =>
-                  setInvoiceArchiveFilters((currentFilters) => ({
-                    ...currentFilters,
-                    condominium: event.target.value,
-                  }))
-                }
-              />
-            </label>
-            <label>
-              <span>Da data</span>
+            <label className="invoice-registry-toolbar-control">
+              <span>Da</span>
               <input
                 type="date"
                 value={invoiceArchiveFilters.dateFrom}
@@ -6163,8 +8061,8 @@ function App() {
                 }
               />
             </label>
-            <label>
-              <span>A data</span>
+            <label className="invoice-registry-toolbar-control">
+              <span>A</span>
               <input
                 type="date"
                 value={invoiceArchiveFilters.dateTo}
@@ -6176,7 +8074,7 @@ function App() {
                 }
               />
             </label>
-            <label>
+            <label className="invoice-registry-toolbar-control invoice-registry-sort-control">
               <span>Ordina</span>
               <select
                 value={invoiceArchiveSortKey}
@@ -6184,8 +8082,20 @@ function App() {
                   setInvoiceArchiveSortKey(event.target.value as InvoiceArchiveSortKey)
                 }
               >
-                <option value="saved_at_desc">Salvataggio recente</option>
-                <option value="saved_at_asc">Salvataggio meno recente</option>
+                <option value="saved_at_desc">
+                  {invoiceRegistryViewMode === 'saved'
+                    ? 'Salvataggio recente'
+                    : invoiceRegistryViewMode === 'exported'
+                      ? 'Esportazione recente'
+                      : 'Scarto recente'}
+                </option>
+                <option value="saved_at_asc">
+                  {invoiceRegistryViewMode === 'saved'
+                    ? 'Salvataggio meno recente'
+                    : invoiceRegistryViewMode === 'exported'
+                      ? 'Esportazione meno recente'
+                      : 'Scarto meno recente'}
+                </option>
                 <option value="data_fattura_desc">Data fattura decrescente</option>
                 <option value="data_fattura_asc">Data fattura crescente</option>
                 <option value="emittente_asc">Emittente A-Z</option>
@@ -6194,28 +8104,81 @@ function App() {
                 <option value="totale_asc">Totale crescente</option>
               </select>
             </label>
-            <button
-              onClick={() => {
-                setInvoiceArchiveSearch('')
-                setInvoiceArchiveFilters({
-                  issuer: '',
-                  condominium: '',
-                  dateFrom: '',
-                  dateTo: '',
-                })
-                setInvoiceArchiveSortKey('saved_at_desc')
-              }}
-            >
-              Pulisci filtri
-            </button>
-          </div>
+            <div className="archive-search">
+              <input
+                value={invoiceArchiveSearch}
+                placeholder="Cerca emittente, condominio, numero, totale"
+                onChange={(event) => setInvoiceArchiveSearch(event.target.value)}
+              />
+            </div>
+            <div className="registry-page-actions">
+              {invoiceRegistryViewMode === 'saved' && isInvoiceRegistryEditMode ? (
+                <>
+                  <button
+                    className="registry-save-button"
+                    onClick={saveInvoiceRegistryDraft}
+                    disabled={invoiceRegistrySaveStatus?.includes('corso')}
+                  >
+                    Salva
+                  </button>
+                  <button onClick={cancelInvoiceRegistryEdit}>Annulla</button>
+                </>
+              ) : invoiceRegistryViewMode === 'saved' ? (
+                <button onClick={startInvoiceRegistryEdit}>Modifica</button>
+              ) : null}
+              {invoiceRegistryViewMode === 'saved' ? (
+                <button
+                  className="registry-download-button"
+                  onClick={downloadInvoiceArchiveExcel}
+                  aria-label="Esporta registro fatture in Excel"
+                  title="Esporta registro fatture in Excel"
+                  disabled={
+                    invoiceArchiveRecords.filter(
+                      (record) =>
+                        record.status === 'saved' && record.registry_visible !== false,
+                    ).length === 0
+                  }
+                >
+                  <DownloadIcon />
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={requestReprocessSelectedArchivedInvoices}
+                disabled={selectedArchiveKeys.size === 0}
+              >
+                Riprocessa
+              </button>
+              <button
+                type="button"
+                className="archive-trash-button"
+                onClick={() => requestDeleteSelectedArchives('registry')}
+                disabled={selectedArchiveKeys.size === 0}
+                aria-label="Elimina righe selezionate"
+                title="Elimina righe selezionate"
+              >
+                <TrashIcon />
+              </button>
+            </div>
+          </header>
           {invoiceArchiveError ? (
             <p className="registry-page-message">{invoiceArchiveError}</p>
           ) : (
             <InvoiceRegistryTable
               records={filteredInvoiceRegistryRecords}
-              isEditMode={isInvoiceRegistryEditMode}
+              viewMode={invoiceRegistryViewMode}
+              isEditMode={
+                invoiceRegistryViewMode === 'saved' && isInvoiceRegistryEditMode
+              }
               onUpdateRecordField={updateInvoiceRegistryDraftField}
+              selectedKeys={selectedArchiveKeys}
+              onToggle={(record) => toggleArchiveSelection(record.record_id)}
+              onToggleAll={() =>
+                toggleAllArchiveSelections(
+                  filteredInvoiceRegistryRecords.map((record) => record.record_id),
+                )
+              }
+              onOpenArchiveReference={requestArchiveReference}
             />
           )}
         </section>
@@ -6223,149 +8186,170 @@ function App() {
         <section className="registry-page archive-page processing-page">
           <header>
             <div>
-              <h1>Cronologia</h1>
-              <p>{processingJobs.length} lavorazioni registrate</p>
+              <h1>Processi</h1>
+              <p>
+                {processingViewMode === 'active'
+                  ? `${activeProcessingJobs.length} in corso o in coda`
+                  : `${processingHistoryJobs.length} processi conclusi`}
+              </p>
             </div>
+            {processingViewMode === 'history' ? (
+              <div className="registry-page-actions processing-page-actions">
+                <button
+                  type="button"
+                  className="archive-trash-button"
+                  onClick={() => setIsProcessingHistoryDeleteConfirmOpen(true)}
+                  disabled={selectedProcessingHistoryIds.size === 0}
+                  aria-label="Elimina processi selezionati"
+                  title="Elimina processi selezionati"
+                >
+                  <TrashIcon />
+                </button>
+              </div>
+            ) : null}
           </header>
-          <div className="processing-jobs-list">
-            {processingJobs.length > 0 ? (
-              processingJobs.map((job) => {
-                const batch = importedBatches.find(
-                  (candidate) => candidate.batch_id === job.batch_id,
-                )
-                const canPauseJob =
-                  (job.status === 'queued' || job.status === 'processing') &&
-                  !isProcessingCancellationPending(job) &&
-                  !isProcessingPausePending(job)
-                const canResumeJob = job.status === 'paused'
-                const canRemoveJob = job.status === 'queued' || job.status === 'paused'
-                const canCancelJob = job.status === 'processing' || job.status === 'paused'
-                const canReprocessBatch =
-                  Boolean(batch) &&
-                  !canPauseJob &&
-                  !canResumeJob &&
-                  !canRemoveJob &&
-                  !canCancelJob
-                const isCancellationPending = isProcessingCancellationPending(job)
-                const isPausePending = isProcessingPausePending(job)
-                return (
-                  <article className="processing-job-card" key={job.job_id}>
-                    <div className="processing-job-card-header">
-                      <div>
-                        <strong>{batch?.label ?? job.batch_id}</strong>
-                        <small>Origine: {batch?.source_label ?? batch?.label ?? job.batch_id}</small>
+          <div className="processing-page-content">
+            {processingViewMode === 'history' && processingHistoryJobs.length > 0 ? (
+              <label className="processing-history-select-all">
+                <input
+                  type="checkbox"
+                  checked={processingHistoryJobs.every((job) =>
+                    selectedProcessingHistoryIds.has(job.job_id),
+                  )}
+                  onChange={toggleAllProcessingHistory}
+                />
+                Seleziona tutta la cronologia
+              </label>
+            ) : null}
+            <div className="processing-jobs-list">
+              {(processingViewMode === 'active' ? activeProcessingJobs : processingHistoryJobs).length > 0 ? (
+                (processingViewMode === 'active' ? activeProcessingJobs : processingHistoryJobs).map((job) => {
+                  const canRemoveJob = job.status === 'queued'
+                  const canCancelJob = job.status === 'processing'
+                  const isCancellationPending = isProcessingCancellationPending(job)
+                  return (
+                    <article
+                      className={`processing-job-card ${processingViewMode}`}
+                      key={job.job_id}
+                    >
+                      {processingViewMode === 'history' ? (
+                        <input
+                          className="processing-history-checkbox"
+                          type="checkbox"
+                          checked={selectedProcessingHistoryIds.has(job.job_id)}
+                          onChange={() => toggleProcessingHistorySelection(job.job_id)}
+                          aria-label="Seleziona processo"
+                        />
+                      ) : null}
+                      <div className="processing-job-card-header">
+                        <strong>{job.files?.length ?? job.progress_total ?? 0} PDF</strong>
+                        <small>
+                          {processingViewMode === 'history'
+                            ? formatProcessingDateTime(job.created_at)
+                            : processingJobDetailMessage(job)}
+                        </small>
                       </div>
                       <span className={`processing-status-pill ${job.status}`}>
                         {sourceArchiveProcessingStatusLabel(job)}
                       </span>
-                    </div>
-                    <div className="processing-job-card-body">
-                      <div className="processing-progress-summary">
-                        <span>
-                          {job.progress_current ?? 0} / {job.progress_total ?? 0}
-                        </span>
-                      </div>
+                      {processingViewMode === 'active' ? (
+                        <div className="processing-progress-summary">
+                          <span>
+                            {job.progress_current ?? 0} / {job.progress_total ?? 0}
+                          </span>
+                        </div>
+                      ) : null}
                       <div className="processing-job-details">
-                        <p>{processingJobDetailMessage(job)}</p>
+                        <small>Provenienza: {processingSourceKindLabel(job)}</small>
                         {processingJobTimeMessage(job) ? (
                           <small>{processingJobTimeMessage(job)}</small>
                         ) : null}
                       </div>
-                    </div>
-                    {isCancellationPending ? (
-                      <div className="processing-cancel-progress">
-                        <span>Annullamento in corso...</span>
-                        <div aria-hidden="true">
-                          <i />
-                        </div>
+                      <div className="processing-job-card-actions">
+                        <button
+                          className="processing-info-button"
+                          onClick={() => setProcessingJobInfo(job)}
+                          aria-label="Mostra file del processo"
+                          title="Mostra file del processo"
+                        >
+                          i
+                        </button>
+                        {canRemoveJob ? (
+                          <button
+                            className="imported-batch-process-button secondary-action"
+                            onClick={() => requestRemoveProcessingJobFromQueue(job.job_id)}
+                          >
+                            Rimuovi dalla coda
+                          </button>
+                        ) : null}
+                        {canCancelJob && !isCancellationPending ? (
+                          <button
+                            className="imported-batch-cancel-button"
+                            onClick={() => requestCancelProcessing(job.job_id)}
+                          >
+                            Annulla
+                          </button>
+                        ) : null}
                       </div>
-                    ) : null}
-                    {isPausePending ? (
-                      <div className="processing-cancel-progress processing-pause-progress">
-                        <span>Pausa richiesta...</span>
-                        <div aria-hidden="true">
-                          <i />
+                      {isCancellationPending ? (
+                        <div className="processing-cancel-progress">
+                          <span>Annullamento in corso...</span>
+                          <div aria-hidden="true">
+                            <i />
+                          </div>
                         </div>
-                      </div>
-                    ) : null}
-                    <div className="processing-job-card-actions">
-                      {canReprocessBatch ? (
-                        <button
-                          className="imported-batch-process-button secondary-action"
-                          onClick={() => processImportedBatch(job.batch_id)}
-                        >
-                          Riprocessa gruppo
-                        </button>
                       ) : null}
-                      {canPauseJob ? (
-                        <button
-                          className="imported-batch-process-button secondary-action"
-                          onClick={() => pauseProcessingJob(job.job_id)}
-                        >
-                          Pausa
-                        </button>
-                      ) : null}
-                      {canResumeJob ? (
-                        <button
-                          className="imported-batch-process-button secondary-action"
-                          onClick={() => resumeProcessingJob(job.job_id)}
-                        >
-                          Riprendi
-                        </button>
-                      ) : null}
-                      {canRemoveJob ? (
-                        <button
-                          className="imported-batch-process-button secondary-action"
-                          onClick={() => requestRemoveProcessingJobFromQueue(job.job_id)}
-                        >
-                          Rimuovi dalla coda
-                        </button>
-                      ) : null}
-                      {canCancelJob && !isCancellationPending ? (
-                        <button
-                          className="imported-batch-cancel-button"
-                          onClick={() => requestCancelProcessing(job.job_id)}
-                        >
-                          Annulla
-                        </button>
-                      ) : null}
-                    </div>
-                  </article>
-                )
-              })
-            ) : (
-              <div className="registry-empty-state">
-                <h2>Nessuna cronologia</h2>
-                <p>Le lavorazioni compariranno qui dopo l'avvio dall'archivio sorgenti.</p>
-              </div>
-            )}
+                    </article>
+                  )
+                })
+              ) : (
+                <div className="registry-empty-state">
+                  <h2>{processingViewMode === 'active' ? 'Nessun processo attivo' : 'Nessuna cronologia'}</h2>
+                  <p>
+                    {processingViewMode === 'active'
+                      ? 'I processi avviati o in attesa compariranno qui.'
+                      : 'I processi conclusi compariranno qui.'}
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         </section>
       ) : (
       <section className="document-panel">
         <header>
-          <div>
+          <div className="document-context">
             <h1>{currentInvoice?.title ?? 'Nessuna fattura selezionata'}</h1>
-            <p>
-              File origine:{' '}
-              {fileNameFromPath(
-                currentInvoice?.sourceFile ?? manifestSourceFile,
-              ) ?? 'non disponibile'}
-            </p>
-            <p>
-              OCR: {manifestError ?? formatOcrDisplay(currentInvoice)}
-              {currentInvoice?.fallbackOcrEventCount
-                ? ` / fallback ${currentInvoice.fallbackOcrEventCount}`
-                : ''}
-            </p>
+            <div className="document-metadata">
+              <p
+                className="document-source-file"
+                title={
+                  fileNameFromPath(
+                    currentInvoice?.sourceFile ?? manifestSourceFile,
+                  ) ?? 'non disponibile'
+                }
+              >
+                <span>File origine:</span>
+                <strong>
+                  {fileNameFromPath(
+                    currentInvoice?.sourceFile ?? manifestSourceFile,
+                  ) ?? 'non disponibile'}
+                </strong>
+              </p>
+            </div>
             {currentInvoice ? (() => {
               const firstToPreviousState =
-                currentInvoiceBoundaryPageMoveState('firstToPrevious')
-              const lastToNextState = currentInvoiceBoundaryPageMoveState('lastToNext')
+                currentInvoiceBoundaryPageMoveState('first_to_previous')
+              const lastToNextState = currentInvoiceBoundaryPageMoveState('last_to_next')
               const disabledReason =
                 !firstToPreviousState.enabled && !lastToNextState.enabled
                   ? firstToPreviousState.reason
                   : ''
+              const pageCount = currentInvoice.pageNumbers?.length ?? 0
+              const safeSplitPosition = Math.min(
+                Math.max(splitAfterPosition, 1),
+                Math.max(pageCount - 1, 1),
+              )
 
               return (
                 <details className="invoice-page-reorder-menu">
@@ -6373,7 +8357,7 @@ function App() {
                   <div className="invoice-page-boundary-actions">
                     <button
                       type="button"
-                      onClick={() => moveCurrentInvoiceBoundaryPage('firstToPrevious')}
+                      onClick={() => requestCurrentInvoiceBoundaryMove('first_to_previous')}
                       disabled={!firstToPreviousState.enabled}
                       title={
                         firstToPreviousState.enabled
@@ -6385,7 +8369,7 @@ function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => moveCurrentInvoiceBoundaryPage('lastToNext')}
+                      onClick={() => requestCurrentInvoiceBoundaryMove('last_to_next')}
                       disabled={!lastToNextState.enabled}
                       title={
                         lastToNextState.enabled
@@ -6400,6 +8384,34 @@ function App() {
                         {disabledReason}
                       </p>
                     ) : null}
+                    <div className="invoice-page-split-actions">
+                      <label>
+                        Dividi dopo la pagina
+                        <input
+                          type="number"
+                          min={1}
+                          max={Math.max(pageCount - 1, 1)}
+                          value={safeSplitPosition}
+                          disabled={pageCount < 2}
+                          onChange={(event) =>
+                            setSplitAfterPosition(Number(event.target.value))
+                          }
+                          aria-label="Pagina dopo cui dividere la fattura"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={requestCurrentInvoiceSplit}
+                        disabled={pageCount < 2}
+                      >
+                        Dividi fattura
+                      </button>
+                      {pageCount < 2 ? (
+                        <p className="invoice-page-boundary-disabled-reason">
+                          Servono almeno due pagine per dividere la fattura.
+                        </p>
+                      ) : null}
+                    </div>
                   </div>
                 </details>
               )
@@ -6411,63 +8423,115 @@ function App() {
             <button className="registry-import-button" onClick={openRegistryPreview}>
               Anagrafica clienti
             </button>
-            <button onClick={zoomOut}>-</button>
-            <label>
-              <input
-                type="number"
-                min="35"
-                max="150"
-                step="5"
-                value={zoomInput}
-                onChange={(event) => setZoomInput(event.target.value)}
-                onBlur={applyZoomInput}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    applyZoomInput()
-                    event.currentTarget.blur()
-                  }
-                }}
+            <div className="zoom-stepper" aria-label="Controlli zoom">
+              <button
+                className="zoom-out-button"
+                onClick={zoomOut}
+                aria-label="Riduci zoom"
+                title="Riduci zoom"
               />
-              %
-            </label>
-            <button onClick={zoomIn}>+</button>
-            <button onClick={resetDocumentView}>Ripristina</button>
-            <label className="checkbox-control">
-              <input
-                type="checkbox"
-                checked={showTokenBoxes}
-                onChange={(event) => setShowTokenBoxes(event.target.checked)}
-              />
-              Parole
-            </label>
-            <label className="checkbox-control">
-              <input
-                type="checkbox"
-                checked={showCropBoxes}
-                onChange={(event) => setShowCropBoxes(event.target.checked)}
-              />
-              Ritagli
-            </label>
-            <label className="checkbox-control">
-              <input
-                type="checkbox"
-                checked={showTableBoxes}
-                onChange={(event) => setShowTableBoxes(event.target.checked)}
-              />
-              Tabelle
-            </label>
-            <label className="checkbox-control">
-              <input
-                type="checkbox"
-                checked={showBoxLabels}
-                onChange={(event) => setShowBoxLabels(event.target.checked)}
-              />
-              Etichette
-            </label>
+              <label>
+                <input
+                  type="number"
+                  min="35"
+                  max="150"
+                  step="5"
+                  value={zoomInput}
+                  aria-label="Percentuale zoom"
+                  onChange={(event) => setZoomInput(event.target.value)}
+                  onBlur={applyZoomInput}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      applyZoomInput()
+                      event.currentTarget.blur()
+                    }
+                  }}
+                />
+                %
+              </label>
+              <button onClick={zoomIn} aria-label="Aumenta zoom" title="Aumenta zoom">
+                +
+              </button>
+            </div>
+            <button className="document-reset-button" onClick={resetDocumentView}>
+              Ripristina
+            </button>
+            <div className="developer-tools" ref={developerMenuRef}>
+              <button
+                type="button"
+                className="developer-tools-trigger"
+                aria-controls="developer-tools-panel"
+                aria-expanded={isDeveloperMenuOpen}
+                onClick={() => setIsDeveloperMenuOpen((isOpen) => !isOpen)}
+              >
+                Area sviluppatore
+              </button>
+              {isDeveloperMenuOpen ? (
+                <div
+                  id="developer-tools-panel"
+                  className="developer-tools-menu"
+                  role="region"
+                  aria-label="Area sviluppatore"
+                >
+                  <p className="developer-tools-section-label">Visualizzazione OCR</p>
+                  <div className="developer-overlay-options">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={showTokenBoxes}
+                        onChange={(event) => setShowTokenBoxes(event.target.checked)}
+                      />
+                      <span>Parole</span>
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={showCropBoxes}
+                        onChange={(event) => setShowCropBoxes(event.target.checked)}
+                      />
+                      <span>Ritagli</span>
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={showTableBoxes}
+                        onChange={(event) => setShowTableBoxes(event.target.checked)}
+                      />
+                      <span>Tabelle</span>
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={showBoxLabels}
+                        onChange={(event) => setShowBoxLabels(event.target.checked)}
+                      />
+                      <span>Etichette</span>
+                    </label>
+                  </div>
+                  <div className="developer-export-section">
+                    <p className="developer-tools-section-label">
+                      Dati per lo sviluppatore
+                    </p>
+                    <button
+                      type="button"
+                      className="developer-export-button"
+                      onClick={requestFeedbackExport}
+                    >
+                      Esporta dati per miglioramento
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           </div>
         </header>
 
         <div className="document-viewport" ref={documentViewportRef}>
+          {manifestError && !currentInvoice ? (
+            <div className="document-empty-message" role="status">
+              {manifestError}
+            </div>
+          ) : null}
           {(currentInvoice?.pages ?? []).map((page) => (
             <article
               className="document-page"
@@ -6621,7 +8685,7 @@ function App() {
       </section>
       )}
 
-      <aside className="invoice-fields-panel">
+      <aside ref={invoiceFieldsPanelRef} className="invoice-fields-panel">
         <div className="fields-header">
           <h2>Campi fattura</h2>
           <label className="checkbox-control">
@@ -6678,13 +8742,14 @@ function App() {
                 ? registryConflictKey(selectedInvoiceId, field.kind)
                 : null
               const needsOriginalScanReview =
-                Boolean(field.registry_replaced_value) &&
+                fieldNeedsRegistryReplacementReview(field) &&
                 Boolean(originalScanReviewKey) &&
                 !reviewedOriginalScanFields[originalScanReviewKey as string]
-              const fieldSuggestions = getFieldSuggestions(
+              const fieldSuggestions = getOrderedFieldSuggestions(
                 suggestionIndex,
-                field.kind,
-                field.value,
+                registryPreviewRecords,
+                currentInvoice,
+                field,
               )
               const canOpenRegistryRecord =
                 field.registry_id &&
@@ -6718,6 +8783,10 @@ function App() {
                       highlightedSuggestionIndex,
                       Math.max(0, activeChoiceCount - 1),
                     )
+              const hasInvalidMoney = isInvalidMoneyField(
+                field.kind,
+                field.value,
+              )
 
               return (
                 <li
@@ -6729,6 +8798,7 @@ function App() {
                     needsOriginalScanReview ? 'original-scan-review-needed-field' : '',
                     fieldConflict ? 'registry-conflict-field' : '',
                     isViewingOriginalScan ? 'original-scan-view-field' : '',
+                    hasInvalidMoney ? 'invalid-money-field' : '',
                   ]
                     .filter(Boolean)
                     .join(' ')}
@@ -6772,7 +8842,16 @@ function App() {
                         className="field-original-scan-button"
                         type="button"
                         aria-pressed={isViewingOriginalScan}
-                        title={`Valore letto dalla scan: ${field.registry_replaced_value}`}
+                        aria-label={
+                          isViewingOriginalScan
+                            ? 'Torna al valore anagrafica'
+                            : 'Mostra il valore letto dalla fattura'
+                        }
+                        title={
+                          isViewingOriginalScan
+                            ? 'Torna al valore anagrafica'
+                            : `Mostra il valore letto dalla fattura: ${field.registry_replaced_value}`
+                        }
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={(event) => {
                           event.preventDefault()
@@ -6780,7 +8859,7 @@ function App() {
                           showOriginalScanField(field)
                         }}
                       >
-                        <EyeIcon />
+                        {isViewingOriginalScan ? <EyeIcon /> : <EyeClosedIcon />}
                       </button>
                     ) : null}
                     {fieldConflict ? (
@@ -6820,12 +8899,15 @@ function App() {
                             updateFieldValue(field.kind, event.target.value)
                           }
                           onBlur={(event) => {
-                            const normalizedValue = normalizeDateFieldValue(
+                            const normalizedValue = normalizeInvoiceFieldValue(
                               field.kind,
                               event.currentTarget.value,
                             )
                             applyExactRegistryFieldMatch(field.kind, normalizedValue)
                             setActiveSuggestionFieldKind(null)
+                            window.setTimeout(() => {
+                              void flushReviewDraftSaves().catch(() => undefined)
+                            }, 0)
                           }}
                           onKeyDown={(event) => {
                             const hasOpenChoices = isSuggestionOpen || isConflictOpen
@@ -6893,7 +8975,7 @@ function App() {
                               return
                             }
                             if (event.key === 'Enter') {
-                              const normalizedValue = normalizeDateFieldValue(
+                              const normalizedValue = normalizeInvoiceFieldValue(
                                 field.kind,
                                 event.currentTarget.value,
                               )
@@ -6922,20 +9004,45 @@ function App() {
                         <div className="field-suggestions" role="listbox">
                           {fieldSuggestions.map((suggestion, suggestionIndex) => (
                             <button
-                              key={`${field.kind}-${suggestion.value}`}
+                              key={
+                                suggestion.registryRecord
+                                  ? `${field.kind}-${registryRecordKey(suggestion.registryRecord)}`
+                                  : `${field.kind}-${suggestion.value}`
+                              }
                               type="button"
-                              className={
+                              className={[
                                 suggestionIndex === safeHighlightedSuggestionIndex
                                   ? 'active'
-                                  : ''
-                              }
+                                  : '',
+                                suggestion.registryRecord ? 'registry-row-suggestion' : '',
+                              ]
+                                .filter(Boolean)
+                                .join(' ')}
                               onMouseDown={(event) => {
                                 event.preventDefault()
                                 acceptFieldSuggestion(field.kind, suggestion)
                               }}
                             >
-                              <span>{suggestion.value}</span>
-                              <small>{suggestion.count}x</small>
+                              {suggestion.registryRecord ? (
+                                <>
+                                  <span className="registry-conflict-option-name">
+                                    {suggestion.registryRecord.nominativo || '-'}
+                                  </span>
+                                  <span className="registry-conflict-option-type">
+                                    {suggestion.registryRecord.tipologia || '-'}
+                                  </span>
+                                  <small>
+                                    Riga {suggestion.registryRecord.source_row} / C.F.{' '}
+                                    {suggestion.registryRecord.codice_fiscale ?? '-'} / P.IVA{' '}
+                                    {suggestion.registryRecord.partita_iva ?? '-'}
+                                  </small>
+                                </>
+                              ) : (
+                                <>
+                                  <span>{suggestion.value}</span>
+                                  <small>{suggestion.count}x</small>
+                                </>
+                              )}
                             </button>
                           ))}
                         </div>
@@ -6960,7 +9067,12 @@ function App() {
                                 setActiveSuggestionFieldKind(null)
                               }}
                             >
-                              <span>{option.nominativo}</span>
+                              <span className="registry-conflict-option-name">
+                                {option.nominativo || '-'}
+                              </span>
+                              <span className="registry-conflict-option-type">
+                                {option.tipologia || '-'}
+                              </span>
                               <small>
                                 Riga {option.source_row} / C.F.{' '}
                                 {option.codice_fiscale ?? '-'} / P.IVA{' '}
@@ -6997,6 +9109,14 @@ function App() {
           onAddRegistryRecord={addValidationRegistryRecord}
         />
       ) : null}
+      {pendingInvoiceRegistrySaveValidation ? (
+        <InvoiceSaveValidationDialog
+          validation={pendingInvoiceRegistrySaveValidation}
+          onCancel={() => setPendingInvoiceRegistrySaveValidation(null)}
+          onContinue={continueInvoiceRegistrySaveAfterValidation}
+          onAddRegistryRecord={() => undefined}
+        />
+      ) : null}
       {pendingBatchReviewAction ? (
         <BatchReviewActionConfirmDialog
           {...pendingBatchReviewAction}
@@ -7023,20 +9143,76 @@ function App() {
           onConfirm={confirmRemoveProcessingJobFromQueue}
         />
       ) : null}
-      {batchToDelete ? (
-        <ImportedBatchDeleteConfirmDialog
-          batch={batchToDelete}
-          onCancel={cancelDeleteImportedBatch}
-          onConfirm={confirmDeleteImportedBatch}
+      {processingJobInfo ? (
+        <ProcessingFilesDialog
+          job={processingJobInfo}
+          onClose={() => setProcessingJobInfo(null)}
+        />
+      ) : null}
+      {isProcessingHistoryDeleteConfirmOpen ? (
+        <DestructiveActionConfirmDialog
+          title="Elimina cronologia"
+          message={`Vuoi eliminare ${selectedProcessingHistoryIds.size} processi dalla cronologia? I PDF e le fatture non verranno modificati.`}
+          confirmLabel="Elimina"
+          onCancel={() => setIsProcessingHistoryDeleteConfirmOpen(false)}
+          onConfirm={() => deleteProcessingHistory(false)}
         />
       ) : null}
       {isInvoiceDiscardConfirmOpen ? (
         <DestructiveActionConfirmDialog
-          title="Elimina fattura"
-          message={`Sei sicuro di voler eliminare ${currentInvoice?.title ?? 'questa fattura'} dalla revisione?`}
-          confirmLabel="Elimina"
+          title="Scarta fattura"
+          message={`Sei sicuro di voler spostare ${currentInvoice?.title ?? 'questa fattura'} tra le fatture scartate?`}
+          confirmLabel="Scarta"
           onCancel={() => setIsInvoiceDiscardConfirmOpen(false)}
           onConfirm={confirmDiscardCurrentInvoice}
+        />
+      ) : null}
+      {pendingSegmentationAction ? (
+        <SegmentationConfirmDialog
+          action={pendingSegmentationAction}
+          onCancel={() => setPendingSegmentationAction(null)}
+          onConfirm={confirmSegmentationAction}
+        />
+      ) : null}
+      {segmentationProgressState ? (
+        <SegmentationProgressDialog state={segmentationProgressState} />
+      ) : null}
+      {isClearReviewBatchesConfirmOpen ? (
+        <DestructiveActionConfirmDialog
+          title="Elimina revisioni"
+          message="Sei sicuro di voler eliminare tutte le revisioni da completare? Registro fatture, archivi PDF e file sorgenti non verranno cancellati."
+          confirmLabel="Elimina revisioni"
+          onCancel={() => setIsClearReviewBatchesConfirmOpen(false)}
+          onConfirm={confirmClearReviewBatches}
+        />
+      ) : null}
+      {archiveReferenceAction ? (
+        <ArchiveReferenceDialog
+          action={archiveReferenceAction}
+          onClose={() => setArchiveReferenceAction(null)}
+          onOpenWindow={openArchiveReferenceWindow}
+          onGoToArchive={goToArchiveReference}
+        />
+      ) : null}
+      {archiveDeleteTarget ? (
+        <DestructiveActionConfirmDialog
+          title={archiveDeleteTarget.title}
+          message={archiveDeleteTarget.message}
+          confirmLabel="Elimina"
+          onCancel={() => setArchiveDeleteTarget(null)}
+          onConfirm={confirmDeleteArchive}
+        />
+      ) : null}
+      {archiveReprocessDialog ? (
+        <ArchiveReprocessDialog
+          state={archiveReprocessDialog}
+          onCancel={() => setArchiveReprocessDialog(null)}
+          onConfirm={
+            archiveReprocessDialog.target === 'sources'
+              ? confirmReprocessSelectedArchivedSources
+              : confirmReprocessSelectedArchivedInvoices
+          }
+          onClose={() => setArchiveReprocessDialog(null)}
         />
       ) : null}
       {registryDraftRecordToDelete ? (
@@ -7050,22 +9226,17 @@ function App() {
       ) : null}
       {isDocumentImportDialogOpen ? (
         <DocumentImportDialog
-          sources={pendingImportSources}
-          isImporting={isDocumentImportRunning}
-          onAddFiles={addPdfImportSource}
-          onAddFolder={addFolderImportSource}
-          onRemoveSource={requestRemovePendingImportSource}
+          isImporting={isDocumentImportRunning || isDocumentPickerOpen}
+          onSelectFiles={addPdfImportSource}
+          onSelectFolder={addFolderImportSource}
           onCancel={closeDocumentImportDialog}
-          onConfirm={confirmImportSources}
         />
       ) : null}
-      {pendingImportSourceToRemove ? (
-        <DestructiveActionConfirmDialog
-          title="Rimuovi sorgente"
-          message={`Sei sicuro di voler rimuovere ${pendingImportSourceToRemove.label} dai documenti da importare?`}
-          confirmLabel="Rimuovi"
-          onCancel={() => setPendingImportSourceIdToRemove(null)}
-          onConfirm={confirmRemovePendingImportSource}
+      {feedbackExportState ? (
+        <FeedbackExportDialog
+          state={feedbackExportState}
+          onCancel={() => setFeedbackExportState(null)}
+          onConfirm={exportFeedbackToDesktop}
         />
       ) : null}
     </main>

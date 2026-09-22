@@ -19,6 +19,8 @@ BATCH_SCHEMA_VERSION = 1
 class PdfBatchSource:
     path: Path
     original_file_name: str
+    parent_invoice_record_id: str = ""
+    source_page_numbers: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,8 @@ class ImportedBatchDocument:
     relative_path: str
     size_bytes: int
     status: str
+    parent_invoice_record_id: str = ""
+    source_page_numbers: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,7 +66,12 @@ def import_pdf_batch(
     documents: list[ImportedBatchDocument] = []
     try:
         for document_index, source_file in enumerate(source_files, start=1):
-            source_path, original_file_name = _source_file_parts(source_file)
+            (
+                source_path,
+                original_file_name,
+                parent_invoice_record_id,
+                source_page_numbers,
+            ) = _source_file_parts(source_file)
             if not source_path.is_file():
                 raise ValueError(f"File non trovato: {source_path}")
             if Path(original_file_name).suffix.lower() != ".pdf":
@@ -80,6 +89,8 @@ def import_pdf_batch(
                     relative_path=f"input/{stored_file_name}",
                     size_bytes=target_path.stat().st_size,
                     status="imported",
+                    parent_invoice_record_id=parent_invoice_record_id,
+                    source_page_numbers=source_page_numbers,
                 )
             )
 
@@ -175,6 +186,15 @@ def load_batch_index(batch_dir: Path) -> ImportedBatchIndex:
             relative_path=str(document.get("relative_path") or ""),
             size_bytes=int(document.get("size_bytes") or 0),
             status=str(document.get("status") or "imported"),
+            parent_invoice_record_id=str(
+                document.get("parent_invoice_record_id") or ""
+            ),
+            source_page_numbers=tuple(
+                int(page_number)
+                for page_number in document.get("source_page_numbers", [])
+                if isinstance(page_number, int | float | str)
+                and str(page_number).strip().isdigit()
+            ),
         )
         for document in payload.get("documents", [])
         if isinstance(document, dict)
@@ -239,11 +259,18 @@ def _clean_batch_source_label(source_label: str | None) -> str | None:
     return Path(clean_source_label).name or clean_source_label
 
 
-def _source_file_parts(source_file: Path | PdfBatchSource) -> tuple[Path, str]:
+def _source_file_parts(
+    source_file: Path | PdfBatchSource,
+) -> tuple[Path, str, str, tuple[int, ...]]:
     if isinstance(source_file, PdfBatchSource):
-        return source_file.path, _safe_original_file_name(source_file.original_file_name)
+        return (
+            source_file.path,
+            _safe_original_file_name(source_file.original_file_name),
+            source_file.parent_invoice_record_id,
+            source_file.source_page_numbers,
+        )
 
-    return source_file, source_file.name
+    return source_file, source_file.name, "", ()
 
 
 def _safe_original_file_name(value: str) -> str:

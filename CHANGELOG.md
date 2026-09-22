@@ -3,6 +3,17 @@
 Traccia delle modifiche principali al progetto. Le note sono scritte per
 ricordare sia cosa e cambiato sia perche e stato fatto.
 
+## 2026-09-21 - Withholding field uses the monetary amount
+
+- The reviewed `Ritenuta` field now stores the monetary amount rather than the
+  printed percentage.
+- Frontend and backend validate the value as money and enforce `gross total -
+  withholding = net total` when all three fields are present.
+- Printed percentages remain internal OCR evidence and are no longer exposed as
+  the accounting value.
+- Registry schema version 3 migrates legacy percentage fields from the known
+  difference between gross and net totals.
+
 ## 2026-06-11 - Fallback OCR crop-only
 
 ### Cambiato
