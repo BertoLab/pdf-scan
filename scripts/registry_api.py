@@ -58,6 +58,7 @@ from estrattore.feedback_collection import (
     record_capture_issue,
 )
 from estrattore.feedback_export import export_feedback_to_desktop
+from estrattore.invoice_export import delete_export_history, export_invoices
 from estrattore.source_archive_storage import (
     archived_source_path,
     delete_archived_sources,
@@ -123,6 +124,23 @@ class RegistryApiHandler(BaseHTTPRequestHandler):
         self._send_empty_response(204)
 
     def do_GET(self) -> None:
+        if self.path.startswith("/runtime/archive/exports/"):
+            import re
+            match = re.fullmatch(r"/runtime/archive/exports/([0-9a-f]{32})/(fatture_condomini\.(?:xlsx|zip))", self.path)
+            target = RUNTIME_PATHS.archive_dir / "exports" / match[1] / match[2] if match else None
+            if target is None or not target.is_file():
+                self._send_json_response(404, {"ok": False, "error": "Esportazione non trovata."})
+                return
+            body = target.read_bytes()
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header("Content-Type", "application/zip" if target.suffix == ".zip" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            self.send_header("Content-Disposition", f'attachment; filename="{target.name}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if self.path == "/health":
             self._send_json_response(200, {"ok": True})
             return
@@ -325,6 +343,27 @@ class RegistryApiHandler(BaseHTTPRequestHandler):
             try:
                 payload = self._read_json_body()
                 self._send_json_response(200, _delete_processing_history(payload))
+            except Exception as error:
+                self._send_json_response(400, {"ok": False, "error": str(error)})
+            return
+
+        if self.path == "/invoices/export":
+            try:
+                payload = self._read_json_body()
+                result = export_invoices(
+                    payload.get("record_ids"), payload.get("mode"), RUNTIME_PATHS,
+                    history_id=payload.get("history_id"),
+                    include_summary=payload.get("include_summary", False),
+                )
+                self._send_json_response(200, result)
+            except Exception as error:
+                self._send_json_response(400, {"ok": False, "error": str(error)})
+            return
+
+        if self.path == "/invoices/export-history/delete":
+            try:
+                payload = self._read_json_body()
+                self._send_json_response(200, delete_export_history(payload.get("export_id"), RUNTIME_PATHS))
             except Exception as error:
                 self._send_json_response(400, {"ok": False, "error": str(error)})
             return

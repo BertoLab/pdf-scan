@@ -27,7 +27,7 @@ VIEWER_DIST_PATH = PROJECT_ROOT / "apps" / "viewer" / "dist"
 class LocalAppHandler(RegistryApiHandler):
     def do_GET(self) -> None:
         request_path = urlparse(self.path).path
-        if request_path.startswith("/processing/jobs/"):
+        if request_path.startswith(("/processing/jobs/", "/runtime/archive/exports/")):
             super().do_GET()
             return
 

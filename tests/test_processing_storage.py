@@ -903,6 +903,135 @@ def test_startup_retires_zero_pending_review_and_removes_its_draft() -> None:
         _clean_workspace(workspace)
 
 
+def test_mark_review_invoice_scopes_equal_local_ids_by_document() -> None:
+    workspace = _workspace()
+    try:
+        source_files = [workspace / "source-a.pdf", workspace / "source-b.pdf"]
+        for source_file in source_files:
+            source_file.write_bytes(b"%PDF")
+        paths = get_runtime_paths(workspace / "app-data")
+        imported_batch = import_pdf_batch(
+            source_files,
+            runtime_paths=paths,
+            now=datetime(2026, 8, 10, 10, 0, 0),
+        )
+
+        def fake_processor(_source_path: Path, output_dir: Path, _first_number: int):
+            output_dir.mkdir(parents=True, exist_ok=True)
+            manifest_path = output_dir / "viewer_manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "invoices": [
+                            {
+                                "invoice_id": "invoice-001",
+                                "title": "Fattura 001",
+                                "page_numbers": [1],
+                                "fields": [],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return [manifest_path]
+
+        run_index = process_imported_batch(
+            imported_batch.batch_id,
+            runtime_paths=paths,
+            document_processor=fake_processor,
+            now=datetime(2026, 8, 10, 11, 0, 0),
+        )
+        review = run_index.review_batches[0]
+        review_dir = review_batch_dir_from_base_path(review.base_path, paths)
+
+        mark_review_invoice(
+            review.base_path,
+            "invoice-001",
+            "saved",
+            paths,
+            document_id="doc_000001",
+        )
+
+        review_payload = json.loads(
+            (review_dir / "review_batch_index.json").read_text(encoding="utf-8")
+        )
+        statuses = {
+            invoice["document_id"]: invoice["status"]
+            for invoice in review_payload["invoices"]
+        }
+        assert statuses == {"doc_000001": "saved", "doc_000002": "pending"}
+        viewer_payload = json.loads(
+            (review_dir / "viewer_index.json").read_text(encoding="utf-8")
+        )
+        assert [document["id"] for document in viewer_payload["documents"]] == [
+            "doc_000002"
+        ]
+    finally:
+        _clean_workspace(workspace)
+
+
+def test_listing_repairs_terminal_duplicate_and_retires_empty_review() -> None:
+    workspace = _workspace()
+    try:
+        source_file = workspace / "source.pdf"
+        source_file.write_bytes(b"%PDF")
+        paths = get_runtime_paths(workspace / "app-data")
+        imported_batch = import_pdf_batch(
+            [source_file],
+            runtime_paths=paths,
+            now=datetime(2026, 8, 10, 10, 0, 0),
+        )
+
+        def fake_processor(_source_path: Path, output_dir: Path, _first_number: int):
+            output_dir.mkdir(parents=True, exist_ok=True)
+            manifest_path = output_dir / "viewer_manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "invoices": [
+                            {
+                                "invoice_id": "invoice-001",
+                                "title": "Fattura 001",
+                                "page_numbers": [1],
+                                "fields": [],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return [manifest_path]
+
+        run_index = process_imported_batch(
+            imported_batch.batch_id,
+            runtime_paths=paths,
+            document_processor=fake_processor,
+            now=datetime(2026, 8, 10, 11, 0, 0),
+        )
+        review = run_index.review_batches[0]
+        review_dir = review_batch_dir_from_base_path(review.base_path, paths)
+        review_index_path = review_dir / "review_batch_index.json"
+        review_payload = json.loads(review_index_path.read_text(encoding="utf-8"))
+        saved_invoice = {**review_payload["invoices"][0], "status": "saved"}
+        pending_duplicate = {**review_payload["invoices"][0], "status": "pending"}
+        review_payload["invoices"] = [saved_invoice, pending_duplicate]
+        review_payload["invoice_count"] = 1
+        review_index_path.write_text(json.dumps(review_payload), encoding="utf-8")
+        (review_dir / "viewer_index.json").write_text(
+            json.dumps({"documents": []}),
+            encoding="utf-8",
+        )
+
+        assert list_review_batches(paths) == []
+        assert not review_dir.exists()
+        assert load_processing_run_index(
+            paths.manifests_dir / run_index.process_id
+        ).retired_review_batch_ids == [review.id]
+    finally:
+        _clean_workspace(workspace)
+
+
 def test_segmentation_boundary_move_updates_document_manifest() -> None:
     workspace = _workspace()
     try:

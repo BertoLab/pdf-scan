@@ -184,12 +184,28 @@ type RegistryRecordsPayload = {
 
 type AppView = 'review' | 'registry' | 'archive' | 'invoiceRegistry' | 'processing'
 type PdfArchiveViewMode = 'invoices' | 'sources'
-type InvoiceRegistryViewMode = 'saved' | 'exported' | 'discarded'
+type InvoiceRegistryViewMode = 'saved' | 'exported' | 'discarded' | 'history'
+
+type InvoiceExportHistoryEntry = {
+  include_summary?: boolean
+  export_id: string
+  exported_at: string
+  mode: 'workbook' | 'separate'
+  invoices: {
+    record_id: string
+    numero_fattura: string
+    data_fattura: string
+    nome_emittente: string
+    condominio: string
+    totale_fattura: string
+  }[]
+}
 
 type InvoiceArchiveRegistryPayload = {
   ok: boolean
   registry: {
     records?: InvoiceArchiveRecord[]
+    export_history?: InvoiceExportHistoryEntry[]
   }
 }
 
@@ -197,6 +213,8 @@ type InvoiceArchiveRecord = {
   record_id: string
   status: string
   saved_at?: string
+  last_exported_at?: string
+  last_export_url?: string
   discarded_at?: string
   updated_at?: string
   source_batch_id?: string
@@ -248,7 +266,7 @@ type InvoiceArchiveSortKey =
   | 'totale_asc'
 
 type ArchiveDeleteTarget = {
-  scope: 'invoice' | 'source' | 'registry' | 'all'
+  scope: 'invoice' | 'source' | 'registry' | 'discard_registry' | 'all'
   recordId?: string
   recordIds?: string[]
   archivedSourcePdfPath?: string
@@ -446,6 +464,11 @@ type PendingInvoiceSaveValidation = {
 type PendingBatchReviewAction = {
   action: 'save' | 'discard'
   invoices: ViewerInvoice[]
+  validationIssues: Array<
+    InvoiceSaveValidationIssue & {
+      invoiceTitle: string
+    }
+  >
   validationIssueCount: number
   emptyFieldIssueCount: number
   invalidFiscalIssueCount: number
@@ -1162,14 +1185,20 @@ function normalizeLegacyWithholdingFields(fields: InvoiceField[]) {
       return field
     }
 
-    const isLegacyPercentage =
-      field.value.includes('%') || field.label.includes('%')
+    const isLegacyPercentage = field.label.includes('%')
     return {
       ...field,
       label: 'Ritenuta',
       value: isLegacyPercentage ? derivedWithholding : field.value,
     }
   })
+}
+
+function normalizeInvoiceForPersistence(invoice: ViewerInvoice): ViewerInvoice {
+  return {
+    ...invoice,
+    fields: normalizeLegacyWithholdingFields(invoice.fields),
+  }
 }
 
 function isInvalidMoneyField(fieldKind: string, value: string) {
@@ -1183,7 +1212,7 @@ function isInvalidMoneyField(fieldKind: string, value: string) {
 
 function validationHasBlockingIssue(validation: PendingInvoiceSaveValidation) {
   return validation.issues.some(
-    (issue) => issue.kind === 'invalid_amount' || issue.kind === 'economic_mismatch',
+    (issue) => issue.kind === 'invalid_amount',
   )
 }
 
@@ -1316,11 +1345,12 @@ function buildInvoiceSaveValidation(
   invoice: ViewerInvoice,
   registryRecords: RegistryPreviewRecord[],
 ): PendingInvoiceSaveValidation | null {
-  const issues = validateInvoiceFields(invoice.fields)
+  const normalizedInvoice = normalizeInvoiceForPersistence(invoice)
+  const issues = validateInvoiceFields(normalizedInvoice.fields)
 
   let registryRecordToAdd: RegistryPreviewRecord | null = null
   if (registryRecords.length > 0) {
-    for (const field of invoice.fields) {
+    for (const field of normalizedInvoice.fields) {
       if (field.kind !== 'codice_fiscale' && field.kind !== 'codice_fiscale_emittente') {
         continue
       }
@@ -1332,7 +1362,7 @@ function buildInvoiceSaveValidation(
 
       const matchingRecords = registryRecordsForFiscalCode(registryRecords, field.kind, value)
       if (matchingRecords.length === 0) {
-        const record = buildRegistryRecordFromInvoiceFields(field, invoice.fields)
+        const record = buildRegistryRecordFromInvoiceFields(field, normalizedInvoice.fields)
         if (record && !registryRecordToAdd) {
           registryRecordToAdd = record
           issues.push({
@@ -1345,7 +1375,23 @@ function buildInvoiceSaveValidation(
         continue
       }
 
-      if (matchingRecords.length > 1 && registryRecordsHaveDifferentFill(matchingRecords)) {
+      const selectedRegistryRecordKey =
+        field.registry_id &&
+        field.registry_source_row !== null &&
+        field.registry_source_row !== undefined
+          ? `${field.registry_id}-${field.registry_source_row}`
+          : null
+      const hasResolvedRegistrySelection =
+        selectedRegistryRecordKey !== null &&
+        matchingRecords.some(
+          (record) => registryRecordKey(record) === selectedRegistryRecordKey,
+        )
+
+      if (
+        matchingRecords.length > 1 &&
+        registryRecordsHaveDifferentFill(matchingRecords) &&
+        !hasResolvedRegistrySelection
+      ) {
         issues.push({
           kind: 'registry_conflict',
           title: 'Piu righe anagrafica compatibili',
@@ -2200,9 +2246,9 @@ const InvoiceRegistryTable = memo(function InvoiceRegistryTable({
           onChange={onToggleAll}
           aria-label="Seleziona tutte le righe"
         />,
-        viewMode === 'saved' ? 'Salvata il' : 'Scartata il',
+        viewMode === 'saved' ? 'Salvata il' : viewMode === 'exported' ? 'Ultima esportazione' : 'Scartata il',
         ...invoiceRegistryEditableFields.map((field) => field.label),
-        viewMode === 'saved' ? 'File origine' : 'File origine e pagine',
+        'File origine',
         'Fattura',
       ]}
       rowKey={(record) => record.record_id}
@@ -2221,7 +2267,11 @@ const InvoiceRegistryTable = memo(function InvoiceRegistryTable({
               onChange={() => onToggle(record)}
               aria-label={`Seleziona ${record.source_file_name || 'fattura'}`}
             />,
-            formatItalianDateValue(
+            viewMode === 'exported' ? (
+              <span title={record.last_exported_at ? new Date(record.last_exported_at).toLocaleString('it-IT') : ''}>
+                {record.last_exported_at ? new Date(record.last_exported_at).toLocaleDateString('it-IT') : '-'}
+              </span>
+            ) : formatItalianDateValue(
               (
                 viewMode === 'saved'
                   ? record.saved_at ?? ''
@@ -2285,10 +2335,11 @@ const InvoiceRegistryTable = memo(function InvoiceRegistryTable({
                     type="button"
                     className="invoice-archive-pdf-link secondary"
                     onClick={() => onOpenArchiveReference(record, 'source')}
+                    title={record.status === 'discarded'
+                      ? record.display_name || fileNameFromPath(record.source_file_name) || undefined
+                      : fileNameFromPath(record.source_file_name) || undefined}
                   >
-                    {record.status === 'discarded'
-                      ? record.display_name || 'Apri origine'
-                      : fileNameFromPath(record.source_file_name) || 'Apri origine'}
+                    Apri origine
                   </button>
                 ) : (
                   (record.status === 'discarded'
@@ -2762,7 +2813,7 @@ function InvoiceSaveValidationDialog({
         <div className="invoice-save-validation-body">
           <p>
             {hasBlockingIssue
-              ? 'Correggi la ritenuta prima di salvare.'
+              ? 'Correggi gli importi indicati prima di salvare.'
               : 'La fattura contiene dati da controllare. Puoi continuare comunque oppure sistemare prima le informazioni.'}
           </p>
           <div className="invoice-save-validation-issues">
@@ -2819,6 +2870,7 @@ function BatchReviewActionConfirmDialog({
   economicMismatchIssueCount,
   newRegistryIssueCount,
   registryConflictIssueCount,
+  validationIssues,
   onCancel,
   onConfirm,
 }: PendingBatchReviewAction & {
@@ -2828,7 +2880,28 @@ function BatchReviewActionConfirmDialog({
 }) {
   const isDiscard = action === 'discard'
   const hasBlockingIssue =
-    !isDiscard && (invalidAmountIssueCount > 0 || economicMismatchIssueCount > 0)
+    !isDiscard && invalidAmountIssueCount > 0
+  const issueGroups = [
+    { kind: 'empty_fields', label: 'Campi mancanti', count: emptyFieldIssueCount },
+    { kind: 'invalid_fiscal', label: 'C.F. o P.IVA sospetti', count: invalidFiscalIssueCount },
+    { kind: 'invalid_date', label: 'Date da controllare', count: invalidDateIssueCount },
+    { kind: 'invalid_amount', label: 'Importi non validi', count: invalidAmountIssueCount },
+    {
+      kind: 'economic_mismatch',
+      label: 'Quadrature contabili sospette',
+      count: economicMismatchIssueCount,
+    },
+    {
+      kind: 'new_registry_record',
+      label: 'Nuovi valori non presenti in anagrafica',
+      count: newRegistryIssueCount,
+    },
+    {
+      kind: 'registry_conflict',
+      label: 'Possibili conflitti anagrafica',
+      count: registryConflictIssueCount,
+    },
+  ].filter((group) => group.count > 0)
 
   return (
     <div className="registry-dialog-backdrop" role="presentation">
@@ -2848,13 +2921,18 @@ function BatchReviewActionConfirmDialog({
           {!isDiscard && validationIssueCount > 0 ? (
             <div className="batch-review-validation-summary">
               <strong>Controlli da verificare</strong>
-              <span>Campi mancanti: {emptyFieldIssueCount}</span>
-              <span>C.F. o P.IVA sospetti: {invalidFiscalIssueCount}</span>
-              <span>Date da controllare: {invalidDateIssueCount}</span>
-              <span>Importi non validi: {invalidAmountIssueCount}</span>
-              <span>Quadrature contabili sospette: {economicMismatchIssueCount}</span>
-              <span>Nuovi valori non presenti in anagrafica: {newRegistryIssueCount}</span>
-              <span>Possibili conflitti anagrafica: {registryConflictIssueCount}</span>
+              {issueGroups.map((group) => (
+                <div className="batch-review-validation-group" key={group.kind}>
+                  <span>{group.label}: {group.count}</span>
+                  {validationIssues
+                    .filter((issue) => issue.kind === group.kind)
+                    .map((issue, issueIndex) => (
+                      <small key={`${issue.invoiceTitle}-${issue.detail}-${issueIndex}`}>
+                        {issue.invoiceTitle}: {issue.detail}
+                      </small>
+                    ))}
+                </div>
+              ))}
             </div>
           ) : null}
           {!isDiscard && validationIssueCount === 0 ? (
@@ -3500,6 +3578,7 @@ function filterInvoiceArchiveRecords(
   searchValue: string,
   filters: InvoiceArchiveFilters,
   sortKey: InvoiceArchiveSortKey,
+  sortByExportDate = false,
 ) {
   const normalizedSearch = searchValue.trim().toLowerCase()
   const filteredRecords = records.filter((record) =>
@@ -3507,7 +3586,9 @@ function filterInvoiceArchiveRecords(
   )
 
   return [...filteredRecords].sort((leftRecord, rightRecord) =>
-    compareInvoiceArchiveRecords(leftRecord, rightRecord, sortKey),
+    sortByExportDate && (sortKey === 'saved_at_asc' || sortKey === 'saved_at_desc')
+      ? (leftRecord.last_exported_at ?? '').localeCompare(rightRecord.last_exported_at ?? '') * (sortKey === 'saved_at_asc' ? 1 : -1)
+      : compareInvoiceArchiveRecords(leftRecord, rightRecord, sortKey),
   )
 }
 
@@ -3966,6 +4047,22 @@ function App() {
     useState<PdfArchiveViewMode>('invoices')
   const [invoiceRegistryViewMode, setInvoiceRegistryViewMode] =
     useState<InvoiceRegistryViewMode>('saved')
+  const [invoiceExport, setInvoiceExport] = useState<{
+    ids: string[]
+    historyId?: string
+    includeSummary: boolean
+    mode: 'workbook' | 'separate'
+    busy: boolean
+    error?: string
+    result?: { download_url: string; file_name: string; invoice_count: number }
+  } | null>(null)
+  const [invoiceExportHistory, setInvoiceExportHistory] = useState<InvoiceExportHistoryEntry[]>([])
+  const [exportHistoryInfo, setExportHistoryInfo] = useState<InvoiceExportHistoryEntry | null>(null)
+  const [exportHistoryDelete, setExportHistoryDelete] = useState<InvoiceExportHistoryEntry | null>(null)
+  const [isDeletingExportHistory, setIsDeletingExportHistory] = useState(false)
+  const availableExportInvoiceIds = useMemo(() => new Set(invoiceArchiveRecords
+    .filter((record) => record.status === 'saved' && record.registry_visible !== false)
+    .map((record) => record.record_id)), [invoiceArchiveRecords])
   const [archiveDeleteTarget, setArchiveDeleteTarget] =
     useState<ArchiveDeleteTarget | null>(null)
   const [archiveReferenceAction, setArchiveReferenceAction] =
@@ -4083,17 +4180,18 @@ function App() {
   }, [appView, pdfArchiveViewMode, focusedArchiveKey])
   const filteredInvoiceRegistryRecords = useMemo(
     () =>
-      invoiceRegistryViewMode === 'exported'
-        ? []
-        : filterInvoiceArchiveRecords(
+      filterInvoiceArchiveRecords(
             (isInvoiceRegistryEditMode ? invoiceRegistryDraftRecords : invoiceArchiveRecords).filter(
               (record) =>
-                record.status === invoiceRegistryViewMode &&
+                (invoiceRegistryViewMode === 'discarded'
+                  ? record.status === 'discarded'
+                  : record.status === 'saved' && Boolean(record.last_exported_at) === (invoiceRegistryViewMode === 'exported')) &&
                 record.registry_visible !== false,
             ),
             invoiceArchiveSearch,
             invoiceArchiveFilters,
             invoiceArchiveSortKey,
+            invoiceRegistryViewMode === 'exported',
           ),
     [
       invoiceArchiveRecords,
@@ -5461,30 +5559,33 @@ function App() {
       return
     }
 
-    const validations =
+    const targetInvoices = invoices.map(normalizeInvoiceForPersistence)
+    const validationIssues =
       action === 'save'
-        ? invoices
-            .map((invoice) => buildInvoiceSaveValidation(invoice, registryPreviewRecords))
-            .filter((validation): validation is PendingInvoiceSaveValidation =>
-              validation !== null,
-            )
+        ? targetInvoices.flatMap((invoice) => {
+            const validation = buildInvoiceSaveValidation(invoice, registryPreviewRecords)
+            return (validation?.issues ?? []).map((issue) => ({
+              ...issue,
+              invoiceTitle: invoice.title || invoice.manifestInvoiceId || 'Fattura',
+            }))
+          })
         : []
-    const issues = validations.flatMap((validation) => validation.issues)
 
     setPendingBatchReviewAction({
       action,
-      invoices: [...invoices],
-      validationIssueCount: issues.length,
-      emptyFieldIssueCount: issues.filter((issue) => issue.kind === 'empty_fields').length,
-      invalidFiscalIssueCount: issues.filter((issue) => issue.kind === 'invalid_fiscal').length,
-      invalidDateIssueCount: issues.filter((issue) => issue.kind === 'invalid_date').length,
-      invalidAmountIssueCount: issues.filter(
+      invoices: targetInvoices,
+      validationIssues,
+      validationIssueCount: validationIssues.length,
+      emptyFieldIssueCount: validationIssues.filter((issue) => issue.kind === 'empty_fields').length,
+      invalidFiscalIssueCount: validationIssues.filter((issue) => issue.kind === 'invalid_fiscal').length,
+      invalidDateIssueCount: validationIssues.filter((issue) => issue.kind === 'invalid_date').length,
+      invalidAmountIssueCount: validationIssues.filter(
         (issue) => issue.kind === 'invalid_amount',
       ).length,
-      economicMismatchIssueCount: issues.filter((issue) => issue.kind === 'economic_mismatch')
+      economicMismatchIssueCount: validationIssues.filter((issue) => issue.kind === 'economic_mismatch')
         .length,
-      newRegistryIssueCount: issues.filter((issue) => issue.kind === 'new_registry_record').length,
-      registryConflictIssueCount: issues.filter((issue) => issue.kind === 'registry_conflict').length,
+      newRegistryIssueCount: validationIssues.filter((issue) => issue.kind === 'new_registry_record').length,
+      registryConflictIssueCount: validationIssues.filter((issue) => issue.kind === 'registry_conflict').length,
     })
   }
 
@@ -5495,8 +5596,7 @@ function App() {
 
     if (
       pendingBatchReviewAction.action === 'save' &&
-      (pendingBatchReviewAction.invalidAmountIssueCount > 0 ||
-        pendingBatchReviewAction.economicMismatchIssueCount > 0)
+      pendingBatchReviewAction.invalidAmountIssueCount > 0
     ) {
       return
     }
@@ -5821,6 +5921,8 @@ function App() {
       })
       .then(({ invoices: payload, sources }) => {
         const records = payload.registry.records ?? []
+        setInvoiceExportHistory([...(payload.registry.export_history ?? [])]
+          .sort((left, right) => Date.parse(right.exported_at) - Date.parse(left.exported_at)))
         setInvoiceArchiveRecords(records)
         setSourceArchiveRecords(sources.records ?? [])
         if (!isInvoiceRegistryEditMode) {
@@ -5878,7 +5980,9 @@ function App() {
     })
   }
 
-  function requestDeleteSelectedArchives(scope: 'invoice' | 'source' | 'registry') {
+  function requestDeleteSelectedArchives(
+    scope: 'invoice' | 'source' | 'registry' | 'discard_registry',
+  ) {
     if (selectedArchiveKeys.size === 0) {
       return
     }
@@ -5887,10 +5991,15 @@ function App() {
       scope,
       recordIds: scope !== 'source' ? Array.from(selectedArchiveKeys) : undefined,
       archivedSourcePdfPaths: undefined,
-      title: 'Elimina elementi selezionati',
+      title:
+        scope === 'discard_registry'
+          ? 'Scarta fatture selezionate'
+          : 'Elimina elementi selezionati',
       message:
         scope === 'source'
           ? `Vuoi eliminare ${selectedArchiveKeys.size} file origine selezionati dall’archivio? I PDF fattura e il registro non verranno modificati.`
+          : scope === 'discard_registry'
+            ? `Vuoi spostare ${selectedArchiveKeys.size} fatture selezionate tra le fatture scartate? I PDF e i dati compilati verranno conservati.`
           : scope === 'registry'
             ? `Vuoi eliminare ${selectedArchiveKeys.size} righe selezionate dal registro? I PDF fattura e i file origine non verranno modificati.`
             : `Vuoi eliminare ${selectedArchiveKeys.size} PDF fattura selezionati dall’archivio? Il registro e i file origine non verranno modificati.`,
@@ -5904,7 +6013,11 @@ function App() {
     }
 
     setArchiveDeleteTarget(null)
-    setInvoiceArchiveError('Eliminazione archivio in corso...')
+    setInvoiceArchiveError(
+      target.scope === 'discard_registry'
+        ? 'Spostamento tra le fatture scartate in corso...'
+        : 'Eliminazione archivio in corso...',
+    )
     fetch(`${registryApiBaseUrl}/archive/delete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -5929,6 +6042,15 @@ function App() {
         return loadInvoiceArchive()
       })
       .catch((error) => {
+        if (target.scope === 'discard_registry') {
+          setInvoiceArchiveError(
+            `Fatture non spostate. ${userErrorMessage(
+              error,
+              'Non riesco a spostare le fatture selezionate.',
+            )}`,
+          )
+          return
+        }
         setInvoiceArchiveError(
           `Archivio non eliminato. ${userErrorMessage(
             error,
@@ -6027,12 +6149,71 @@ function App() {
   }
 
   function downloadInvoiceArchiveExcel() {
+    const ids = filteredInvoiceRegistryRecords
+      .filter((record) => selectedArchiveKeys.size === 0 || selectedArchiveKeys.has(record.record_id))
+      .map((record) => record.record_id)
+    if (ids.length === 0) return
+    setInvoiceExport({ ids, mode: 'workbook', includeSummary: false, busy: false })
+  }
+
+  function downloadGeneratedInvoiceExport(url: string, name: string) {
     const link = document.createElement('a')
-    link.href = `${registryApiBaseUrl}/invoices/export.xlsx`
-    link.download = 'registro_fatture.xlsx'
+    link.href = `${registryApiBaseUrl}${url}`
+    link.download = name
     document.body.appendChild(link)
     link.click()
     link.remove()
+  }
+
+  async function confirmInvoiceExport() {
+    if (!invoiceExport || invoiceExport.busy || invoiceExport.result) return
+    const snapshot = invoiceExport
+    setInvoiceExport({ ...snapshot, busy: true, error: undefined })
+    try {
+      const response = await fetch(`${registryApiBaseUrl}/invoices/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ record_ids: snapshot.ids, mode: snapshot.mode, history_id: snapshot.historyId, include_summary: snapshot.includeSummary }),
+      })
+      const result = await response.json()
+      if (!response.ok || !result.download_url) throw new Error(result.error || 'Esportazione non riuscita.')
+      setInvoiceExport({ ...snapshot, busy: false, result })
+      setSelectedArchiveKeys(new Set())
+      await loadInvoiceArchive()
+      downloadGeneratedInvoiceExport(result.download_url, result.file_name)
+    } catch (error) {
+      setInvoiceExport({ ...snapshot, busy: false, error: userErrorMessage(error, 'Non riesco a esportare le fatture. Riprova.') })
+    }
+  }
+
+  function reexportHistoryEntry(entry: InvoiceExportHistoryEntry) {
+    if (entry.invoices.some((invoice) => !availableExportInvoiceIds.has(invoice.record_id))) {
+      setExportHistoryInfo(entry)
+      return
+    }
+    setExportHistoryInfo(null)
+    setInvoiceExport({ ids: entry.invoices.map((invoice) => invoice.record_id), historyId: entry.export_id, mode: entry.mode, includeSummary: entry.include_summary ?? false, busy: false })
+  }
+
+  async function deleteExportHistoryEntry() {
+    if (!exportHistoryDelete || isDeletingExportHistory) return
+    const entry = exportHistoryDelete
+    setExportHistoryDelete(null)
+    setIsDeletingExportHistory(true)
+    try {
+      const response = await fetch(`${registryApiBaseUrl}/invoices/export-history/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ export_id: entry.export_id }),
+      })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error)
+      await loadInvoiceArchive()
+    } catch (error) {
+      setInvoiceArchiveError(userErrorMessage(error, 'Non riesco a eliminare la voce dallo storico.'))
+    } finally {
+      setIsDeletingExportHistory(false)
+    }
   }
 
   function loadRegistryRecords() {
@@ -7521,7 +7702,7 @@ function App() {
         {appView === 'registry' ? (
           <div className="registry-sidebar">
             <h2>Anagrafica</h2>
-            <button className="registry-sidebar-back-button" onClick={closeRegistryPreview}>
+            <button className="pdf-import-button" onClick={closeRegistryPreview}>
               Torna alle fatture
             </button>
           </div>
@@ -7534,7 +7715,7 @@ function App() {
                   ? 'Registro'
                   : 'Processi'}
             </h2>
-            <button className="registry-sidebar-back-button" onClick={closeInvoiceArchive}>
+            <button className="pdf-import-button" onClick={closeInvoiceArchive}>
               Torna alle fatture
             </button>
             {appView === 'archive' ? (
@@ -7570,6 +7751,7 @@ function App() {
                   className={invoiceRegistryViewMode === 'saved' ? 'active' : ''}
                   onClick={() => {
                     setInvoiceRegistryViewMode('saved')
+                    setInvoiceArchiveFilters({ dateFrom: '', dateTo: '' })
                     setSelectedArchiveKeys(new Set())
                     setIsInvoiceRegistryEditMode(false)
                   }}
@@ -7582,6 +7764,7 @@ function App() {
                   className={invoiceRegistryViewMode === 'exported' ? 'active' : ''}
                   onClick={() => {
                     setInvoiceRegistryViewMode('exported')
+                    setInvoiceArchiveFilters({ dateFrom: '', dateTo: '' })
                     setSelectedArchiveKeys(new Set())
                     setIsInvoiceRegistryEditMode(false)
                   }}
@@ -7594,6 +7777,7 @@ function App() {
                   className={invoiceRegistryViewMode === 'discarded' ? 'active' : ''}
                   onClick={() => {
                     setInvoiceRegistryViewMode('discarded')
+                    setInvoiceArchiveFilters({ dateFrom: '', dateTo: '' })
                     setSelectedArchiveKeys(new Set())
                     setIsInvoiceRegistryEditMode(false)
                   }}
@@ -7601,6 +7785,18 @@ function App() {
                   aria-selected={invoiceRegistryViewMode === 'discarded'}
                 >
                   Fatture scartate
+                </button>
+                <button
+                  className={invoiceRegistryViewMode === 'history' ? 'active' : ''}
+                  onClick={() => {
+                    setInvoiceRegistryViewMode('history')
+                    setSelectedArchiveKeys(new Set())
+                    setIsInvoiceRegistryEditMode(false)
+                  }}
+                  role="tab"
+                  aria-selected={invoiceRegistryViewMode === 'history'}
+                >
+                  Storico esportazioni
                 </button>
               </div>
             ) : (
@@ -8021,6 +8217,36 @@ function App() {
             />
           )}
         </section>
+      ) : appView === 'invoiceRegistry' && invoiceRegistryViewMode === 'history' ? (
+        <section className="registry-page export-history-page">
+          <header>
+            <div>
+              <h1>Storico esportazioni</h1><p>{invoiceExportHistory.length} esportazioni</p>
+              {invoiceArchiveError ? <p role="alert">{invoiceArchiveError}</p> : null}
+            </div>
+          </header>
+          {invoiceExportHistory.length ? (
+            <VirtualDataTable
+              rows={invoiceExportHistory}
+              rowKey={(entry) => entry.export_id}
+              className="export-history-table-wrap"
+              tableClassName="export-history-table"
+              headerCells={['Esportazione', 'Fatture', 'Formato', <span className="visually-hidden">Azioni</span>]}
+              renderRow={(entry) => [
+                <strong>{new Date(entry.exported_at).toLocaleString('it-IT')}</strong>,
+                entry.invoices.length,
+                entry.mode === 'workbook' ? 'Excel unico' : 'Excel per condominio',
+                <div className="export-history-actions">
+                  <button className="processing-info-button" onClick={() => setExportHistoryInfo(entry)} title="Mostra fatture coinvolte" aria-label="Mostra fatture coinvolte">i</button>
+                  <button onClick={() => reexportHistoryEntry(entry)}>Riesporta</button>
+                  <button className="archive-trash-button" disabled={isDeletingExportHistory} onClick={() => setExportHistoryDelete(entry)} title="Elimina esportazione dallo storico" aria-label="Elimina esportazione dallo storico"><TrashIcon /></button>
+                </div>,
+              ]}
+            />
+          ) : (
+            <div className="registry-empty-state"><h2>Nessuna esportazione nello storico</h2></div>
+          )}
+        </section>
       ) : appView === 'invoiceRegistry' ? (
         <section className="registry-page archive-page invoice-registry-page">
           <header>
@@ -8033,9 +8259,6 @@ function App() {
                   : invoiceRegistryViewMode === 'exported'
                     ? 'fatture esportate'
                     : 'fatture scartate'}
-                {invoiceArchiveSearch.trim()
-                  ? ` / ${invoiceRegistryViewMode === 'exported' ? 0 : invoiceArchiveRecords.filter((record) => record.status === invoiceRegistryViewMode && record.registry_visible !== false).length} totali`
-                  : ''}
               </p>
               {invoiceRegistrySaveStatus ? (
                 <div className="registry-saving-inline" role="status">
@@ -8048,6 +8271,7 @@ function App() {
                 </div>
               ) : null}
             </div>
+            <div className="invoice-registry-date-actions">
             <label className="invoice-registry-toolbar-control">
               <span>Da</span>
               <input
@@ -8074,6 +8298,18 @@ function App() {
                 }
               />
             </label>
+              {invoiceRegistryViewMode !== 'discarded' ? (
+                <button
+                  type="button"
+                  className="invoice-registry-export-button"
+                  onClick={downloadInvoiceArchiveExcel}
+                  title="Esporta registro fatture in Excel"
+                  disabled={filteredInvoiceRegistryRecords.length === 0 || isInvoiceRegistryEditMode}
+                >
+                  Esporta
+                </button>
+              ) : null}
+            </div>
             <label className="invoice-registry-toolbar-control invoice-registry-sort-control">
               <span>Ordina</span>
               <select
@@ -8126,22 +8362,6 @@ function App() {
               ) : invoiceRegistryViewMode === 'saved' ? (
                 <button onClick={startInvoiceRegistryEdit}>Modifica</button>
               ) : null}
-              {invoiceRegistryViewMode === 'saved' ? (
-                <button
-                  className="registry-download-button"
-                  onClick={downloadInvoiceArchiveExcel}
-                  aria-label="Esporta registro fatture in Excel"
-                  title="Esporta registro fatture in Excel"
-                  disabled={
-                    invoiceArchiveRecords.filter(
-                      (record) =>
-                        record.status === 'saved' && record.registry_visible !== false,
-                    ).length === 0
-                  }
-                >
-                  <DownloadIcon />
-                </button>
-              ) : null}
               <button
                 type="button"
                 onClick={requestReprocessSelectedArchivedInvoices}
@@ -8152,10 +8372,24 @@ function App() {
               <button
                 type="button"
                 className="archive-trash-button"
-                onClick={() => requestDeleteSelectedArchives('registry')}
+                onClick={() =>
+                  requestDeleteSelectedArchives(
+                    invoiceRegistryViewMode === 'saved'
+                      ? 'discard_registry'
+                      : 'registry',
+                  )
+                }
                 disabled={selectedArchiveKeys.size === 0}
-                aria-label="Elimina righe selezionate"
-                title="Elimina righe selezionate"
+                aria-label={
+                  invoiceRegistryViewMode === 'saved'
+                    ? 'Sposta tra le fatture scartate'
+                    : 'Elimina righe selezionate'
+                }
+                title={
+                  invoiceRegistryViewMode === 'saved'
+                    ? 'Sposta tra le fatture scartate'
+                    : 'Elimina righe selezionate'
+                }
               >
                 <TrashIcon />
               </button>
@@ -9238,6 +9472,96 @@ function App() {
           onCancel={() => setFeedbackExportState(null)}
           onConfirm={exportFeedbackToDesktop}
         />
+      ) : null}
+      {exportHistoryDelete ? (
+        <DestructiveActionConfirmDialog
+          title="Elimina esportazione dallo storico"
+          message={`Vuoi eliminare la voce del ${new Date(exportHistoryDelete.exported_at).toLocaleString('it-IT')}? Le fatture e i PDF verranno conservati.`}
+          onCancel={() => setExportHistoryDelete(null)}
+          onConfirm={deleteExportHistoryEntry}
+        />
+      ) : null}
+      {exportHistoryInfo ? (
+        <div className="registry-dialog-backdrop">
+          <section className="registry-dialog export-history-info" role="dialog" aria-modal="true" aria-labelledby="export-history-info-title">
+            <header>
+              <h2 id="export-history-info-title">Esportazione del {new Date(exportHistoryInfo.exported_at).toLocaleString('it-IT')}</h2>
+              <button onClick={() => setExportHistoryInfo(null)} aria-label="Chiudi">x</button>
+            </header>
+            {exportHistoryInfo.invoices.some((invoice) => !availableExportInvoiceIds.has(invoice.record_id)) ? (
+              <p className="export-history-warning" role="alert">Alcune fatture di questa esportazione non sono più disponibili nel registro. Non puoi riesportare il gruppo.</p>
+            ) : null}
+            <VirtualDataTable
+              rows={exportHistoryInfo.invoices}
+              rowKey={(invoice) => invoice.record_id}
+              className="export-history-table-wrap export-history-members-wrap"
+              tableClassName="export-history-table export-history-members"
+              headerCells={['N. doc.', 'Data doc.', 'Emittente', 'Condominio', 'Compenso', 'Disponibilità']}
+              renderRow={(invoice) => [
+                invoice.numero_fattura || '-',
+                invoice.data_fattura || '-',
+                <span title={invoice.nome_emittente}>{invoice.nome_emittente || '-'}</span>,
+                <span title={invoice.condominio}>{invoice.condominio || '-'}</span>,
+                invoice.totale_fattura || '-',
+                availableExportInvoiceIds.has(invoice.record_id) ? 'Presente' : 'Non disponibile',
+              ]}
+            />
+            <footer className="registry-cleaning-actions">
+              <button onClick={() => setExportHistoryInfo(null)}>Chiudi</button>
+              <button className="registry-save-button" disabled={exportHistoryInfo.invoices.some((invoice) => !availableExportInvoiceIds.has(invoice.record_id))} onClick={() => reexportHistoryEntry(exportHistoryInfo)}>Riesporta</button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+      {invoiceExport ? (
+        <div className="registry-dialog-backdrop">
+          <section className="registry-dialog invoice-export-dialog" role="dialog" aria-modal="true" aria-labelledby="invoice-export-title" aria-busy={invoiceExport.busy}>
+            <header className="registry-dialog-header">
+              <h2 id="invoice-export-title">{invoiceExport.result ? 'Esportazione completata' : 'Esporta fatture'}</h2>
+            </header>
+            <div className="invoice-export-body">
+              {invoiceExport.result ? (
+                <p>{invoiceExport.result.invoice_count} fatture esportate. Il file rimane disponibile anche in Fatture esportate.</p>
+              ) : invoiceExport.busy ? (
+                <div role="status"><p>Preparazione dei file Excel in corso...</p><progress aria-label="Preparazione esportazione" /></div>
+              ) : (
+                <>
+                  <p>{invoiceExport.ids.length === 1 ? '1 fattura da esportare.' : `${invoiceExport.ids.length} fatture da esportare, raggruppate per condominio.`}</p>
+                  {invoiceExport.historyId ? <p>Verranno usati i dati attuali delle fatture del gruppo.</p> : null}
+                  <fieldset className="invoice-export-options">
+                    <legend>Formato dei file</legend>
+                    <label>
+                      <input autoFocus type="radio" name="invoice-export-mode" checked={invoiceExport.mode === 'workbook'} onChange={() => setInvoiceExport({ ...invoiceExport, mode: 'workbook' })} />
+                      <span><strong>Un unico Excel</strong><small>Un foglio per ogni condominio.</small></span>
+                    </label>
+                    <label>
+                      <input type="radio" name="invoice-export-mode" checked={invoiceExport.mode === 'separate'} onChange={() => setInvoiceExport({ ...invoiceExport, mode: 'separate' })} />
+                      <span><strong>Un Excel per condominio</strong><small>I file vengono scaricati insieme in uno ZIP.</small></span>
+                    </label>
+                  </fieldset>
+                  <label className="invoice-export-summary">
+                    <input type="checkbox" checked={invoiceExport.includeSummary} onChange={(event) => setInvoiceExport({ ...invoiceExport, includeSummary: event.target.checked })} />
+                    <span>Riepilogo ritenute</span>
+                  </label>
+                  {invoiceExport.error ? <p role="alert">{invoiceExport.error}</p> : null}
+                </>
+              )}
+            </div>
+            <footer className="registry-cleaning-actions">
+              {invoiceExport.result ? (
+                <>
+                  <button onClick={() => downloadGeneratedInvoiceExport(invoiceExport.result!.download_url, invoiceExport.result!.file_name)}><DownloadIcon /> Scarica file</button>
+                  <button className="registry-save-button" onClick={() => setInvoiceExport(null)}>Chiudi</button>
+                </>
+              ) : (
+                <>
+                  <button disabled={invoiceExport.busy} onClick={() => setInvoiceExport(null)}>Annulla</button>
+                  <button className="registry-save-button" disabled={invoiceExport.busy} onClick={confirmInvoiceExport}>Esporta</button>
+                </>
+              )}
+            </footer>
+          </section>
+        </div>
       ) : null}
     </main>
   )

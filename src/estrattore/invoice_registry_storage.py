@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+from functools import wraps
+from threading import RLock
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -25,6 +27,17 @@ from estrattore.runtime_paths import RuntimePaths, get_runtime_paths
 
 
 INVOICE_REGISTRY_SCHEMA_VERSION = 3
+REGISTRY_LOCK = RLock()
+
+
+def _serialized_registry_write(function):
+    @wraps(function)
+    def run(*args, **kwargs):
+        with REGISTRY_LOCK:
+            return function(*args, **kwargs)
+    return run
+
+
 INVOICE_EXPORT_COLUMNS = [
     ("saved_at", "Salvata il"),
     ("nome_emittente", "Nome emittente"),
@@ -88,6 +101,7 @@ def load_invoice_registry(
     return payload
 
 
+@_serialized_registry_write
 def purge_discarded_invoice_records(
     runtime_paths: RuntimePaths | None = None,
 ) -> int:
@@ -124,6 +138,7 @@ def purge_discarded_invoice_records(
     return removed
 
 
+@_serialized_registry_write
 def save_reviewed_invoice(
     payload: dict[str, Any],
     runtime_paths: RuntimePaths | None = None,
@@ -137,6 +152,7 @@ def save_reviewed_invoice(
     review_batch_base_path = _required_string(payload, "review_batch_base_path")
     record_id = _record_id(invoice_payload, review_batch_base_path)
     raw_invoice_id = _raw_invoice_id(invoice_payload)
+    document_id = str(invoice_payload.get("documentId") or "").strip()
     registry = load_invoice_registry(paths)
     existing_record = next(
         (
@@ -161,7 +177,10 @@ def save_reviewed_invoice(
             )
         try:
             invoice_ref = load_review_invoice_ref(
-                review_batch_base_path, raw_invoice_id, paths
+                review_batch_base_path,
+                raw_invoice_id,
+                paths,
+                document_id=document_id,
             )
         except (FileNotFoundError, ValueError):
             return existing_record
@@ -182,11 +201,20 @@ def save_reviewed_invoice(
             operation_id, paths, invoice_ref, "invoice_save"
         )
         mark_review_invoice(
-            review_batch_base_path, raw_invoice_id, "saved", paths
+            review_batch_base_path,
+            raw_invoice_id,
+            "saved",
+            paths,
+            document_id=document_id,
         )
         return existing_record
 
-    invoice_ref = load_review_invoice_ref(review_batch_base_path, raw_invoice_id, paths)
+    invoice_ref = load_review_invoice_ref(
+        review_batch_base_path,
+        raw_invoice_id,
+        paths,
+        document_id=document_id,
+    )
     operation_id = _prepare_feedback_review_operation(
         paths=paths,
         invoice_payload=invoice_payload,
@@ -240,10 +268,12 @@ def save_reviewed_invoice(
         raw_invoice_id,
         "saved",
         paths,
+        document_id=document_id,
     )
     return registry_record
 
 
+@_serialized_registry_write
 def discard_reviewed_invoice(
     payload: dict[str, Any],
     runtime_paths: RuntimePaths | None = None,
@@ -256,6 +286,7 @@ def discard_reviewed_invoice(
     review_batch_base_path = _required_string(payload, "review_batch_base_path")
     raw_invoice_id = _raw_invoice_id(invoice_payload)
     record_id = _record_id(invoice_payload, review_batch_base_path)
+    document_id = str(invoice_payload.get("documentId") or "").strip()
     registry = load_invoice_registry(paths)
     existing_record = next(
         (
@@ -281,7 +312,10 @@ def discard_reviewed_invoice(
             )
         try:
             invoice_ref = load_review_invoice_ref(
-                review_batch_base_path, raw_invoice_id, paths
+                review_batch_base_path,
+                raw_invoice_id,
+                paths,
+                document_id=document_id,
             )
         except (FileNotFoundError, ValueError):
             return existing_record
@@ -302,11 +336,20 @@ def discard_reviewed_invoice(
             operation_id, paths, invoice_ref, "invoice_discard"
         )
         mark_review_invoice(
-            review_batch_base_path, raw_invoice_id, "discarded", paths
+            review_batch_base_path,
+            raw_invoice_id,
+            "discarded",
+            paths,
+            document_id=document_id,
         )
         return existing_record
 
-    invoice_ref = load_review_invoice_ref(review_batch_base_path, raw_invoice_id, paths)
+    invoice_ref = load_review_invoice_ref(
+        review_batch_base_path,
+        raw_invoice_id,
+        paths,
+        document_id=document_id,
+    )
     operation_id = _prepare_feedback_review_operation(
         paths=paths,
         invoice_payload=invoice_payload,
@@ -367,6 +410,7 @@ def discard_reviewed_invoice(
         raw_invoice_id,
         "discarded",
         paths,
+        document_id=document_id,
     )
     return result
 
@@ -418,6 +462,7 @@ def save_invoice_registry_excel(
     return target_path
 
 
+@_serialized_registry_write
 def save_invoice_registry_records(
     records: list[dict[str, Any]],
     runtime_paths: RuntimePaths | None = None,
@@ -531,6 +576,7 @@ def save_invoice_registry_records(
     return registry
 
 
+@_serialized_registry_write
 def delete_invoice_archive(
     scope: str,
     record_id: str | None = None,
@@ -539,7 +585,7 @@ def delete_invoice_archive(
     archived_source_pdf_paths: list[str] | None = None,
     runtime_paths: RuntimePaths | None = None,
 ) -> dict[str, Any]:
-    """Delete one persisted projection without cascading into sibling archives."""
+    """Apply an archive or registry action without unintended cascade deletion."""
     paths = runtime_paths or get_runtime_paths()
     registry = load_invoice_registry(paths)
     persisted_records = [
@@ -548,7 +594,7 @@ def delete_invoice_archive(
         if isinstance(record, dict) and record.get("status") in {"saved", "discarded"}
     ]
 
-    if scope in {"invoice", "registry"}:
+    if scope in {"invoice", "registry", "discard_registry"}:
         target_ids = {
             str(value).strip()
             for value in [*(record_ids or []), record_id]
@@ -558,6 +604,7 @@ def delete_invoice_archive(
             record
             for record in persisted_records
             if str(record.get("record_id") or "") in target_ids
+            and (scope != "discard_registry" or record.get("status") == "saved")
         ]
         if not targets:
             raise ValueError("Fatture non trovate")
@@ -598,6 +645,7 @@ def delete_invoice_archive(
     deleted_invoice_file_count = 0
     deleted_source_file_count = 0
     deleted_registry_count = 0
+    discarded_registry_count = 0
     deleted_at = _timestamp()
 
     if scope in {"source", "all"}:
@@ -618,6 +666,13 @@ def delete_invoice_archive(
             continue
 
         next_record = dict(record)
+        if scope == "discard_registry":
+            next_record["status"] = "discarded"
+            next_record["discarded_at"] = deleted_at
+            next_record["registry_visible"] = True
+            next_record.pop("registry_deleted_at", None)
+            discarded_registry_count += 1
+
         if scope == "registry":
             next_record["registry_visible"] = False
             next_record["registry_deleted_at"] = deleted_at
@@ -677,6 +732,7 @@ def delete_invoice_archive(
         "registry": registry,
         "deleted_invoice_count": len(targets),
         "deleted_registry_count": deleted_registry_count,
+        "discarded_registry_count": discarded_registry_count,
         "deleted_invoice_file_count": deleted_invoice_file_count,
         "deleted_source_file_count": deleted_source_file_count,
     }
@@ -731,7 +787,7 @@ def _invoice_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(fields, list):
         raise ValueError("Campi fattura non validi")
 
-    return {
+    invoice_payload = {
         "invoiceId": invoice_id,
         "manifestInvoiceId": str(invoice.get("manifestInvoiceId") or ""),
         "title": str(invoice.get("title") or ""),
@@ -746,6 +802,7 @@ def _invoice_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(field, dict) and str(field.get("kind") or "").strip()
         ],
     }
+    return _normalize_legacy_withholding_invoice(invoice_payload)
 
 
 def _updated_invoice_payload(
@@ -969,10 +1026,9 @@ def _invoice_amount_by_alias(
     return None
 
 
-def _migrate_legacy_withholding_record(record: dict[str, Any]) -> dict[str, Any]:
-    invoice = record.get("invoice")
+def _normalize_legacy_withholding_invoice(invoice: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(invoice, dict) or not isinstance(invoice.get("fields"), list):
-        return record
+        return invoice
 
     field_values = _invoice_field_values(invoice)
     total = _invoice_amount_by_alias(field_values, "totale_fattura")
@@ -988,9 +1044,7 @@ def _migrate_legacy_withholding_record(record: dict[str, Any]) -> dict[str, Any]
         if kind not in WITHHOLDING_FIELD_KINDS:
             migrated_fields.append(field)
             continue
-        is_legacy_percentage = "%" in str(field.get("value") or "") or "%" in str(
-            field.get("label") or ""
-        )
+        is_legacy_percentage = "%" in str(field.get("label") or "")
         migrated_fields.append(
             {
                 **field,
@@ -1002,11 +1056,19 @@ def _migrate_legacy_withholding_record(record: dict[str, Any]) -> dict[str, Any]
         )
 
     return {
+        **invoice,
+        "fields": migrated_fields,
+    }
+
+
+def _migrate_legacy_withholding_record(record: dict[str, Any]) -> dict[str, Any]:
+    invoice = record.get("invoice")
+    if not isinstance(invoice, dict):
+        return record
+
+    return {
         **record,
-        "invoice": {
-            **invoice,
-            "fields": migrated_fields,
-        },
+        "invoice": _normalize_legacy_withholding_invoice(invoice),
     }
 
 
@@ -1032,23 +1094,6 @@ def _ensure_valid_accounting_fields(invoice: dict[str, Any]) -> None:
                 f"Importo non valido ({label}): inserisci un valore numerico "
                 "senza segni o lettere"
             )
-
-    field_values = _invoice_field_values(invoice)
-    total = _invoice_amount_by_alias(field_values, "totale_fattura")
-    withholding = _invoice_amount_by_alias(field_values, "ritenuta")
-    net = _invoice_amount_by_alias(field_values, "totale_netto_fattura")
-    if (
-        total is not None
-        and withholding is not None
-        and withholding >= 0
-        and net is not None
-        and abs((total - withholding) - net) > Decimal("0.01")
-    ):
-        raise ValueError(
-            "Valori contabili non coerenti: totale fattura meno ritenuta "
-            "deve corrispondere al totale netto fattura"
-        )
-
 
 def _record_id(invoice_payload: dict[str, Any], review_batch_base_path: str) -> str:
     return ":".join(

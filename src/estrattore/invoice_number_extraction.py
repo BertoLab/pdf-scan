@@ -358,6 +358,9 @@ def _invoice_number_format_kind(value: str) -> str | None:
     if re.fullmatch(r"\d{1,6}/\d{2,4}", value):
         return "slash_progressivo"
 
+    if re.fullmatch(r"\d{1,6}-\d{4}", value):
+        return "hyphen_progressivo"
+
     if re.fullmatch(r"\d{1,6}/[A-Z]{1,3}", value):
         return "slash_alfanumerico"
 

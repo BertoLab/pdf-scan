@@ -766,8 +766,10 @@ def save_registry_cache_excel(cache: RegistryCache, output_path: Path) -> Path:
                 record.utente or "",
             ]
         )
-
     for column_cells in worksheet.columns:
+        # Registry columns are literal text, including formula-looking user input.
+        for cell in column_cells:
+            cell.data_type = "s"
         max_length = max(len(str(cell.value or "")) for cell in column_cells)
         worksheet.column_dimensions[column_cells[0].column_letter].width = min(
             max(max_length + 2, 12),

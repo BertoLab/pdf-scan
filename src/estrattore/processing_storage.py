@@ -496,7 +496,13 @@ def recover_missing_review_batches(
             pending_refs = [
                 invoice
                 for invoice in batch_refs
-                if (batch.base_path, invoice.invoice_id)
+                if (
+                    batch.base_path,
+                    invoice.document_id,
+                    invoice.invoice_id,
+                )
+                not in finalized_invoice_keys
+                and (batch.base_path, "", invoice.invoice_id)
                 not in finalized_invoice_keys
             ]
             _write_recovered_review_batch(
@@ -635,6 +641,8 @@ def mark_review_invoice(
     invoice_id: str,
     status: str,
     runtime_paths: RuntimePaths | None = None,
+    *,
+    document_id: str = "",
 ) -> None:
     if status not in {"saved", "discarded"}:
         raise ValueError(f"Stato review non valido: {status}")
@@ -645,28 +653,46 @@ def mark_review_invoice(
     viewer_index_path = review_batch_dir / "viewer_index.json"
     review_payload = json.loads(review_index_path.read_text(encoding="utf-8"))
 
-    found = False
+    matching_invoices = [
+        invoice
+        for invoice in review_payload.get("invoices", [])
+        if isinstance(invoice, dict)
+        and str(invoice.get("invoice_id") or "") == invoice_id
+        and (
+            not document_id
+            or str(invoice.get("document_id") or "") == document_id
+        )
+    ]
+    matching_document_ids = {
+        str(invoice.get("document_id") or "")
+        for invoice in matching_invoices
+    }
+    if not matching_invoices:
+        raise ValueError(f"Fattura non presente nel batch di revisione: {invoice_id}")
+    if not document_id and len(matching_document_ids) > 1:
+        raise ValueError(
+            f"Identificativo fattura ambiguo nel batch di revisione: {invoice_id}"
+        )
+
+    target_document_id = document_id or next(iter(matching_document_ids), "")
     closed_invoice_document_id = ""
     closed_invoice_source_batch_id = ""
     closed_invoice_document_dir: Path | None = None
     should_cleanup_closed_invoice = False
-    for invoice in review_payload.get("invoices", []):
-        if isinstance(invoice, dict) and invoice.get("invoice_id") == invoice_id:
-            previous_status = str(invoice.get("status") or "pending")
-            invoice["status"] = status
-            closed_invoice_document_id = str(invoice.get("document_id") or "")
-            closed_invoice_source_batch_id = str(invoice.get("source_batch_id") or "")
-            should_cleanup_closed_invoice = previous_status == "pending"
-            if should_cleanup_closed_invoice and closed_invoice_document_id:
-                closed_invoice_document_dir = _document_dir_for_review_document(
-                    review_batch_dir=review_batch_dir,
-                    document_id=closed_invoice_document_id,
-                    runtime_paths=paths,
-                )
-            found = True
-            break
-    if not found:
-        raise ValueError(f"Fattura non presente nel batch di revisione: {invoice_id}")
+    for invoice in matching_invoices:
+        previous_status = str(invoice.get("status") or "pending")
+        invoice["status"] = status
+        closed_invoice_document_id = str(invoice.get("document_id") or "")
+        closed_invoice_source_batch_id = str(invoice.get("source_batch_id") or "")
+        should_cleanup_closed_invoice = (
+            should_cleanup_closed_invoice or previous_status == "pending"
+        )
+    if should_cleanup_closed_invoice and closed_invoice_document_id:
+        closed_invoice_document_dir = _document_dir_for_review_document(
+            review_batch_dir=review_batch_dir,
+            document_id=closed_invoice_document_id,
+            runtime_paths=paths,
+        )
 
     active_invoices = [
         invoice
@@ -680,6 +706,9 @@ def mark_review_invoice(
     next_documents = []
     for document in viewer_payload.get("documents", []):
         if not isinstance(document, dict):
+            continue
+        if str(document.get("id") or "") != target_document_id:
+            next_documents.append(document)
             continue
         next_invoice_ids = [
             str(current_invoice_id)
@@ -710,33 +739,53 @@ def load_review_invoice_ref(
     review_batch_base_path: str,
     invoice_id: str,
     runtime_paths: RuntimePaths | None = None,
+    *,
+    document_id: str = "",
 ) -> ProcessedInvoiceRef:
     paths = runtime_paths or get_runtime_paths()
     review_batch_dir = review_batch_dir_from_base_path(review_batch_base_path, paths)
     review_index_path = review_batch_dir / "review_batch_index.json"
     review_payload = json.loads(review_index_path.read_text(encoding="utf-8"))
 
-    for invoice in review_payload.get("invoices", []):
-        if isinstance(invoice, dict) and invoice.get("invoice_id") == invoice_id:
-            return ProcessedInvoiceRef(
-                invoice_id=str(invoice.get("invoice_id") or ""),
-                title=str(invoice.get("title") or ""),
-                document_id=str(invoice.get("document_id") or ""),
-                source_batch_id=str(invoice.get("source_batch_id") or ""),
-                source_file_name=str(invoice.get("source_file_name") or ""),
-                status=str(invoice.get("status") or "pending"),
-                process_id=str(invoice.get("process_id") or ""),
-                parent_invoice_record_id=str(
-                    invoice.get("parent_invoice_record_id") or ""
-                ),
-                source_page_numbers=[
-                    int(page_number)
-                    for page_number in invoice.get("source_page_numbers", [])
-                    if isinstance(page_number, int | float | str)
-                    and str(page_number).strip().isdigit()
-                ],
-                display_number=_positive_int(invoice.get("display_number")),
-            )
+    matches = [
+        invoice
+        for invoice in review_payload.get("invoices", [])
+        if isinstance(invoice, dict)
+        and str(invoice.get("invoice_id") or "") == invoice_id
+        and (
+            not document_id
+            or str(invoice.get("document_id") or "") == document_id
+        )
+    ]
+    matching_document_ids = {
+        str(invoice.get("document_id") or "")
+        for invoice in matches
+    }
+    if not document_id and len(matching_document_ids) > 1:
+        raise ValueError(
+            f"Identificativo fattura ambiguo nella revisione: {invoice_id}"
+        )
+
+    for invoice in matches:
+        return ProcessedInvoiceRef(
+            invoice_id=str(invoice.get("invoice_id") or ""),
+            title=str(invoice.get("title") or ""),
+            document_id=str(invoice.get("document_id") or ""),
+            source_batch_id=str(invoice.get("source_batch_id") or ""),
+            source_file_name=str(invoice.get("source_file_name") or ""),
+            status=str(invoice.get("status") or "pending"),
+            process_id=str(invoice.get("process_id") or ""),
+            parent_invoice_record_id=str(
+                invoice.get("parent_invoice_record_id") or ""
+            ),
+            source_page_numbers=[
+                int(page_number)
+                for page_number in invoice.get("source_page_numbers", [])
+                if isinstance(page_number, int | float | str)
+                and str(page_number).strip().isdigit()
+            ],
+            display_number=_positive_int(invoice.get("display_number")),
+        )
 
     raise ValueError(f"Fattura non presente nel batch di revisione: {invoice_id}")
 
@@ -952,6 +1001,9 @@ def reprocess_review_batch(
             }
         )
 
+    next_invoice_entries, _duplicates_removed, _terminal_repairs = (
+        _coalesce_review_invoice_payloads(next_invoice_entries)
+    )
     review_payload["invoices"] = next_invoice_entries
     review_payload["invoice_count"] = sum(
         1
@@ -1525,9 +1577,15 @@ def _insert_split_review_invoice(
 
 
 def _refresh_review_state(state: dict) -> None:
+    invoices, _duplicates_removed, _terminal_repairs = (
+        _coalesce_review_invoice_payloads(
+            state["review_payload"].get("invoices", [])
+        )
+    )
+    state["review_payload"]["invoices"] = invoices
     pending_refs = [
         invoice
-        for invoice in state["review_payload"].get("invoices", [])
+        for invoice in invoices
         if isinstance(invoice, dict)
         and invoice.get("status", "pending") == "pending"
     ]
@@ -2158,6 +2216,13 @@ def _append_global_review_batches(
     if review_batch_size < 1:
         raise ValueError("review_batch_size must be >= 1")
 
+    identities = [
+        (invoice.process_id or process_id, invoice.document_id, invoice.invoice_id)
+        for invoice in invoice_refs
+    ]
+    if len(identities) != len(set(identities)):
+        raise ValueError("Il processamento ha prodotto riferimenti fattura duplicati")
+
     review_batches_dir = _global_review_queue_dir(runtime_paths)
     review_batches_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2274,7 +2339,9 @@ def _recoverable_process_invoice_refs(
     return invoice_refs
 
 
-def _finalized_review_invoice_keys(runtime_paths: RuntimePaths) -> set[tuple[str, str]]:
+def _finalized_review_invoice_keys(
+    runtime_paths: RuntimePaths,
+) -> set[tuple[str, str, str]]:
     registry_path = runtime_paths.invoice_registry_file
     if not registry_path.is_file():
         return set()
@@ -2283,7 +2350,7 @@ def _finalized_review_invoice_keys(runtime_paths: RuntimePaths) -> set[tuple[str
     except (OSError, json.JSONDecodeError):
         return set()
 
-    keys: set[tuple[str, str]] = set()
+    keys: set[tuple[str, str, str]] = set()
     for record in payload.get("records", []):
         if (
             not isinstance(record, dict)
@@ -2297,8 +2364,11 @@ def _finalized_review_invoice_keys(runtime_paths: RuntimePaths) -> set[tuple[str
             invoice.get("manifestInvoiceId") or invoice.get("invoiceId") or ""
         ).strip()
         review_base_path = str(record.get("review_batch_base_path") or "").strip()
+        document_id = str(
+            record.get("document_id") or invoice.get("documentId") or ""
+        ).strip()
         if invoice_id and review_base_path:
-            keys.add((review_base_path, invoice_id))
+            keys.add((review_base_path, document_id, invoice_id))
     return keys
 
 
@@ -2396,6 +2466,50 @@ def _review_batch_with_current_count(
             return None
         if not isinstance(viewer_payload.get("documents"), list):
             return None
+        invoices, duplicates_removed, terminal_repairs = (
+            _coalesce_review_invoice_payloads(review_payload.get("invoices", []))
+        )
+        if duplicates_removed:
+            review_payload["invoices"] = invoices
+            active_invoices = [
+                invoice
+                for invoice in invoices
+                if invoice.get("status", "pending") == "pending"
+            ]
+            review_payload["invoice_count"] = len(active_invoices)
+            viewer_payload = {
+                "documents": _viewer_documents_for_invoice_refs(
+                    default_process_id="",
+                    invoice_refs=[
+                        _processed_invoice_ref_from_payload(invoice)
+                        for invoice in active_invoices
+                    ],
+                )
+            }
+            with _REVIEW_MUTATION_LOCK:
+                _commit_review_mutation(
+                    runtime_paths,
+                    {
+                        review_batch_dir / "review_batch_index.json": review_payload,
+                        review_batch_dir / "viewer_index.json": viewer_payload,
+                    },
+                )
+            for invoice in terminal_repairs:
+                process_id = str(invoice.get("process_id") or "")
+                document_id = str(invoice.get("document_id") or "")
+                document_dir = (
+                    runtime_paths.manifests_dir
+                    / process_id
+                    / "documents"
+                    / document_id
+                )
+                _cleanup_closed_invoice_working_files(
+                    runtime_paths=runtime_paths,
+                    review_batch_dir=review_batch_dir,
+                    document_id=document_id,
+                    source_batch_id=str(invoice.get("source_batch_id") or ""),
+                    document_dir=document_dir,
+                )
         active_count = sum(
             1
             for invoice in review_payload.get("invoices", [])
@@ -2406,6 +2520,11 @@ def _review_batch_with_current_count(
         return None
 
     if active_count == 0:
+        _retire_review_batch_if_complete(
+            runtime_paths=runtime_paths,
+            review_batch_dir=review_batch_dir,
+            review_payload=review_payload,
+        )
         return None
 
     batch_number = _review_batch_number_from_ref(review_batch)
@@ -2421,6 +2540,47 @@ def _review_batch_with_current_count(
         base_path=review_batch.base_path,
         invoice_count=active_count,
     )
+
+
+def _review_invoice_payload_identity(invoice: dict) -> tuple[str, str, str]:
+    return (
+        str(invoice.get("process_id") or ""),
+        str(invoice.get("document_id") or ""),
+        str(invoice.get("invoice_id") or ""),
+    )
+
+
+def _coalesce_review_invoice_payloads(
+    raw_invoices: object,
+) -> tuple[list[dict], int, list[dict]]:
+    if not isinstance(raw_invoices, list):
+        return [], 0, []
+
+    coalesced: list[dict] = []
+    indexes_by_identity: dict[tuple[str, str, str], int] = {}
+    terminal_repairs: list[dict] = []
+    duplicates_removed = 0
+    for raw_invoice in raw_invoices:
+        if not isinstance(raw_invoice, dict):
+            continue
+        identity = _review_invoice_payload_identity(raw_invoice)
+        existing_index = indexes_by_identity.get(identity)
+        if existing_index is None:
+            indexes_by_identity[identity] = len(coalesced)
+            coalesced.append(raw_invoice)
+            continue
+
+        duplicates_removed += 1
+        existing = coalesced[existing_index]
+        existing_status = str(existing.get("status") or "pending")
+        duplicate_status = str(raw_invoice.get("status") or "pending")
+        if existing_status == "pending" and duplicate_status in {"saved", "discarded"}:
+            coalesced[existing_index] = raw_invoice
+            terminal_repairs.append(raw_invoice)
+        elif existing_status in {"saved", "discarded"} and duplicate_status == "pending":
+            terminal_repairs.append(existing)
+
+    return coalesced, duplicates_removed, terminal_repairs
 
 
 def _atomic_write_json(output_path: Path, payload: object) -> None:

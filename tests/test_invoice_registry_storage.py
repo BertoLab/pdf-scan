@@ -234,6 +234,51 @@ def test_invoice_persistence_rejects_withholding_percentage(monkeypatch) -> None
         _clean_workspace(workspace)
 
 
+def test_invoice_persistence_migrates_legacy_percentage_label_before_validation(
+    monkeypatch,
+) -> None:
+    workspace = _workspace()
+    try:
+        paths, review_batch = _processed_review_batch(workspace)
+        invoice_payload = _invoice_payload("invoice-001")
+        invoice_payload["fields"][0]["value"] = "132.27"
+        invoice_payload["fields"].extend(
+            [
+                {
+                    "kind": "totale_fattura",
+                    "label": "Totale fattura",
+                    "value": "44.00",
+                },
+                {"kind": "ritenuta", "label": "Ritenuta %", "value": "4"},
+                {
+                    "kind": "totale_netto_fattura",
+                    "label": "Totale netto fattura",
+                    "value": "42.40",
+                },
+            ]
+        )
+        _mock_pdf_archive(monkeypatch, paths)
+
+        record = save_reviewed_invoice(
+            {
+                "selected_batch_id": review_batch.id,
+                "review_batch_base_path": review_batch.base_path,
+                "invoice": invoice_payload,
+            },
+            runtime_paths=paths,
+        )
+
+        withholding = next(
+            field
+            for field in record["invoice"]["fields"]
+            if field["kind"] == "ritenuta"
+        )
+        assert withholding["label"] == "Ritenuta"
+        assert withholding["value"] == "1.60"
+    finally:
+        _clean_workspace(workspace)
+
+
 @pytest.mark.parametrize(
     ("field_kind", "label", "invalid_value"),
     [
@@ -270,7 +315,38 @@ def test_invoice_persistence_rejects_invalid_accounting_amounts(
         _clean_workspace(workspace)
 
 
-def test_invoice_registry_edit_rejects_inconsistent_withholding_amount(monkeypatch) -> None:
+def test_invoice_persistence_accepts_inconsistent_accounting_amounts(monkeypatch) -> None:
+    workspace = _workspace()
+    try:
+        paths, review_batch = _processed_review_batch(workspace)
+        invoice_payload = _invoice_payload("invoice-001")
+        invoice_payload["fields"].extend(
+            [
+                {"kind": "ritenuta", "label": "Ritenuta", "value": "4.34"},
+                {
+                    "kind": "totale_netto_fattura",
+                    "label": "Totale netto fattura",
+                    "value": "128.03",
+                },
+            ]
+        )
+        _mock_pdf_archive(monkeypatch, paths)
+
+        record = save_reviewed_invoice(
+            {
+                "selected_batch_id": review_batch.id,
+                "review_batch_base_path": review_batch.base_path,
+                "invoice": invoice_payload,
+            },
+            runtime_paths=paths,
+        )
+
+        assert record["status"] == "saved"
+    finally:
+        _clean_workspace(workspace)
+
+
+def test_invoice_registry_edit_accepts_inconsistent_accounting_amounts(monkeypatch) -> None:
     workspace = _workspace()
     try:
         paths, review_batch = _processed_review_batch(workspace)
@@ -309,8 +385,13 @@ def test_invoice_registry_edit_rejects_inconsistent_withholding_amount(monkeypat
             },
         }
 
-        with pytest.raises(ValueError, match="Valori contabili non coerenti"):
-            save_invoice_registry_records([edited_record], runtime_paths=paths)
+        updated_registry = save_invoice_registry_records(
+            [edited_record],
+            runtime_paths=paths,
+        )
+
+        updated_fields = _invoice_field_values_for_test(updated_registry["records"][0])
+        assert updated_fields["ritenuta"] == "20.00"
     finally:
         _clean_workspace(workspace)
 
@@ -825,6 +906,64 @@ def test_delete_registry_row_preserves_both_pdf_archives() -> None:
         assert source_path.exists()
         record = load_invoice_registry(paths)["records"][0]
         assert record["registry_visible"] is False
+        assert record["archived_pdf_path"] == "archive/invoices/invoice.pdf"
+        assert record["archived_source_pdf_path"] == "archive/sources/source.pdf"
+    finally:
+        _clean_workspace(workspace)
+
+
+def test_discard_registry_row_preserves_data_and_both_pdf_archives() -> None:
+    workspace = _workspace()
+    try:
+        paths = get_runtime_paths(workspace / "app-data")
+        paths.ensure_directories()
+        invoice_path = paths.archive_invoices_dir / "invoice.pdf"
+        source_path = paths.archive_sources_dir / "source.pdf"
+        invoice_path.write_bytes(b"invoice")
+        source_path.write_bytes(b"source")
+        paths.invoice_registry_file.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "records": [
+                        {
+                            "record_id": "record-001",
+                            "status": "saved",
+                            "saved_at": "2026-09-22T10:00:00+00:00",
+                            "archived_pdf_path": "archive/invoices/invoice.pdf",
+                            "archived_pdf_url": "/runtime/archive/invoices/invoice.pdf",
+                            "archived_source_pdf_path": "archive/sources/source.pdf",
+                            "archived_source_pdf_url": "/runtime/archive/sources/source.pdf",
+                            "invoice": {
+                                "fields": [
+                                    {"name": "numero_fattura", "value": "42"}
+                                ]
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = delete_invoice_archive(
+            "discard_registry",
+            record_ids=["record-001"],
+            runtime_paths=paths,
+        )
+
+        assert result["discarded_registry_count"] == 1
+        assert result["deleted_registry_count"] == 0
+        assert result["deleted_invoice_file_count"] == 0
+        assert result["deleted_source_file_count"] == 0
+        assert invoice_path.exists()
+        assert source_path.exists()
+        record = load_invoice_registry(paths)["records"][0]
+        assert record["status"] == "discarded"
+        assert record["registry_visible"] is True
+        assert record["discarded_at"]
+        assert record["saved_at"] == "2026-09-22T10:00:00+00:00"
+        assert record["invoice"]["fields"][0]["value"] == "42"
         assert record["archived_pdf_path"] == "archive/invoices/invoice.pdf"
         assert record["archived_source_pdf_path"] == "archive/sources/source.pdf"
     finally:

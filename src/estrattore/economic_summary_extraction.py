@@ -1841,6 +1841,8 @@ def _anchor_definitions() -> list[tuple[str, str]]:
         ("totale_netto_fattura", "netto fattura"),
         ("totale_netto_fattura", "netto a pagare"),
         ("totale_netto_fattura", "importo da pagare"),
+        ("totale_netto_fattura", "importo pagamento"),
+        ("totale_netto_fattura", "netto vs debito"),
         ("totale_netto_fattura", "importo scadenza"),
         ("totale_netto_fattura", "totale dovuto"),
         ("totale_netto_fattura", "tot dovuto"),
@@ -1984,8 +1986,6 @@ def _clean_money_amount_text(text: str) -> str | None:
 
 def _looks_like_money_amount(text: str) -> bool:
     return _clean_money_amount_text(text) is not None
-
-    normalized = normalized.replace("€", "")
 
 
 def _normalize_money_amount(text: str) -> str:

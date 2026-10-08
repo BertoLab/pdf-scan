@@ -4496,3 +4496,590 @@ Verification:
 The result is satisfactory because navigation, content controls, and row actions now
 have distinct visual locations, while the implementation reuses one sidebar pattern
 without changing persistence or business behavior.
+
+## Current point - Make batch-save validation accurate and actionable
+
+### Problem definition
+
+Batch-save validation currently mixes three different states: real unresolved
+problems, already resolved registry choices, and zero-count categories. This makes
+the confirmation dialog noisy and can block a valid save without identifying the
+invoice that needs attention. Legacy review drafts created while withholding meant
+a percentage can also reach the new monetary validator before canonicalization.
+
+The general requirement is that validation must run on the exact canonical payload
+that will be persisted, and every reported issue must still require user action.
+
+### Chosen approach
+
+- canonicalize legacy percentage-labelled withholding at the frontend persistence
+  boundary and repeat the migration in the Python persistence boundary;
+- preserve the accounting comparison as a warning, but do not treat a document's
+  own inconsistent figures as invalid user input;
+- consider a multi-row registry match resolved when the invoice carries a valid
+  explicit registry row selection;
+- show only non-zero issue categories and include the affected invoice plus the
+  concrete reason, so blocking feedback is actionable;
+- snapshot the same canonical invoices for validation and subsequent batch save.
+
+### Verification plan
+
+1. Add backend regressions for legacy draft normalization and true monetary mismatch.
+2. Build and lint the viewer.
+3. Audit the current persisted drafts against the canonical monetary equation and
+   confirm that selected registry rows no longer count as unresolved conflicts.
+4. Exercise the batch confirmation through the local app and inspect the dialog.
+
+### Implementation outcome and closure
+
+Status: completed.
+
+Batch validation now runs on the same canonical invoice snapshots that are later
+persisted. A draft carrying the historical `Ritenuta %` label is converted from the
+observed gross/net difference before validation, while a newly entered percentage
+under the current `Ritenuta` label remains invalid. The Python persistence boundary
+repeats this normalization, so a stale frontend cannot reintroduce the old semantic.
+
+Registry conflicts are no longer reported after the user has selected one of the
+actual matching registry rows. Unresolved ambiguous fiscal codes still produce a
+warning. The batch dialog omits zero-count categories and expands every remaining
+category with the invoice title and concrete reason; long reports scroll inside the
+dialog instead of exceeding the viewport.
+
+The live-data audit found that all five multi-row registry matches represented in
+the current drafts have a valid selected registry row. It also identified one real
+remaining accounting mismatch in `Fattura 020`: `132.27 - 4.34` does not equal
+`128.03`. The revised dialog exposes that exact invoice and equation, but the user
+can still save because invoices may legitimately contain internally inconsistent
+figures that must be recorded as printed.
+
+Verification:
+
+- all 25 invoice-registry storage tests passed, including legacy-label migration,
+  rejection of newly entered percentage syntax, and acceptance of inconsistent but
+  formally valid accounting figures in both review and registry-edit saves;
+- frontend production build passed;
+- frontend lint passed with zero errors and the pre-existing exhaustive-deps warning;
+- the batch-save dialog was exercised through the running local app at 1440, 1728,
+  and 1920 pixel widths;
+- temporary screenshots were inspected and deleted;
+- visual score: 8.5/10 for hierarchy, actionable detail, proportions, and consistency;
+  no touched state scored below 7.
+
+The result is satisfactory because false warnings are removed, malformed monetary
+input remains blocked, and accounting inconsistencies stay visible without changing
+or preventing the user's faithful transcription of the document.
+
+## Current point - Enforce stable review-invoice identity
+
+### Problem definition
+
+A review is a projection of invoices coming from one or more processed documents.
+The current close operation identifies an invoice only by its manifest-local ID.
+After reprocessing produced duplicate projection entries, saving the visible invoice
+closed only one entry while removing every equal ID from the viewer projection. The
+result was a review reported as pending but containing no visible invoices.
+
+The general invariant is:
+
+```text
+review invoice identity = review + process + document + manifest invoice ID
+```
+
+Exact duplicate projection rows are corruption of one logical identity, not separate
+invoices. They must be coalesced, with a terminal saved/discarded state taking
+precedence over a stale pending copy.
+
+### Chosen approach
+
+- pass the document identity through load and close operations;
+- update only the matching document in the viewer projection;
+- close every exact duplicate of that composite identity atomically;
+- deduplicate review projections when they are created or reprocessed;
+- make review listing repair historical exact duplicates and retire a completed
+  projection, so existing empty reviews heal without reprocessing or duplicate saves;
+- preserve invoice-registry record IDs, which already contain the composite frontend
+  invoice identity; fix only the review layer that had discarded the document part.
+
+### Verification plan
+
+1. Reproduce duplicate IDs within one document and equal local IDs across different
+   documents in isolated processing-storage tests.
+2. Verify that closing one logical invoice never hides another document's invoice.
+3. Verify that a historical saved-plus-pending duplicate is repaired and retired.
+4. Run invoice-registry, processing-storage, and API queue tests.
+5. Inspect the live Revisione 002 state after invoking the non-destructive listing
+   reconciliation.
+
+### Implementation outcome and closure
+
+Status: completed.
+
+Review load and close operations now accept the document identity in addition to the
+manifest-local invoice ID. Closing an invoice updates only its document projection;
+exact duplicate rows for the same composite identity are closed together, while an
+equal local ID belonging to another document remains pending and visible.
+
+Projection creation rejects duplicate composite identities. Reprocessing and
+segmentation refresh coalesce historical duplicates. Review listing also performs an
+idempotent repair: terminal `saved` or `discarded` state wins over a stale pending
+copy, the viewer index is rebuilt transactionally, released OCR working documents
+are cleaned, and a fully terminal review is retired. Recovery keys now include the
+document ID, with a wildcard fallback only for legacy registry rows that never
+stored it.
+
+Invoice-registry record IDs remain unchanged because their frontend `invoiceId`
+already contains `document + manifest invoice ID`. Avoiding a second document prefix
+keeps retries idempotent and prevents needless identifier migration.
+
+Verification:
+
+- 79 processing-storage, invoice-registry, and registry-API tests passed;
+- focused regressions cover equal local IDs in different documents and historical
+  exact duplicates with `saved + pending` states;
+- live reconciliation removed Revisione 002 from the API and deleted its review
+  projection directory;
+- the three stale OCR document directories (`doc_000010`, `doc_000014`, and
+  `doc_000015`) were released;
+- the registry still contains the expected 13 outcomes for Revisione 002: 12 saved
+  and one discarded; reconciliation created no additional records;
+- diff integrity checks passed.
+
+The result is satisfactory because review visibility and persistence now share one
+composite identity, historical corruption heals deterministically, and cleanup no
+longer depends on a manifest-local ID being globally unique.
+
+## Current point - Move removed export rows to discarded invoices
+
+### Problem definition
+
+The invoice registry currently uses the same delete projection for saved and
+discarded rows. Removing a row from `Fatture da esportare` merely hides it from the
+registry, although the user's intent at that stage is to classify the invoice as not
+exportable. Hiding and discarding are different domain transitions.
+
+### Chosen approach
+
+- treat removal from `Fatture da esportare` as a status transition from `saved` to
+  `discarded`;
+- preserve invoice and source PDFs, invoice fields, lineage, and original save time;
+- record the discard timestamp and keep the row visible in `Fatture scartate`;
+- retain the existing remove-from-view behavior when deleting an already discarded
+  row;
+- make confirmation and progress copy describe the actual operation rather than a
+  generic deletion.
+
+### Verification plan
+
+1. Add a storage regression proving the status transition and PDF preservation.
+2. Build and lint the viewer.
+3. Exercise the confirmation from both saved and discarded registry views.
+
+### Implementation outcome and closure
+
+Status: completed.
+
+The registry trash action now follows the semantics of the active view. In
+`Fatture da esportare`, selected saved records transition to `discarded`; their
+compiled fields, invoice PDF, source PDF, lineage, and original save timestamp are
+preserved, while a discard timestamp is added. The records consequently disappear
+from the export queue and become visible in `Fatture scartate`.
+
+In `Fatture scartate`, the same control retains the existing explicit
+remove-from-view behavior. The confirmation title, message, progress state, tooltip,
+and error copy distinguish the two operations, so the UI no longer describes a
+classification change as destructive deletion.
+
+Verification:
+
+- all 26 invoice-registry storage tests passed;
+- the new regression proves the state transition and preservation of both PDF
+  archives and invoice data;
+- frontend production build passed;
+- frontend lint passed with zero errors and the pre-existing exhaustive-deps
+  warning at `App.tsx:4588`.
+
+The result is satisfactory because the export queue now has a reversible domain
+destination for unwanted invoices instead of silently hiding them, and no archive
+asset is deleted by that transition.
+
+## Current point - Condominium invoice exports and delivery history
+
+### Problem and resolution theory
+
+Export is a durable accounting delivery, not just table serialization. It must
+preserve grouping identity, fiscal identifiers, numeric types, and the exact set
+of delivered rows. Failed generation must not remove rows from the pending list.
+Browser download completion cannot prove that a user retained the file: retain
+the generated artifact internally and provide a repeatable download instead.
+
+Use established XLSX features: explicit text identifiers, native dates/amounts,
+frozen headers, filters, controlled widths, and repeatable print titles. References:
+https://openpyxl.readthedocs.io/en/stable/print_settings.html and
+https://openpyxl.readthedocs.io/en/latest/styles.html.
+
+### Chosen approach and micro-steps
+
+Final choice: keep accounting status `saved`; track delivery separately through
+`last_exported_at` and `last_export_url`. This avoids changing PDF archive and
+reprocessing semantics. Pending/exported registry views partition saved records.
+
+1. Add an export service: validate selected IDs, group by condominium fiscal code
+   (name fallback, isolate unknown identities), resolve registry codes without
+   ambiguous guesses, generate multi-sheet XLSX or ZIP of individual workbooks.
+2. Persist an immutable internal artifact before atomically updating registry
+   delivery metadata. Retrying download never changes the export timestamp.
+3. Wire POST through the real local-app handler; preserve the existing read-only
+   legacy XLSX route. Add mutually exclusive radio options in a confirmation modal,
+   progress, success download and error states.
+4. Activate exported view, last-export timestamp, re-export and date filters based
+   on last export in that view. Export uses selected visible rows, or all filtered
+   rows when none are selected; editing must be saved before export.
+5. Verify XLSX/ZIP contents and styles, grouping/name collisions, failure behavior,
+   repeated exports, real HTTP transport, frontend build/lint, minimal screenshots.
+
+Primary columns remain white: client code, issuer name, document date, number,
+gross compensation. Remaining invoice fields and provenance use light gray.
+Condominium code/name/CF appear once in a green-accented header. Identifiers remain
+text (leading zeros intact); untrusted text is never interpreted as Excel formulas.
+
+Status: implementing. No production invoice data may be changed by verification.
+
+### Critical review during implementation
+
+The first UI inspection caught a real presentation defect: full date/time plus a
+download link overflowed the existing date column. Keep the visible date and the
+repeat-download link on separate lines; expose the exact time on hover. Modal
+choices use radio buttons because selecting both formats simultaneously is invalid.
+
+The delivery artifact is a deliberate persistent output, not a disposable temp
+file. The commit point is successful artifact creation plus atomic registry write;
+it does not claim that the user accepted a browser save dialog. Previously generated
+artifacts remain immutable after re-export. A process killed between artifact write
+and registry commit can leave an unreferenced export, but cannot mark a missing file
+as delivered. Normal exceptions remove the failed artifact.
+
+Serialization now covers registry writers and export, preventing a simultaneous
+save from overwriting delivery metadata. This is an in-process lock, consistent
+with the application's single backend; multiple independent backend instances
+sharing one runtime are not supported by this change.
+
+The HTTP review found that archive downloads were served only by the composed local
+app. Export download routing now lives in the API handler and is delegated by the
+local app, with an allowlisted immutable artifact path. Tests cover both composition
+roots without mocking transport or storage. Registry-code lookups are indexed once
+per export rather than scanning the full anagrafica for each invoice.
+
+### Outcome, verification and closure
+
+Status: completed.
+
+Exports now offer one workbook with a sheet per condominium, or a ZIP containing
+one workbook per condominium. Saved records without delivery metadata populate
+`Fatture da esportare`; delivered records populate `Fatture esportate`. Re-export
+updates the latest delivery date only for the selected/filtered target set. In the
+exported view, date-range controls explicitly filter the export date. The exact
+time is available on hover and the last generated file can be downloaded again.
+
+Workbook checks confirm condominium header/code/CF, issuer client code, requested
+column order, numeric compensation before withholding, native dates, leading-zero
+preservation, white primary columns, gray supplemental columns, collision-safe
+sheet/file names, and literal (non-formula) text. Unknown codes remain empty;
+ambiguous fiscal matches are resolved only when an explicit registry row exists.
+
+Checks completed:
+
+- 34 Python tests passed (26 registry tests plus 8 export tests), including failed
+  generation, failed registry commit, partial selection, repeated delivery,
+  ambiguous/explicit registry codes, and real HTTP export/download through both
+  RegistryApiHandler and LocalAppHandler;
+- production build passed; lint has zero errors and the pre-existing dependency
+  warning for applyReviewDraftsToInvoices;
+- temporary Playwright check `node tools/ui-checks/checks/check-invoice-export.mjs`
+  exercised the actual built frontend at localhost:8779 against an isolated seeded
+  runtime: workbook download, persisted view transition, date exclusion, selected
+  ZIP re-export, and reload. No HTTP or storage mocks were used. Production data
+  were not modified. The temporary script and fixture runtime were removed;
+- two temporary screenshot paths were inspected, then reused once after correcting
+  the date-column overflow. Modal score: hierarchy 8, spacing 8, readability 8,
+  consistency 8, overall 8. Exported table: hierarchy 8, spacing 7, readability 8,
+  consistency 8, overall 7.5. The existing wide table still needs horizontal scroll;
+  this change retains its shared virtualized layout. Screenshots were deleted.
+
+Limits: workbook contents/styles were inspected with openpyxl, not rendered by
+Microsoft Excel. Browser download completion does not prove a file was retained by
+the user; the internal artifact provides recovery. Export artifacts are retained
+as deliberate delivery snapshots, including older re-exports; no automatic retention
+policy or export-file management UI is introduced here. A hard termination between
+artifact creation and registry commit can leave an orphan artifact, while invoices
+remain pending and can safely be exported again.
+
+### Follow-up - Consistent invoice-date filtering
+
+User clarification supersedes the export-date filtering described above: the
+From/To range must always refer to the invoice date, including the exported view.
+Removed the export-date branch from the shared row filter. Latest-export timestamps
+remain visible and their explicit sort options remain available independently.
+Both initial export and re-export already consume the filtered rows, so they now
+share the corrected date semantics. Build passed; lint reports only the existing
+useEffect dependency warning.
+
+## Current point - Persistent export groups
+
+### Problem, theory and chosen approach
+
+Delivery membership must outlive changes to individual invoices. Last-export
+metadata cannot reconstruct an earlier batch after partial re-export or deletion.
+Use immutable operation receipts with stable IDs and member summaries. Store each
+receipt in the same registry commit as delivery metadata, avoiding a second JSON
+transaction. This is an established event/snapshot pattern, not a novel approach.
+
+Final choice: a top-level export_history list in the existing registry JSON. Each
+successful export appends an ID, timestamp, format, download reference, and immutable
+invoice summaries. A history re-export resolves membership server-side under the
+registry lock and validates every member before generating anything. It uses current
+invoice data and creates a new history entry; original membership stays unchanged.
+
+Availability means saved and visible in the accounting registry. PDF removal alone
+does not make spreadsheet data unavailable. Missing, hidden or discarded rows block
+the entire re-export, including stale UI requests. History deletion removes only
+the receipt, with confirmation; invoice records and their exported status survive.
+An export artifact still referenced by an invoice stays available for download.
+
+### Micro-steps and checks
+
+1. Extend the export commit with receipts; implement server-owned group re-export
+   and history deletion. Preserve existing registry schema compatibility.
+2. Add the sidebar subpage, newest-first compact virtualized list, invoice-info
+   dialog, deletion confirmation, and reuse the format-selection dialog.
+3. Test repeated/overlapping exports, unavailable member atomicity, durable info
+   after removal, delete isolation, and real local-app HTTP contracts.
+4. Build/lint and exercise the UI against an isolated runtime. Keep screenshots
+   limited to the history list and member dialog, inspect and delete afterwards.
+
+Legacy limit: older exports did not store complete membership. Do not fabricate
+historical groups from last_export_url, which may contain only surviving members.
+The new history starts with exports made after this update; previous invoice export
+timestamps and downloads stay intact.
+
+Status: implementing.
+
+### Critical review and verification progress
+
+The first screenshots showed unnecessary empty white height for a two-row history
+and truncated member-table headings. Let both virtualized viewports shrink to their
+content with a bounded maximum height, retaining scrolling for long histories; use
+the existing concise document labels. Availability is based on registry records,
+not PDF files, since an accounting re-export consumes saved field values.
+
+Deleting a receipt keeps its artifact when an invoice still references it as its
+latest download; an unreferenced artifact is removed only within the app-owned
+export directory. File cleanup failure is logged after the receipt commit and never
+deletes accounting data. Re-export is all-or-nothing under the registry lock.
+
+### Outcome and closure
+
+Status: completed. The registry sidebar now includes Storico esportazioni. Receipts
+are displayed newest-first using actual timestamps (including offset), with a
+date/time label, invoice count, original format, info, replay and confirmed delete.
+Info uses immutable member summaries, including unavailable invoices. Replay offers
+the existing two formats, validates server-owned membership, uses current values,
+and creates a new receipt. Previous receipts do not shrink when members disappear.
+
+Verification:
+
+- 39 tests passed across invoice export and registry storage; new checks cover
+  overlapping exports, replay ID tampering, missing/hidden/discarded members,
+  receipt deletion isolation, artifact references and both real HTTP entry points;
+- build passed; lint has zero errors and the existing useEffect dependency warning;
+- temporary Playwright script check-export-history.mjs exercised the actual local
+  app on an isolated runtime at port 8779 without HTTP/storage mocks: ordering,
+  member info, alternate-format download, receipt creation, cancel/confirm deletion,
+  persistent reload, and blocked replay after a registry row was removed;
+- two screenshot paths inspected, then recaptured once after compacting the layout.
+  History: hierarchy 8, spacing 8, readability 8, consistency 8, overall 8.
+  Info/unavailable state: hierarchy 8, spacing 8, readability 8, consistency 8,
+  overall 8. Shared virtualization remains; narrower windows can scroll the table
+  horizontally. Visual inspection was at 1440x900, not an exhaustive viewport audit;
+- screenshot files, temporary UI scripts and seeded runtime removed; test server
+  stopped. No production invoices or exports were modified.
+
+The existing atomic JSON registry can represent this operation cleanly without
+introducing a second persistence system. Remaining limits are legacy membership
+unavailability and the already documented export artifact/registry crash window.
+
+## Current point - Simpler invoice workbook layout
+
+Problem: frozen rows and columns made the accounting workbook behave as separate
+scrolling regions. The heavy partial-width banner and filter controls added visual
+complexity to a file intended for straightforward reading.
+
+Choice: retain the established data columns and native Excel date/number types,
+but use one full-width pale-green title, compact condominium metadata, a restrained
+header row, white primary columns, and very light gray supporting columns. Remove
+freeze panes and visible filter controls, so the entire sheet scrolls together.
+The same sheet builder serves both export formats. Verify the generated workbook
+structure and both modes with focused tests; existing downloaded files remain
+unchanged, while future exports use the new styling.
+
+Status: complete. All 13 invoice-export tests pass, including checks for no
+frozen panes in both delivery formats, retained values and native amount/date
+types. The workbook was inspected structurally with openpyxl; it has not been
+visually opened in Excel in this session. Existing downloads are intentionally
+not rewritten. The simpler formatting removes controls without changing the
+export storage contract or invoice data.
+
+Follow-up: remove the three administrative/file-reference columns from both
+workbook modes. Put the condominium registry code and fiscal code in separate
+plain-text cells beside their labels so exact values (including leading zeros)
+can be copied alone. Center all visible cell contents and derive the title/print
+extent from the remaining ten columns. Accounting values and native Excel
+date/amount formats are unchanged. All 13 focused export tests pass; no old
+export artifact was rewritten.
+
+## Current point - Application and pending extraction audit
+
+Problem: accumulated changes need an evidence-based audit of extraction quality,
+runtime integrity, and maintenance cost before further optimization. Missing values
+alone are not errors; user drafts are not OCR ground truth; old manifests may
+precede current rules.
+
+Approach: read-only inventory of the actual user runtime, trace pending invoices
+through review indexes and manifests, compare selected fields with OCR candidates
+and nearby labels, visually inspect high-confidence date/amount anomalies against
+page images. Review storage/queue/export/frontend boundaries and hot paths in code.
+Use focused isolated tests or pure-function reproductions where they establish a
+specific finding. Do not reprocess or modify production invoices. This audit will
+produce docs/ultime_ottimizzazioni.md in English with observed Italian OCR excerpts,
+priorities, exact examples, proposed minimal fixes, and verification criteria.
+
+Micro-steps: inventory and coverage; extraction triage across all pending invoices;
+confirm representative cases; review architecture and integrity; consolidate a
+prioritized actionable report separating proven defects, hypotheses, and refactors.
+Status: complete, 2026-10-07. Report: [Final Optimization Audit](ultime_ottimizzazioni.md).
+
+Critical decisions and qualifications:
+
+- Census covers 453 pending invoices in 33 reviews, referencing 182 manifests.
+  No missing/ambiguous pending invoice references or viewer membership were found.
+  All stored withholding labels are legacy percentage labels; raw missing counts
+  cannot be presented as current UI counts. Two drafts also differ from extraction.
+- Existing OCR was sufficient for bounded pure-function comparisons; no new OCR or
+  production mutation was needed. Current date selection changes 84 invoice dates
+  and 37 payment dates, but these are differences, not measured improvements.
+- Challenged the first same-day-payment finding by including the shared-payment
+  linking pass. It restores some cases, including R027/F028. The report explicitly
+  avoids presenting an intermediate selector failure as that invoice's final result.
+- Challenged the anchor-only explanation with isolated counterfactuals. Adding
+  `importo pagamento` or `netto vs debito` resolves the selected examples; adding
+  `totale a pagare` does not repair R006/F083. Arithmetic consistency alone accepts
+  incorrect role assignments, so selection/provenance needs work before more rules.
+- Visually checked R022/F193, R005/F062 and R006/F083 against existing page images.
+  Other census hits are not represented as manually certified ground truth.
+- Current economic resolution already rejects several old gross-below-net values.
+  Repeating that guard would not solve parser truncation or incorrect net selection.
+- Architecture findings distinguish reproduced parser/extraction defects from
+  code-established crash/concurrency risks. No destructive crash or race test was
+  performed against production. Performance proposals have no invented speedup claim.
+
+Verification: 326 Python tests passed (240 Pillow deprecation warnings); frontend
+build passed; lint has zero errors and one existing hook dependency warning.
+No UI change, screenshot session, or app lifecycle change was required. Temporary
+audit scripts and duplicate OCR diagnostic JSON are removed after report creation.
+
+Closure: the evidence supports small regression-driven corrections rather than a
+blanket anchor expansion or full rewrite. The report contains concrete examples,
+code entry points, priorities, reproduction locators and acceptance criteria.
+It is an audit/backlog, not authorization to mass-reprocess or overwrite drafts.
+Application code and user runtime data remain unchanged by this audit.
+
+### Audit follow-up - Concrete correction map
+
+User requested an anchor/logic solution for each finding only where the solution
+is clear. Added section 10 to `ultime_ottimizzazioni.md`: E1-E7 corrections,
+exact proposed net-anchor tuples, historical-case dispositions, and A/O work.
+Separated established behavior from untested ranking/geometry choices. In
+particular, no invented weights, broad `dell` replacement, automatic malformed
+money repair, or claim that `totale a pagare` fixes its example. Some fixes prevent
+a false positive without recovering the missing value; that distinction is explicit.
+
+Status: documentation complete. Checked coverage against the report's finding IDs
+and prior evidence. No code/data changes or new extraction/test runs; prior audit
+test results remain identified as prior results rather than follow-up verification.
+
+### Audit implementation - Bounded corrections
+
+Problem: apply demonstrated small corrections without mixing them with unsettled
+ranking, monetary parsing, or persistence redesign. Use the existing extraction
+pipeline and regression fixtures rather than introducing new abstractions.
+Scope: two net anchors, numeric-hyphen-year invoice IDs, distinct explicit same-day
+payment evidence, literal registry Excel text, and unreachable-code removal.
+Same-day payment must not reuse the invoice-date occurrence or a print timestamp.
+Plan: minimal edits; synthetic positive/negative integration tests; full Python
+suite; update the audit with actual coverage and remaining limits. No production
+reprocessing, UI change, or data migration. Status: in progress.
+
+Closure: complete for this bounded scope. Added the two observed net anchors,
+numeric-hyphen-year candidate format, distinct explicit same-day payment support,
+literal registry Excel cells, and removed unreachable code. Sixteen new regression
+cases cover positive/negative extraction, viewer selection, and real XLSX reimport.
+During review, avoided a per-record worksheet scan by setting text types in the
+existing column traversal. No score weights or general parsing rules changed.
+
+Final checks: 342 Python tests pass (240 existing Pillow warnings); build passes;
+lint reports zero errors and the existing hook warning. Sandbox blocked pytest's
+temporary directory on the first attempt; rerun with approval completed normally.
+Verification bypasses OCR, HTTP/browser and packaging, and does not establish
+corpus-wide accuracy. No production data was reprocessed. Report section 11 records
+implemented behavior, coverage and explicitly deferred nontrivial work.
+
+## Current point - Optional withholding export summary
+
+Problem: provide an aggregate check for an export's exact invoice membership,
+without adding another competing detail format or changing date filters/history.
+Choice: existing mutually exclusive formats in a bordered fieldset, independent
+unchecked summary checkbox below. Optional separate XLSX in the same ZIP delivery;
+no summary-only mode or historical-value snapshots (user rejected that complexity).
+Reuse condominium grouping/code lookup and current-value history replay. Sum stored
+withholding with Decimal, expose missing/invalid counts instead of assuming zero.
+No tax-code inference or claims of fiscal payment. Preserve existing artifacts when
+unchecked. Persist the option in history, default false for older receipts.
+Steps: backend summary/bundle, API boolean, dialog state/style, unit and actual
+local-app transport tests, build/lint, isolated Playwright export/reexport and
+temporary screenshots. No writes to production. Status: in progress.
+
+Closure: implemented. `include_summary` is a validated optional API boolean,
+recorded in export history and restored by the replay dialog (legacy false).
+Both detail formats can include `riepilogo_ritenute.xlsx` in the existing ZIP
+artifact; unchecked delivery is unchanged. Summary groups exactly the exported
+membership, uses Decimal sums, shows missing/invalid/negative amounts as excluded
+with a count, keeps unknown totals blank, and does not infer tax payment or period.
+The workbook uses centered text, restrained green headers, highlighted incomplete
+rows, numeric amounts, literal codes and no frozen panes. No extra artifact lifecycle
+was introduced; existing ZIP download/cleanup ownership still applies.
+
+Verification: 348 Python tests passed (240 existing Pillow warnings); build passed;
+lint zero errors, one existing hook warning. Added both-format aggregation, missing
+values, strict option validation, and actual API/local-app HTTP download coverage.
+HTTP tests patch the runtime location only: real handlers, persistence and XLSX/ZIP
+serialization run. They do not exercise OCR or packaging.
+
+Playwright: `node check-summary.mjs` in tools/ui-checks, isolated local-app server
+at 127.0.0.1:8789. Real navigation, export/download, history preference restoration,
+mode change and replay/download passed with no route mocks. Initial script attempts
+used button selectors for menuitem/tab roles; corrected the test, not the app.
+Inspected temporary export screenshot at 1440x900 and replay at 1024x768. Each:
+hierarchy 8, spacing 8, typography 8, consistency 8, responsiveness 8, overall 8.
+The bordered radio group is clearly separate from the additive checkbox; no clipping.
+No mobile or native Excel visual inspection was performed; workbook structure and
+values were checked with openpyxl. Test server stopped; temporary screenshots,
+scripts and seeded runtime removed. Production data untouched. No summary-only mode
+was added, in accordance with the user's simplified three-control design.
+
+Follow-up (2026-10-08): simplified the summary workbook as requested. Removed the
+explanatory sentence and the "Da verificare" column, renamed the amount header to
+"Ritenute" and its total to "Totale ritenute". The table now begins directly below
+the title and spans five columns. The existing calculation and incomplete-row
+highlight remain. Updated workbook position/label assertions; full Python suite:
+348 passed, 240 existing Pillow deprecation warnings. No frontend or runtime data
+change; package work can proceed from this state.

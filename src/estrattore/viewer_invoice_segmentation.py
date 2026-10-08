@@ -954,8 +954,21 @@ def _best_paid_date_target(page_manifests: list[dict], targets: list[dict]) -> d
         )
         for candidate in invoice_dates:
             value = candidate.get("normalized_value", "")
-            if not value or value == invoice_date_value:
+            if not value:
                 continue
+
+            if value == invoice_date_value:
+                row = _payment_date_row_text(candidate, page_manifest)
+                context = row or _normalize_payment_context_text(
+                    candidate.get("nearby_text", "")
+                )
+                words = context.split()
+                same_occurrence = (
+                    invoice_date_target.get("page") == page_manifest.get("page")
+                    and invoice_date_target.get("bbox") == candidate.get("bbox")
+                )
+                if same_occurrence or not _has_payment_execution_context(words):
+                    continue
 
             paid_score = _paid_date_score(candidate, page_manifest)
             if paid_score <= 0:
