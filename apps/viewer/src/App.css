@@ -18,7 +18,7 @@ body {
 main {
   height: 100vh;
   display: grid;
-  grid-template-columns: 210px minmax(0, 1fr) 828px;
+  grid-template-columns: 210px minmax(0, 1fr) clamp(420px, 42vw, 828px);
   overflow: hidden;
   background: #f1f3f2;
 }
@@ -53,7 +53,7 @@ aside {
 
 .invoice-fields-panel p,
 .invoice-fields-panel li {
-  font-size: 31px;
+  font-size: clamp(25px, 1.8vw, 31px);
 }
 
 .invoice-fields-panel ul {
@@ -77,7 +77,7 @@ aside {
 
 .invoice-fields-panel li strong {
   color: #216951;
-  font-size: 32px;
+  font-size: clamp(27px, 1.85vw, 32px);
   display: list-item;
   list-style: disc;
   margin-left: 1em;
@@ -116,7 +116,7 @@ aside {
 
 .invoice-fields-panel li > span {
   display: grid;
-  grid-template-columns: minmax(378px, 1fr) max-content;
+  grid-template-columns: minmax(0, 1fr) max-content;
   column-gap: 16px;
   padding-left: calc(1em + 0.15em);
 }
@@ -231,7 +231,7 @@ aside:first-child h2 {
 }
 
 .invoice-fields-panel h2 {
-  font-size: 32px;
+  font-size: clamp(27px, 1.85vw, 32px);
 }
 
 .fields-header {
@@ -3424,26 +3424,6 @@ button:disabled {
 .registry-page .registry-search input,
 .registry-page:not(.processing-page) .registry-page-actions > button {
   font-size: var(--table-control-font-size);
-}
-
-@media (max-width: 1400px) {
-  main {
-    grid-template-columns: 210px minmax(0, 1fr) minmax(558px, 41vw);
-  }
-
-  .invoice-fields-panel p,
-  .invoice-fields-panel li {
-    font-size: 25px;
-  }
-
-  .invoice-fields-panel h2,
-  .invoice-fields-panel li strong {
-    font-size: 27px;
-  }
-
-  .invoice-fields-panel li > span {
-    grid-template-columns: minmax(0, 1fr) max-content;
-  }
 }
 
 @media (max-width: 980px) {

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import os
+import sys
 from collections import defaultdict
 from pathlib import Path
 import shutil
@@ -8,6 +9,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
+from estrattore.runtime_paths import bundled_assets_root
 from estrattore.model import (
     BoundingBox,
     DetectedTableCellRegion,
@@ -656,6 +658,12 @@ def _configure_tesseract_command() -> None:
 
 
 def resolve_tesseract_cmd() -> Path | None:
+    if getattr(sys, "frozen", False):
+        command = bundled_assets_root() / "vendor" / "tesseract" / "tesseract.exe"
+        if not command.is_file():
+            raise RuntimeError("OCR non disponibile: manca Tesseract nel pacchetto dell'app.")
+        return command
+
     candidates = [
         _project_root() / "vendor" / "tesseract" / "tesseract.exe",
         Path("C:/Program Files/Tesseract-OCR/tesseract.exe"),
@@ -705,7 +713,10 @@ def _tessdata_config(ocr_profile: str) -> str:
     if tessdata_dir is None or not tessdata_dir.exists():
         return ""
 
-    return f"--tessdata-dir {tessdata_dir.as_posix()}"
+    if os.name == "nt":
+        os.environ["TESSDATA_PREFIX"] = str(tessdata_dir)
+        return ""
+    return f'--tessdata-dir "{tessdata_dir.as_posix()}"'
 
 
 def _validate_tesseract_languages(

@@ -1,0 +1,18 @@
+# Windows/Python 3.12 runtime closure used by the first packaging stage.
+# Re-evaluate deliberately when Python or application dependencies change.
+-e .[ocr]
+et-xmlfile==2.0.0
+openpyxl==3.1.5
+packaging==26.2
+pdf2image==1.17.0
+Pillow==12.2.0
+pypdf==6.15.0
+pytesseract==0.3.13
+pywebview==6.2.1
+pythonnet==3.2.1
+proxy_tools==0.1.0
+bottle==0.13.4
+typing_extensions==4.16.0
+clr_loader==0.3.1
+cffi==2.1.1
+pycparser==3.1

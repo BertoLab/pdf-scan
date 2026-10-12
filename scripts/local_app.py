@@ -4,7 +4,6 @@ import mimetypes
 import sys
 import webbrowser
 from datetime import datetime
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -19,9 +18,11 @@ from scripts.registry_api import (
     RegistryApiHandler,
     ensure_registry_runtime_ready,
 )
+from estrattore.runtime_paths import bundled_assets_root
+from scripts.local_http import LocalHTTPServer
 
 
-VIEWER_DIST_PATH = PROJECT_ROOT / "apps" / "viewer" / "dist"
+VIEWER_DIST_PATH = bundled_assets_root() / "apps" / "viewer" / "dist"
 
 
 class LocalAppHandler(RegistryApiHandler):
@@ -69,7 +70,7 @@ class LocalAppHandler(RegistryApiHandler):
             return
 
         body = candidate.read_bytes()
-        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        content_type = _content_type(candidate)
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -84,7 +85,7 @@ class LocalAppHandler(RegistryApiHandler):
             return
 
         body = candidate.read_bytes()
-        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        content_type = _content_type(candidate)
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -104,12 +105,22 @@ class LocalAppHandler(RegistryApiHandler):
             return
 
         body = static_path.read_bytes()
-        content_type = mimetypes.guess_type(static_path.name)[0] or "application/octet-stream"
+        content_type = _content_type(static_path)
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+def _content_type(path: Path) -> str:
+    # Do not let Windows file associations change module-script MIME types.
+    return {
+        ".js": "text/javascript", ".css": "text/css", ".html": "text/html",
+        ".json": "application/json", ".pdf": "application/pdf",
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".svg": "image/svg+xml",
+    }.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
 
 def _resolve_static_path(request_path: str) -> Path | None:
@@ -147,17 +158,25 @@ def _is_inside_runtime_archive(path: Path) -> bool:
 
 
 def serve_local_app(open_browser: bool = True, port: int = PORT) -> None:
-    ensure_registry_runtime_ready()
-    server = ThreadingHTTPServer((HOST, port), LocalAppHandler)
-    app_url = f"http://{HOST}:{port}"
-    _append_startup_log(app_url)
+    server = create_local_app_server(port)
+    app_url = f"http://{HOST}:{server.server_port}"
     print(f"App locale attiva su {app_url}")
     print("Backend anagrafica incluso nello stesso processo")
     print(f"Dati app: {RUNTIME_PATHS.app_data_dir}")
     print(f"Log app: {RUNTIME_PATHS.logs_dir}")
     if open_browser:
         webbrowser.open(app_url)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+
+def create_local_app_server(port: int = PORT, *, require_session: bool = False) -> LocalHTTPServer:
+    ensure_registry_runtime_ready()
+    server = LocalHTTPServer((HOST, port), LocalAppHandler, require_session=require_session)
+    _append_startup_log(f"http://{HOST}:{server.server_port}")
+    return server
 
 
 def _append_startup_log(app_url: str) -> None:

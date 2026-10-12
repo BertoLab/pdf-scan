@@ -5083,3 +5083,952 @@ the title and spans five columns. The existing calculation and incomplete-row
 highlight remain. Updated workbook position/label assertions; full Python suite:
 348 passed, 240 existing Pillow deprecation warnings. No frontend or runtime data
 change; package work can proceed from this state.
+
+## Current point - Windows desktop packaging
+
+### Problem definition
+
+Distribution is not just producing an EXE. The complete app must start, render,
+process PDFs, own its child processes, and retain user data after replacement on a
+Windows machine without the developer's Python, Node, MiKTeX, or repo checkout.
+The distributable and persistent data have different lifecycles.
+
+### Resolution theory and choice
+
+Keep one source repository and add a small `packaging/` area for build inputs.
+Build React once, freeze the Python launcher/backend in one directory, and open the
+local UI in a launcher-owned window. A one-directory build is easier to diagnose
+and update than a self-extracting single file. No new application project or UI
+rewrite is needed. Treat OCR binaries and language data as explicit package
+dependencies; test on a clean Windows environment before calling it deliverable.
+Use an installer only after the portable directory is proven. This is the final
+architecture approached in incremental milestones, not a throwaway simulation.
+
+### First audit (2026-10-08)
+
+- `runtime_paths.py` already puts user data under `%LOCALAPPDATA%` and has a frozen
+  branch for the application root. Existing data must not be moved or reset.
+- `document_supervisor.py` already launches a frozen `--document-worker` mode.
+  The future launcher must dispatch this mode before starting server/window.
+- `local_app.py` serves `apps/viewer/dist`; package layout must mirror that path
+  or provide an explicit asset root. Its current source-mode server does not own a
+  desktop window or implement shutdown on window close.
+- `vendor/tesseract` contains a Windows runtime and language data. The package
+  should include only the necessary runtime files, subject to license review.
+- `io.py` uses `pdf2image` without `poppler_path`; this PC resolves `pdfinfo` and
+  `pdftoppm` via MiKTeX. A package that silently relies on that is incomplete.
+- `apps/viewer/dist/sample` contains development/sample output and must not be
+  carried into the user's distributable as archived invoice data.
+- PyInstaller and pywebview are not installed in the current virtual environment.
+
+### Micro-steps and checks
+
+1. Define the reproducible frontend build and the exact packaged static assets;
+   fail clearly if the build is absent, and exclude sample invoice artifacts.
+2. Create the desktop entrypoint with worker-mode dispatch, loopback HTTP server,
+   controlled window, single-instance/port behavior, startup diagnostics and
+   explicit close semantics for active jobs.
+3. Freeze into `onedir` with pinned packaging inputs and inspect the resulting
+   tree for code/assets versus user data. Build and launch from a path with spaces.
+4. Bundle Tesseract plus Italian data and a licensed Poppler runtime, then run a
+   real PDF through the frozen worker without MiKTeX/Tesseract in PATH.
+5. Verify saves, archives, export, restart persistence, cancel, forced shutdown,
+   crash recovery, and absence of orphan OCR processes against isolated app data.
+6. Only then add installer/update mechanics and test Windows 10/11 on clean PCs.
+
+Status: architecture and dependency audit started. No packaged executable exists
+yet, and this audit does not claim portability or an OCR end-to-end check.
+
+### Distribution constraint - One self-contained application
+
+User clarification (2026-10-08): no separately installed runtime products. All
+application dependencies must belong to the app and share its uninstall lifecycle.
+This removes the old plan's option to require a separate OCR installation.
+
+General issue: ownership covers the entire dependency chain, not only Python/OCR.
+Bundled engines and host frameworks can introduce prerequisites, profiles and
+update mechanisms. One wizard installing several shared products does not satisfy
+the requested private ownership.
+
+Decision: bundle Python, frontend, PDF/OCR tools and the web engine. Prefer private
+WebView2 Fixed Version binaries with explicit pywebview runtime-path selection;
+host/framework compatibility still needs a real packaged check. No system fallback
+in release mode. Account for larger delivery and explicit engine updates in our
+release process. This is a standard deployment choice, not a verified bundle yet.
+
+Updated packaging_plan.md in English, preserving roadmap numbering and replacing
+external-install alternatives with this contract. Added clean/offline-machine
+acceptance, component inventory, app-owned web profile/cache, upgrade and uninstall
+checks. Program/runtime/cache files are removed on uninstall; business data are
+preserved by default with an explicit full internal-data removal option. External
+originals and user exports remain outside the uninstaller's deletion scope.
+
+Verification: reviewed Microsoft Fixed Version distribution guidance and pywebview
+runtime-path API, and checked plan consistency. Documentation only: no build,
+dependency installation, production data mutation or portability test in this step.
+
+### Dependency audit before packaging
+
+Problem: a desktop release owns the complete dependency graph, including binaries,
+data files, subprocesses and build inputs. Merely reading Python package metadata
+misses PDF converters, trained models, frontend assets and native dialogs.
+
+Approach: trace actual launcher/API/worker entrypoints, compare imports against
+declared packages, inspect external executable resolution and bundle inputs, then
+classify confirmed failures separately from untested frozen behavior. No deletion
+or speculative cleanup during an audit.
+
+Result: see `docs/dependency_audit.md` for the runtime map, ten prioritized
+findings and a release gate. Most urgent: MiKTeX supplies pdfinfo/pdftoppm today;
+local Tesseract binaries are ignored by Git and include unused training tools;
+feedback code fingerprint reads absent source files when frozen; packaging from
+the broad development venv would not be reproducible. Tk file dialogs and
+debug_words are active runtime paths, despite being easy to misclassify.
+
+Verification: local Tesseract 5.4.0 and ita/eng/osd languages responded; pip check
+passed; dependency declarations and lockfile inspected; repo has 460 tracked
+temporary/test paths of 572 tracked paths. Read-only code audit and documentation
+change, no frozen or clean-machine run. Audit point closed; packaging implementation
+must address the report before release.
+
+### Packaging point 1 - Controlled build inputs
+
+Problem: an application release must have a known set of inputs independent of
+whatever happens to be installed in the developer environment. The sibling risks
+are unpinned Python transitive packages, stale frontend assets and accidental
+inclusion of example invoices or unrelated test files.
+
+Theory: isolate build tooling, pin the runtime dependency closure, install the
+frontend from its existing lockfile, and stage only approved assets. A clean venv
+plus pinned versions makes this stage repeatable on the same Python/Windows
+platform. It is not bit-for-bit reproducibility or a complete desktop bundle:
+native engines and the future host will get their own pinned inputs.
+
+Choice: a healthy incremental build preparation command in `packaging/`, using
+Python 3.12 x64 and `build/` for throwaway environment/staging. Keep the current
+development venv and user AppData untouched. Release staging contains only built
+frontend files, with sample/debug output excluded by construction.
+
+Micro-steps:
+
+1. Pin the currently verified app/OCR dependency closure in a packaging-specific
+   requirements file; install it with the local project in a new venv.
+2. Run `npm ci`, frontend lint and build from the committed npm lockfile.
+3. Copy only `index.html`, referenced static icons and Vite assets into a
+   dedicated ignored staging directory.
+4. Verify package list, basic module imports, frontend files and absence of
+   sample/test content. Note any environment/network limits honestly.
+
+Closure: the first controlled build-input stage is complete. Added
+`packaging/requirements-app.txt`, `packaging/prepare_build.py` and a short usage
+note. The command rebuilds an isolated Python 3.12 x64 environment under ignored
+`build/`, copies the frontend source into an isolated work directory, uses the
+committed npm lockfile there, then stages only index/icons/hashed assets. It does
+not touch the developer venv, viewer node_modules or persistent application data.
+
+Actual run: clean venv installation, pip check and imports passed. `npm ci`, lint
+and Vite build passed. Lint emitted one existing React hook dependency warning in
+App.tsx and zero errors. The staged frontend contains five files with no sample
+directory. A first npm install displayed vulnerability counts; a subsequent full
+`npm audit --json` and production-only audit both returned zero findings. Treat
+that warning as inconclusive rather than declaring a known production issue.
+
+The sandbox first blocked Python's temporary directory during ensurepip; the
+approved run completed. The dependency versions are pinned for this first stage,
+but wheel hashes, desktop host/bundler and native runtimes still need a final
+component inventory. No frozen app or clean-machine test has been claimed.
+Next point: make PDF conversion and OCR binary resolution private and explicit.
+
+### Packaging point 2 - Private PDF and OCR engines
+
+Problem: the desktop release must own every executable and data file used by PDF
+rendering and OCR. A Python wheel alone does not provide `pdfinfo`, `pdftoppm`,
+Tesseract DLLs or language models. Source-mode fallbacks currently mask missing
+bundle files on this developer PC. The adjacent concerns are binary provenance,
+licenses, DLL closure, reproducible staging and clear failure diagnostics.
+
+Theory: stage pinned native archives into a private application directory, verify
+download integrity, preserve required DLLs and license materials, then resolve
+executables explicitly relative to the bundle root. A packaged app must fail
+closed rather than searching PATH or Program Files. Development may continue to
+use installed tools. A true acceptance check must run PDF rendering and OCR via
+the staged binaries, and later repeat inside a frozen process on a clean PC.
+
+Choice (healthy incremental): use a pinned Windows Poppler release with a fixed
+SHA-256, and stage the existing Tesseract 5.4 runtime plus only OCR-required data.
+Keep native files under `build/desktop-assets/vendor/` for the later `onedir`
+bundle. The staged artifact is not yet a distributable executable. Redistribution
+license review remains a release gate; a checksum proves artifact identity, not
+the license or authenticity of the upstream binary.
+
+Micro-steps:
+
+1. Specify pinned Poppler source/checksum, private native layout and retained
+   attribution files; stage from a verified archive.
+2. Stage Tesseract runtime/DLL closure and required language profiles without
+   training tools; validate via `--version` and `--list-langs`.
+3. Route `pdf2image` and pytesseract through private paths in frozen mode,
+   preserving source-mode compatibility while forbidding packaged system fallback.
+4. Add focused path/failure tests and a real PDF-render/OCR staging smoke test.
+5. Review scope, license gaps and residual frozen/clean-PC checks before closure.
+
+Closure: native PDF/OCR build inputs and release-only private resolution are in
+place. `packaging/prepare_native.py` downloads Poppler Windows 26.09.0-0 from a
+fixed release URL, verifies SHA-256 before extraction, and stages `pdfinfo.exe`,
+`pdftoppm.exe`, their adjacent DLLs, Poppler data and included COPYING files.
+It fingerprints the selected Tesseract 5.4.0.20240606 executable/DLL/model/notice
+set before staging only runtime files. `prepare_build.py` now invokes this native
+stage after the controlled frontend build. The staged engines occupy about
+101.5 MB (Poppler) and 184.7 MB (Tesseract); no training executables are staged.
+
+`bundled_assets_root()` resolves to PyInstaller's `_MEIPASS` when frozen. In that
+mode `load_scan` passes only the bundled Poppler bin directory to pdf2image,
+and pytesseract uses only bundled Tesseract. Missing private tools fail clearly;
+there is no fallback to MiKTeX, Program Files or PATH. Source mode retains its
+existing developer fallback. The Tesseract data path is now quoted for install
+directories with spaces.
+
+Checks: 181 focused Python tests passed, including frozen-mode missing/present
+tool paths and data paths with spaces. The native smoke test generated a temporary
+PDF, rendered it using staged Poppler, and read `FATTURA 123` using staged
+Italian Tesseract; it also passed with PATH restricted to Windows system dirs.
+The full `py -3.12 packaging/prepare_build.py` run passed: clean Python venv,
+`pip check`, frontend lint/build and native engine checks. Lint retained one
+pre-existing React hook warning (zero errors). `npm ci` displayed seven audit
+findings in the full development tree; `npm audit --omit=dev` reported zero
+production findings. The native smoke and unit tests exercise the runtime adapter
+but do not substitute for a frozen EXE or clean-machine test.
+
+Residual release gates: the Poppler archive includes COPYING notices for its
+data, but the redistribution obligations of the Poppler binary and all linked
+libraries still require a component-level legal review and complete notices.
+The pinned Tesseract source is currently a local ignored input; a second build
+machine must obtain the exact runtime or fail the fingerprint check. The future
+PyInstaller spec must place the staged files at the bundle root, then prove
+real PDF/OCR through the EXE on clean Windows 10 and 11 without network, MiKTeX
+or installed Tesseract. This point is closed as native staging and resolution,
+not as a distributable app. Next point: launcher, controlled window and lifecycle.
+
+### Packaging point 3 - Desktop launcher and owned lifecycle
+
+Problem: turning the local web app into one desktop application is primarily an
+ownership problem. The window, HTTP listener, data directory, OCR worker tree,
+file downloads and second-launch behavior must share one lifecycle. A browser
+tab cannot own that lifecycle; an available TCP port alone is not a safe
+single-instance guard for persistent data.
+
+Theory: use one application entrypoint, acquire a per-data-directory process
+lock before loading storage, bind HTTP on loopback with an OS-assigned port,
+start the web host from that bound socket, then open a controlled embedded
+window. Make shutdown explicit: block new jobs, cancel and wait for the active
+worker, leave queued jobs persisted, and close the server. Forced termination
+remains covered by existing job-object and startup recovery logic. A packaged
+host must fail closed if its private web engine is absent.
+
+Host evaluation: pywebview's Windows backend requires .NET Framework 4.6.2+;
+the supported Windows 10 baseline (1809+) already includes 4.7.2, and Windows
+11 includes a newer version, so this is an OS baseline rather than a second
+app installation. Microsoft Fixed Version WebView2 can be private but Windows
+10 unpackaged apps need App Container read/execute ACLs on its directory.
+Qt WebEngine would also be private, but would introduce larger Qt deployment
+and Visual C++ redistribution obligations. Keep pywebview, while treating
+fixed-engine staging, ACLs and clean-machine tests as hard release gates.
+
+Choice: final launcher architecture implemented incrementally. Keep
+`scripts/run_app.py` as a development browser command; add a separate desktop
+entrypoint and reusable local-server factory. Source-mode desktop launch may
+use the machine's web engine for development; frozen mode must name an existing
+private Fixed Version runtime and never silently select system WebView2.
+
+Micro-steps:
+
+1. Expose a bound local server factory and bundle-relative static assets.
+2. Add per-data-directory process lock and startup/close diagnostics.
+3. Add queue shutdown control: cancel active processing, preserve queued work,
+   wait for worker termination before allowing desktop exit.
+4. Add pywebview host and frozen worker-mode dispatch, with strict private
+   runtime check; preserve file opening/download behavior.
+5. Verify unit contracts plus the actual source-mode server/window route where
+   possible; list what still requires the frozen EXE and clean Windows.
+
+Closure: added `scripts/desktop_app.py` as a single Windows entrypoint. It
+dispatches frozen document workers before loading the UI, acquires a per-data
+directory Windows lock, starts the existing API/static host on a bound loopback
+port, opens an owned pywebview window, and closes the server after the window.
+The active OCR job is offered cancellation on close; queued jobs remain in
+persistent storage. The browser-based `run_app.py` remains a development path.
+The viewer no longer loads development sample invoices in desktop mode when no
+review batch exists. Python and frontend assets are staged from pinned inputs;
+the private web engine is intentionally a subsequent release-build step.
+
+Verification path: the real source-mode desktop entrypoint -> pywebview window
+-> loopback HTTP server -> built React assets -> registry/review/draft/job API
+routes was exercised in an isolated data directory. The window loaded and
+closed cleanly after the clean `prepare_build.py` run. The 31 focused tests
+covered the Windows instance lock, missing private-runtime failure, worker
+dispatch, server routes and queue cancellation/persistence. The mocked
+webview-adapter test verifies launcher wiring only; the separate unmocked GUI
+smoke covers the actual source-mode host. It does not prove the frozen bundle,
+private Fixed Version WebView2, PDF preview/download behavior, OCR cancellation
+under load or clean-machine Windows 10/11 operation. Build lint has one existing
+React Hook warning, zero errors; TypeScript/Vite build and `pip check` passed.
+The clean npm install reported seven full-tree audit findings, while
+`npm audit --omit=dev` reported zero production findings.
+
+Visual check: temporary Playwright screenshots at 1440, 1728 and 1920 widths
+showed the desktop empty state without sample data or overlap; they were then
+deleted. Empty viewer state 7/10 at 1728/1920: clear primary action and neutral
+message, but a large unused fields area inherited from the review layout.
+At 1440 the header wraps and scores 7/10: functional but less balanced.
+Overall 7/10 for this launcher-specific empty state; no redesign of the review
+workspace was made during packaging.
+
+Residual gates: stage and verify the private Fixed Version WebView2 runtime
+(including Windows 10 App Container read/execute ACLs), freeze the entrypoint
+and worker with PyInstaller, verify dialogs/PDF previews/downloads and real OCR
+through the EXE, and test graceful/forced close plus second launch on clean
+Windows 10 and 11. The pywebview default opens new-window requests in the
+system browser, so PDF preview UX needs a deliberate desktop acceptance test.
+No distributable application or installer is claimed at this point.
+
+### Packaging point 4 - Reproducible onedir executable (complete)
+
+Problem: a desktop program is not merely a Python executable. Every imported
+module, browser engine, OCR/PDF binary, frontend asset and child-worker entry
+must survive relocation to another Windows PC, without falling back to tools
+installed on the developer's machine. Adjacent problems are source provenance,
+large runtime updates, filesystem permissions, user-data isolation and clean
+machine verification.
+
+Theory: use an explicit build manifest (`.spec`) and a clean build environment,
+pin tool/runtime versions, verify downloaded artifacts before extraction, and
+assemble an inspectable `onedir` tree. Execute the frozen program with isolated
+user data and test the actual worker path, not only Python imports. An installer
+is a separate layer on top of a validated directory package. Fixed WebView2
+requires shipping the complete runtime; on unpackaged Windows 10 applications
+version 120+ requires App Container RX permissions on the installed runtime.
+
+Choice (healthy incremental): freeze the existing launcher with PyInstaller;
+stage the official Microsoft x64 Fixed Version WebView2 CAB under the bundle's
+`vendor/webview2`; retain existing private Poppler and Tesseract staging.
+Use the current 153.0.4234.48 official CAB after verifying its checksum and
+Microsoft signature. The build command must fail if any pinned private input is
+missing, instead of delivering a misleading partially functional package.
+
+Micro-steps:
+
+1. Download the official CAB into ignored build cache; record its SHA-256 and
+   validate signature, contents and extraction layout.
+2. Add a pinned WebView2 staging function and build-tool requirements; integrate
+   into the existing clean preparation command.
+3. Add an explicit PyInstaller `onedir` spec with only runtime files, compiled
+   frontend and required hidden imports; keep user data and development samples
+   outside the bundle.
+4. Build, inspect artifact contents, run the actual EXE from a relocated path
+   with spaces and isolated data, then exercise frontend/API and a real OCR
+   worker through that EXE. Verify second-instance and shutdown behavior.
+5. Record size, license/ACL/update obligations and what still needs clean
+   Windows 10/11 testing and an installer before distribution.
+
+Working observations: the official CAB URL is embedded in Microsoft's WebView2
+download page; the 153.0.4234.48 x64 package advertises 308,509,880 bytes and
+supports byte ranges. The direct download is unusually slow in this environment.
+The first negative PyInstaller build correctly rejected a missing WebView2
+runtime, but its `--clean` flag also cleared the global PyInstaller cache in
+AppData. Removed that flag and added an input preflight so future attempts only
+modify this project's generated `build/` tree. This is not application data,
+but project build commands should not have that side effect.
+
+The build-tool cache now uses `build/pyinstaller-cache` rather than user AppData.
+The launcher also checks the pywebview loaded event, not merely whether a
+WebView2 executable file exists. Source-mode real-window smoke and nine focused
+launcher/bundle tests passed after this change. A parallel range download
+experiment received no bytes and was stopped; the official serial CAB transfer
+resumed from the previously downloaded prefix. Do not keep range fragments.
+
+Implementation and decisions: `packaging/build_desktop.py` prepares a clean
+Python build environment, the production frontend, private Poppler/Tesseract,
+and the pinned Microsoft Fixed Version WebView2 runtime. The explicit
+`EstrattoreScanFatture.spec` freezes the same launcher used in source mode and
+bundles only application assets. The verified CAB is 308,509,880 bytes, SHA-256
+`11e8240cb0bc56dcd3e4498907203c251346f65107fe35a3a13e152c7d51c79e`;
+its CAB and extracted executable have valid Microsoft signatures. The staged
+WebView2 runtime contains 257 files. The build applies the two AppContainer RX
+ACLs required for unpackaged Windows 10 use; an installer must apply those ACLs
+again at the final installation location. Build caches remain inside `build/`.
+
+The first frozen OCR run from a path with spaces exposed a real Windows-only
+contract issue: pytesseract passed literal quotes from `--tessdata-dir` to
+Tesseract. The adapter now sets `TESSDATA_PREFIX` on Windows for both fast and
+best profiles. Another smoke run closed the window before React's loaded event;
+the launcher now distinguishes an intentional early close from a failed load,
+and the smoke waits for a confirmed loaded event. These are fixes to the real
+launcher/worker path, not package-only workarounds.
+
+Verification: the complete clean build passed. The onedir artifact contains
+1,839 files and 1,284,182,805 bytes, with no development sample or user data.
+The frozen smoke copied it to an isolated path containing spaces, launched its
+worker with a restricted system PATH, OCR'd a synthetic PDF, served the React
+application and backend routes, loaded the private WebView2 process, uploaded
+and processed a PDF through the HTTP API into a review, then closed the window
+and checked process exit. This exercises the packaged launcher, local HTTP
+transport, backend, worker, private OCR/PDF binaries, frontend, and browser
+runtime without mocking those boundaries. It uses synthetic test data rather
+than real studio documents. The focused Python suite passed (39 tests), OCR
+regression subset passed (10 tests), production frontend build passed, and
+frontend lint reported only one pre-existing React hooks warning. A production
+dependency audit found no moderate-or-higher vulnerabilities. Native staging
+smoke passed separately. `git diff --check` passed for tracked edits.
+
+Critical review: this point delivers a relocatable Windows onedir application,
+not a distributable installer. The large Fixed Version browser runtime is a
+deliberate cost of avoiding a machine-level WebView2 prerequisite. The EXE is
+unsigned; SmartScreen/code signing and third-party license review remain
+release gates. A clean Windows 10 and Windows 11 VM check is still required,
+including the native file picker, PDF preview/new-window behavior, export
+downloads, and close/cancel while OCR runs. The current PDF preview may open
+the system browser, which should be resolved before claiming a wholly private
+desktop experience. Installer design must preserve `%LOCALAPPDATA%` user data
+and apply ACLs at the installed runtime location. These are the next packaging
+point, not evidence that the onedir build failed.
+
+### Packaging point 5 - Desktop file interactions (complete; clean-machine acceptance pending)
+
+Problem: an application-private desktop shell is not complete if file
+interactions silently escape into the system browser or depend on the
+developer's installed tools. This includes selection, preview, download and
+window ownership. Each interaction must preserve the same local-app data and
+security boundaries used by the main window.
+
+Theory: retain native OS dialogs for choosing and saving files, but own
+application document previews in child windows tied to the launcher lifecycle.
+The browser renderer must receive only a local, app-owned document URL, not an
+arbitrary URL from JavaScript. Prefer explicit UI commands for preview over
+globally intercepting all new-window requests; the latter would also capture
+unrelated links and make error handling opaque.
+
+Choice (healthy incremental): keep the current Windows file picker backend and
+WebView2 save dialog. Route archive PDF actions through a small pywebview bridge
+in desktop mode, retaining the existing browser behavior in development mode.
+The bridge accepts only same-port loopback archive PDF paths and closes its
+children when the main window closes. Verify the route, lifecycle, frontend
+build/lint and frozen application. The native picker and save dialog still need
+a clean-machine interactive acceptance check; do not claim them from unit tests.
+
+Micro-steps:
+
+1. Map all preview/file-selection/download entry points and pywebview behavior.
+2. Add a bounded desktop PDF preview bridge and update all archive actions.
+3. Test URL rejection, window lifecycle, frontend interactions and frozen path.
+4. Record exact verification limits before closing this point.
+
+Implementation: `DesktopPreviewApi` is exposed only to the main pywebview
+window. It accepts only a PDF that currently exists below the application's
+archive directory and whose URL uses the current server's loopback port. The
+frontend's archive actions and registry reference dialog call it in desktop
+mode; development browser mode keeps its existing popup behavior. The bridge
+opens a child WebView2 window and closes all preview children when the main
+window closes. Its internal shutdown method is private and is not exposed by
+pywebview's JavaScript API. Missing previews produce a short Italian message
+instead of a raw Python bridge exception. Native file/folder selection remains
+in the backend's Windows dialogs; WebView2 still handles Save File dialogs for
+downloads.
+
+Verification: 40 focused Python tests passed, including external URL, wrong
+port, traversal, missing file, and closing behavior. The production frontend
+compiled; lint has one pre-existing React hooks warning and no errors. The
+source-window smoke used the staged private WebView2 engine, invoked
+`window.pywebview.api.open_pdf` through actual JavaScript, received success,
+observed the PDF HTTP response and the child window's loaded event, then closed
+both windows. The complete onedir build and frozen upload -> OCR queue ->
+review smoke passed again from a relocated path with spaces. Unit tests mock
+the window adapter; the source smoke does not mock the JavaScript bridge or
+browser engine. The frozen smoke verifies packaged window startup, backend,
+worker and private runtime, but does not automate a click on the PDF action.
+
+The first preview smoke closed before PDF loading and interrupted the HTTP
+response. Waiting for the child's loaded event fixed that test. WebView2 may
+briefly hold its profile cache after the window loop returns; the smoke now
+retries cleanup for a bounded period and fails if the cache never releases.
+The one residue from the failed experiment was removed after confirming its
+process exited and its resolved path was inside `build/`.
+
+Why this point is satisfactory: PDF previews no longer rely on the system
+browser in desktop mode, and the preview bridge cannot open arbitrary local or
+remote URLs. The ownership/lifecycle path has been exercised with private
+WebView2. Still required before delivery: interactive frozen-GUI checks of
+file/folder dialogs, actual PDF rendering and export save dialogs on clean
+Windows 10 and Windows 11 machines. These are acceptance gates, not claims
+covered by the automated smoke. The next point is installer/update/uninstall,
+including installed-path WebView2 ACLs and preservation of user data.
+
+### Packaging point 6 - Installer, update and uninstall (implementation complete)
+
+Problem: distribution is a lifecycle, not a compressed directory. A setup must
+make the complete program reachable, keep application code separate from
+business data, prevent upgrades while work is active, recover from incomplete
+replacements, grant required runtime permissions, and uninstall only what it
+owns. A single-PC rollout does not remove these failure modes; it makes a
+repeatable local acceptance test more valuable.
+
+Theory: use a per-user Windows installer so no external runtime installation or
+administrator elevation is needed. Keep a stable product identity and install
+root, but stage each build under an immutable release identifier; point shortcuts
+to the new release only after copying and validating it. In-place replacement of
+the 1.28 GB bundle would risk mixed binaries on an interrupted update. Preserve
+data under `%LOCALAPPDATA%/EstrattoreScanFatture`, separate from program files.
+An uninstall must preserve invoices and registry by default; full removal needs
+an explicit choice and must never follow links outside the app-owned directory.
+Use an app mutex to block setup/uninstall while OCR or the UI is running rather
+than force-killing a worker. Fixed WebView2 needs AppContainer read/execute ACLs
+at its *installed* path, not only in the build directory.
+
+Choice (healthy incremental): build one offline x64 installer with Inno Setup 7
+using its portable development-tool mode under ignored `build/`. The distributed
+installer contains everything and does not install Inno, Python, Node, Poppler,
+Tesseract or WebView2 as separate products. Pin/verify the build tool, use one
+stable AppId, per-user install root, a hash-derived release folder and a marker
+written last. Keep the previous release available for rollback. Avoid automatic
+pruning until the install/upgrade lifecycle is verified. The vendor asks
+commercial users to purchase an Inno Setup license; this remains a release
+decision and must be disclosed, not silently treated as a technical detail.
+
+Micro-steps:
+
+1. Verify the current data root and process ownership, official installer
+   behavior, build-tool provenance, and test-machine isolation options.
+2. Add the installer script, a pinned/verified portable compiler bootstrap,
+   version/release-id generation and package preflight.
+3. Add a named process mutex, installation-time WebView2 ACL handling, and
+   conservative uninstall options.
+4. Compile one real installer; test install, offline launch/OCR, update,
+   uninstall-with-retention and explicit data removal in an isolated location.
+5. Audit filesystem/registry/process residue and document clean Windows 10/11,
+   signing, licensing and third-party notice gates before closure.
+
+Implementation: `packaging/build_installer.py` hashes every file in the verified
+onedir bundle and builds a versioned offline installer with a distinct Smoke
+identity/output. `packaging/prepare_inno.py` pins Inno Setup 7.1.0, verifies
+SHA-256 and Authenticode for the portable bootstrap, and checks the cached
+compiler's signature and version. The Inno script installs per-user under
+`%LOCALAPPDATA%/Programs/EstrattoreScanFatture`, applies recursive AppContainer
+ACLs before the completion marker, then switches shortcuts. A named mutex
+shared with the launcher blocks setup/uninstall while the app runs. After a
+successful upgrade it keeps the active and previous code release, pruning older
+code copies only. User data remains under `%LOCALAPPDATA%/EstrattoreScanFatture`;
+default uninstall preserves it, interactive uninstall offers an explicit choice,
+and `/REMOVEAPPDATA` is required for silent full removal. Only internal app
+data can be deleted by that option.
+
+Verification: the full dependency/frontend/PyInstaller/installer build succeeded.
+15 focused desktop/runtime Python tests passed. An isolated real installer ran
+the frozen UI, private WebView2, local backend, PDF upload, OCR queue and review.
+An upgrade between two full-bundle Smoke releases preserved data and switched
+the Start shortcut; its uninstall removed both code releases and retained data.
+Fresh install and `/REMOVEAPPDATA` uninstall removed code, data and HKCU
+registration. A three-release integration test using the same Inno script with
+a tiny synthetic bundle kept only releases 2 and 3, registered release 3,
+preserved data, and removed all program files, shortcut and registry entries on
+uninstall. The installed WebView2 executable inherited both required AppContainer
+read/execute ACEs. The final installer is 390,318,212 bytes; SHA-256
+`6D9AD31B97EE51AF314E0736DC6F5A210216E79C71C33100664BC187A4F72391`.
+
+Critical review: a deliberately interrupted first test installation left an
+incomplete old uninstaller log; Inno did not magically roll it back. The new
+marker is now written only after ACL success, preventing this failure from
+appearing complete, and later upgrades prune incomplete release directories.
+The old zero-byte uninstaller log required manual cleanup in the isolated test;
+do not claim crash-proof atomicity. Versioned release directories prevent mixed
+code and preserve the previous working release, but power-loss recovery of the
+installer itself still merits a fault-injection test before broad deployment.
+No real user data or actual app installation was touched during Smoke tests.
+
+Why the implementation is satisfactory: one offline installer/uninstaller owns
+the private runtimes and code while data survives normal upgrades/removal; the
+full user path has been exercised from the installed executable. Remaining
+release gates are clean Windows 10/11 offline interactive acceptance (file
+pickers, PDF preview and Save dialogs), Windows signing, host prerequisites,
+third-party redistribution review and Inno Setup commercial licensing. These
+are not covered by the developer-machine smoke and must not be presented as
+passed tests.
+
+### Packaging point 7 - Interrupted setup recovery and desktop UI parity (complete)
+
+Problem: a production desktop app must remain understandable and recoverable
+across both packaging faults and host-renderer differences. A valid binary
+package is not sufficient if an interrupted installer leaves confusing
+uninstall records, or if the native window changes content proportions and
+navigation ergonomics relative to the browser-tested UI.
+
+Theory: keep releases immutable and switch the active shortcut only after a
+complete install. Reconcile only demonstrably orphaned setup artifacts after
+a later successful install, never delete an active uninstaller or business
+data, and do not infer health from a marker alone. For UI parity compare the
+same app state at matched CSS viewport sizes, then separately inspect native
+window dimensions, DPI scaling and usable client area. Capture real WebView2
+pixels, not just a browser pointed at the same backend. Use temporary screenshots
+and inspect all top-level views and the invoice editor, including dense tables.
+
+Choice (healthy incremental): add a narrowly-scoped post-success repair for
+zero-byte orphaned Inno uninstall logs, with the registered uninstaller as an
+explicit exclusion. Keep release-folder pruning as already implemented. Build
+a repeatable comparison harness for browser and installed WebView2, using an
+isolated copy of test data; do not write to the real archive. Fix observed
+layout differences at the correct layer (window sizing/scale or responsive CSS)
+only after screenshots identify their cause.
+
+Micro-steps:
+
+1. Inspect Inno install/uninstall order and reproduce stale setup artifacts in
+   an isolated tiny installer; define safe deletion boundaries.
+2. Implement and test recovery after successful setup, including an active
+   uninstaller exclusion and a fault/interruption case.
+3. Capture browser and actual desktop screenshots for home/review, processes,
+   archive PDF/origins, registry saved/exported/discarded/history, and customer
+   registry using the same isolated data and comparable viewport geometry.
+4. Score every touched surface critically, correct concrete proportion/layout
+   defects, rerun build/lint and visual comparison, then remove screenshots.
+5. Record remaining differences, untested states and clean-machine gates.
+
+Findings and decisions:
+
+- The interrupted-install problem was real in the isolated earlier fault test:
+  a zero-byte `unins*.dat` and its paired executable could remain after a
+  killed setup. Inno's `ssDone` occurs after the active uninstaller is written.
+  The new repair scans only zero-byte orphan logs after a successful setup,
+  excludes the active `{uninstallexe}`, and deletes a paired executable only
+  when deletion of its orphan log succeeds. A tiny installer built from the
+  same script removed an injected orphan on the next successful install,
+  preserved the active uninstaller and uninstalled cleanly. This is recovery
+  on the next successful run, not a claim that interrupted setup is atomic.
+- Actual WebView2 CDP screenshots and Chromium screenshots used the same
+  isolated app data, CSS viewport `1486 x 844`, and DPR `1.25`. Every main
+  view was traversed: review, process active/history, PDF archive invoices/
+  sources, invoice register saved/exported/discarded/history, and customer
+  registry. Native and browser grid geometry matched exactly. The default
+  1500px desktop window had given the document only 448 CSS pixels while the
+  fields took 828. This was a responsive-layout defect, not a WebView2 font or
+  DPI divergence.
+- The review grid now gives the document 652 pixels and the field panel 624 at
+  that viewport, with bounded fluid typography. Initial zoom fits the tested
+  invoice's widest page within the supported 20-45% range; the scan starts at
+  34%, stays valid in the numeric control, and has zero horizontal overflow.
+  Selecting the next invoice recalculates the fit. Manual zoom remains free.
+- Screenshot critique: review `8/10` (balanced and complete invoice visible;
+  text on the scan is necessarily smaller until zoomed); process active `8/10`,
+  process history `8/10` (empty-state composition only); PDF invoice archive
+  `7/10` (readable but the wide table needs its internal horizontal scrollbar),
+  source archive `8/10`; invoice register saved `7/10`, exported `7/10`,
+  discarded `7/10` (dense table with internal scrolling), export history
+  `8/10`, customer registry `7/10` (dense header and scrollable large table).
+  Overall `8/10` for the changed desktop review, `7/10` for app-wide visual
+  parity. No unresolved overlapping text or page-level horizontal overflow
+  was observed at the tested viewport. These are not ratings of every possible
+  dialog or display resolution.
+- `npm --prefix apps/viewer run build` succeeded; lint returned zero errors and
+  one pre-existing React hook dependency warning. The focused desktop/runtime
+  test set passed `16/16` when run with an isolated pytest temp root outside
+  the sandbox restriction. The CDP check passes for initial and second invoice
+  zoom plus all top-level views, and its process tree leaves no bundle process
+  behind. Screenshots and copied test data must be deleted after this audit.
+
+Residual limits: visual comparison covers the current 125% DPI machine and
+default desktop size, not a clean Windows 10/11 host or all resize/DPI values.
+The process page was empty because the isolated data copy deliberately omitted
+its job state; active-job cards were not visually exercised in this pass.
+Signing, commercial Inno licensing, third-party redistribution review and
+clean-machine interactive acceptance remain release gates.
+
+Closure: the updated offline installer is
+`build/installer-dist/EstrattoreScanFatture-Setup-0.1.0-0874e163f706.exe`
+(390,192,707 bytes, SHA-256
+`A65D8763BE31017E6F9416FAD3D31690033CD76003FC6BCBEE452A11A3413B99`).
+Its bundle was checked through the actual native window and browser with the
+same isolated data. The last CDP run passed the initial and next-invoice zoom
+assertions and all view navigation; no frozen desktop/WebView2 process remained.
+The temporary screenshots and isolated copied data were deleted. Do not treat
+this as final release approval: the remaining host acceptance, signature,
+licensing and redistribution gates above still apply.
+
+## Independent packaging review - 2026-10-09
+
+Status: review complete; release approval withheld. No application changes in
+this pass. The previous implementation-complete labels do not close the issues
+below.
+
+Problem: a working frozen executable is not sufficient evidence for a safe
+desktop release. Installation identity, persistence during shutdown, local
+transport isolation, update recovery and clean-host prerequisites are separate
+contracts. Review the implementation against those contracts, not against the
+previous completion labels.
+
+Method: read the launcher, installer, build pipeline, local HTTP composition,
+worker lifecycle and existing tests; reproduce suspected faults using isolated
+fixtures. Never install/uninstall against the real product or modify user data.
+Record confirmed faults separately from untested release gates. No new UI work
+is planned, so screenshots are not a substitute for lifecycle tests here.
+
+### Findings, ordered by priority
+
+**R1 / P1 - Desktop shutdown does not drain business writes.**
+
+`scripts/desktop_app.py:217` waits for OCR only; its finally block at line 242
+then shuts down/closes the HTTP server. `scripts/local_app.py:167` creates the
+standard `ThreadingHTTPServer`, whose request threads are daemon threads. The
+server does not wait for them on close. Draft flushing in `App.tsx:4498` uses
+`sendBeacon` on beforeunload, without an acknowledged close handshake.
+
+Evidence: through the actual LocalAppHandler HTTP route, hold a draft persistence
+call at a barrier. With no active OCR, `shutdown_processing_jobs(timeout=0)`
+returns true; `server.shutdown()` and `server.server_close()` both return while
+the write is still blocked. This demonstrates a missing lifetime guarantee, not
+a claim that every close loses data. A save/export/split can still be in progress
+when the desktop host exits; atomic file replacement alone cannot make an
+unfinished multi-step operation completed.
+
+Correction: introduce a close protocol covering UI pending edits and backend
+mutations. Flush/acknowledge drafts before destroying the window, prevent new
+mutations during draining, and await accepted operations or refuse closure with
+a clear message. Account explicitly for editors whose changes are not autosaved.
+Test slow writes and immediate close through the real frozen window, then reopen
+and verify persisted contents. Do not simply add an arbitrary sleep.
+
+**R2 / P1 - The packaged local API lacks a client trust boundary.**
+
+`scripts/registry_api.py:880` permits `Access-Control-Allow-Origin: *` and
+POST/DELETE; handlers have no origin/session authorization. The desktop server
+inherits them unchanged. Binding to loopback and selecting a random port do not
+authenticate the caller.
+
+Evidence: an HTTP OPTIONS preflight with `Origin: https://untrusted.example`
+was allowed, and a DELETE to `/registry` with that origin returned 200 and
+reached the deletion function. The function was replaced by a sentinel, so no
+registry was deleted. This is an inherited backend issue exposed by the desktop
+composition, not necessarily introduced by the packaging work. Browser-specific
+local-network permission policies can reduce exposure but are not an app-side
+authorization boundary; no claim of a full browser exploit was tested.
+
+Correction: define allowed desktop/development origins and validate Host/Origin
+before dispatch; use an appropriate per-session capability for sensitive local
+API access. Cover GET disclosure as well as mutation routes and preflight. Keep
+PDF previews/downloads and the native bridge functional under the same policy.
+
+**R3 / P1 - Smoke installers are not isolated by construction.**
+
+`packaging/build_installer.py:69` changes ProductId, DataRoot, output suffix and
+shortcut label, but `packaging/EstrattoreScanFatture.iss:30` retains the production
+DefaultDirName. Lines 57-58 launch the executable without `--data-dir`; the smoke
+DataRoot define is used for uninstall cleanup, not application startup.
+
+Consequences from the actual configuration: unless the operator supplies `/DIR`,
+a smoke installer targets the production code directory. Its pruning routine
+can remove production releases because its separate registry key does not know
+the production ActiveRelease. Even with `/DIR`, launching the smoke shortcut
+without an environment override uses production user data. Manual smoke commands
+that explicitly supply both overrides do not make the generated installer safe.
+No installation was performed during this review.
+
+Correction: isolate install root and launcher data root automatically for smoke
+builds, with matching uninstall scope; exercise the generated shortcut itself.
+Never depend on remembering extra command-line flags for test isolation.
+
+**R4 / P2 - Reinstalling the current release removes the retained predecessor.**
+
+`packaging/EstrattoreScanFatture.iss:74` reads ActiveRelease into PreviousRelease.
+The pruning condition at line 89 retains only the new ReleaseId and that value.
+Static execution of the condition: install A, upgrade to B (A+B retained), then
+reinstall B. PreviousRelease is now B, so A is deleted. The documented current +
+previous retention invariant fails on repair/reinstall, exactly when the old
+version may still be useful. This is not a claim that the active B is deleted.
+
+Correction: track active and previous successful releases independently, and
+leave the predecessor unchanged when reinstalling the same release. Verify
+A -> B -> B and A -> B -> C, including an interrupted update. A retained folder
+is not itself a complete data-schema rollback mechanism.
+
+### What is sound, and what remains unproven
+
+Keep the architecture: separate user storage, a single app-owned window/backend,
+private OCR/PDF/WebView2 runtimes, explicit frozen worker dispatch, Windows Job
+Object ownership, and a versioned onedir installer are coherent choices. The
+build excludes sample invoices and native resolvers fail instead of silently
+using system OCR/PDF tools. These do not need a desktop rewrite.
+
+The notebook already qualifies several earlier completion claims. In particular,
+the interrupted-install cleanup repairs zero-byte orphan uninstall logs on a
+later successful setup; it is not full transactional installer recovery. The
+last repair check used a small fixture installer. Prior full installer smoke
+and native-window checks are valuable but are not acceptance of every failure
+phase of the final installer artifact.
+
+Remaining release gates, not additional reproduced bugs:
+
+- Test the exact final installer on clean supported Windows 10/11 x64, offline,
+  standard user, with no developer environment. Declare the supported Windows
+  build/.NET baseline explicitly: the bundled host still uses pythonnet/WinForms
+  and the system .NET Framework. Clearing PATH does not remove system runtimes.
+- Exercise install interruption during extraction, after runtime ACL setup and
+  during activation; verify old version accessibility, retry, retained data and
+  uninstall behavior. Include insufficient disk space and locked-file failures.
+- Test native file/folder pickers, PDF preview, export/save dialogs and cancelled
+  downloads through the installed entry point, not only HTTP endpoints.
+- Validate native layout at the actual office PC's resolution/DPI and minimum
+  window dimensions. Previous matched browser/WebView screenshots demonstrate
+  parity at their tested geometry, not correctness at every display setting.
+- Close during OCR, draft persistence, registry save, export and page regrouping;
+  include forced termination/reopen recovery. The screenshot runner's process
+  tree termination does not validate graceful closure.
+- Complete redistribution/license inventory and signing/reputation decision.
+  These were already open and are not silently closed by a successful build.
+
+### Verification and closure
+
+Command: `.venv\\Scripts\\python.exe -m pytest tests/test_desktop_app.py
+tests/test_desktop_bundle.py tests/test_native_runtime.py
+tests/test_runtime_paths.py tests/test_local_app.py tmp/test_packaging_review.py
+-q -p no:cacheprovider --basetemp=build/review-packaging-tests-elevated-20261009`.
+
+Result: **24 passed: 22 existing checks and 2 temporary defect probes**. The
+probe assertions deliberately confirm the current unsafe behavior; their pass
+does not mean those contracts are correct. Initial sandbox execution failed on
+temporary-directory permissions; the same checks succeeded outside the sandbox.
+
+The probes exercise real HTTP routing/CORS and server shutdown. They replace
+startup initialization and persistence with controlled sentinels/barriers; they
+do not validate actual disk corruption, browser attack behavior, WebView close
+ordering, or a real installer run. Installer findings R3/R4 are code/configuration
+analysis, not destructive experiments. No new screenshots, frontend build or
+lint run: no UI/app code changed. Temporary probes and their test roots are
+removed after inspection; business data and installer artifacts are unchanged.
+
+Disposition: correct R1-R3 before delivery and before trusting installer smoke
+isolation; correct R4 to honor the stated recovery policy. Then rebuild and test
+the final artifact, rather than transferring confidence from an earlier bundle.
+The architecture is suitable, but "only manual checking remains" is not an
+accurate assessment of the current implementation.
+
+## Packaging review corrections - 2026-10-09
+
+Status: corrections complete; final artifact verified on the development host
+on 2026-10-11. Clean-machine release acceptance remains outstanding.
+
+Problem: enforce ownership and completion at the desktop boundaries. A close
+request must not outlive accepted writes; local HTTP access must distinguish
+the app from unrelated browser origins; test installs must not share production
+ownership; repair must preserve the previous successful release.
+
+Approach (final choices, no novel protocol): acknowledged frontend close handshake
+followed by backend mutation draining; explicit host/origin checks and a desktop
+session cookie; isolated installer identity/paths/shortcut arguments; independent
+active/previous release metadata. Fail closed on incomplete saving, not after an
+arbitrary delay. Do not replace existing storage or OCR architecture.
+
+Micro-steps:
+1. Correct installer paths and previous-release retention; add regression checks.
+2. Centralize HTTP request admission, desktop session and mutation lifecycle.
+3. Add a non-blocking native close handshake, draft acknowledgement and warnings
+   for unsaved table editors; test the actual HTTP and JS/native boundaries.
+4. Run focused backend tests, frontend lint/build, isolated native checks and
+   rebuild the deliverable. Record untested clean-host/recovery gates separately.
+
+Implementation checkpoint:
+- Installer now owns separate smoke paths by construction, passes its DataRoot
+  in both generated shortcuts, refuses overriding the smoke destination and
+  persists PreviousRelease separately. Real tiny-fixture installer tests passed
+  A -> B -> B -> C, shortcut arguments and explicit data removal. The first
+  check initially asserted removal before Inno's delegated uninstaller exited;
+  the check now waits for the observable removal rather than treating the
+  bootstrap process exit as completion.
+- LocalRequestHandler validates Host/Origin/Fetch Metadata before all dispatch;
+  the desktop requires a per-run HttpOnly SameSite cookie, bootstrapped only by
+  a trusted landing-page request. Standalone Vite origins are explicit. This is
+  a browser-origin boundary, not protection from malicious same-user programs
+  which already have filesystem access. Tests cover rejection and stale sessions.
+- Native close returns False immediately to free the WinForms event loop, then
+  asks JS to blur/freeze inputs and acknowledge persisted drafts. Table edit mode
+  requires confirmation. Backend admission closes before draining writes and
+  stopping OCR; failure resumes the UI/server. Request threads are non-daemon,
+  with socket inactivity timeouts, as a second guard on unexpected host return.
+- Re-reading draft flow exposed overlapping saves of one draft. They now queue
+  behind the in-flight promise, so the final acknowledged write is the newest.
+- The new nosniff header requires predictable asset types: local static serving
+  explicitly assigns HTML/JS/CSS/JSON/PDF/image MIME types rather than trusting
+  Windows file associations. Startup also reports inaccessible data folders even
+  when creating the log fails.
+- 32 focused tests pass. Frontend build passes; lint has no errors and the same
+  pre-existing applyReviewDraftsToInvoices dependency warning. Real source-mode
+  WebView2/PDF/close smoke passes. Full clean packaging build is in progress.
+
+Integration checkpoint:
+- Frozen CDP check now imports a generated PDF, runs real OCR, edits invoice
+  number, delays the actual draft POST, sends WM_CLOSE to the owned native window,
+  inspects on-disk drafts and reopens the EXE. The edited value survived. The
+  test is retained under tools/ui-checks/checks/check-desktop-close.mjs.
+- Two probe failures were test-harness defects, not grounds to change review
+  storage: the asynchronous predicate used for OCR polling did not wait for
+  completion as intended; the close helper looked only for visible windows even
+  though the test deliberately starts a hidden native window. Explicit HTTP
+  polling and PID/title-scoped enumeration corrected those checks.
+- A final code review replaced the frontend's two event-loop turns with React
+  flushSync at the native integration boundary. The close snapshot must follow
+  a committed input/effect update, not a timing assumption. The final artifact
+  is being rebuilt cleanly again after this change.
+- Visual review of the native close overlay: hierarchy 8/10, spacing/alignment
+  8/10, contrast/readability 8/10, consistency 8/10, overall 8/10. It reuses the
+  existing progress-dialog surface, stays white over the dimmed background and
+  leaves no interactive controls competing with closure. Screenshot temporary.
+
+### Closure - 2026-10-11
+
+Resumed after the approval service hit its usage limit. The build already in
+progress finished successfully; retrieved its completion output rather than
+assuming an existing executable was complete. Confirmed the packaged frontend
+contains the final flushSync change (asset `index-iI9LKAPT.js`).
+
+Final artifact:
+- `build/installer-dist/EstrattoreScanFatture-Setup-0.1.0-0bf30b602f2c.exe`
+- Size: 390,198,465 bytes.
+- Installer SHA-256:
+  `06D793ABD1B7AC3960D519927EC684B1D1E2B9F94A5C19BD3DB76BCD8F37EBE4`.
+- Recomputed bundle digest:
+  `0bf30b602f2c8d5f117a45b58bb0510e45b81ca51565e94e0b29da829ea6de4e`.
+  This matches the release ID compiled into the installer.
+
+Verification:
+- 55 focused tests passed, including HTTP trust/session/drain tests, desktop
+  coordinator tests, native paths, local routes and OCR queue recovery.
+- Frontend build passed. Lint: zero errors, one pre-existing dependency warning
+  for applyReviewDraftsToInvoices. No new warning remains.
+- Real fixture installer: A -> B -> B -> C retained the expected releases and
+  business sentinel; generated shortcut selected isolated storage; explicit
+  uninstall removed fixture data. This exercises the real .iss policy with tiny
+  payloads, not the final 390 MB installer on a clean Windows machine.
+- `node tools/ui-checks/checks/check-desktop-close.mjs --keep` passed against the
+  final frozen bundle. Real generated PDF -> real OCR -> invoice UI. Aborting
+  the draft request made the frontend close handshake return false; cancelling
+  that attempt restored interaction. Then delayed real draft writes, native
+  WM_CLOSE, process exit, on-disk inspection and a fresh launch preserved the
+  edited value. The negative branch invokes the actual JS handshake directly;
+  native handling of rejection is separately covered by coordinator tests.
+- Real source-host PDF bridge smoke passed. Final packaged PDF HTTP session
+  access is covered by route tests; interactive Save dialogs and native pickers
+  still need recipient-machine acceptance.
+- Inspected the temporary closing screenshot again: overlay remains readable,
+  aligned and visually consistent, overall 8/10. The error banner behind it is
+  from the deliberately failed request; the subsequent acknowledged retry and
+  disk/reopen assertions succeeded. Screenshots and owned test directories are
+  removed, and no packaged app/private WebView2 processes remained.
+
+Critical disposition: R1-R4 are addressed without changing the storage/OCR
+architecture. Do not equate this with protection against power loss or an OS
+kill: those bypass the close handshake and still rely on existing storage
+journals/atomic writes. No new architectural rewrite is justified by these tests.
+Before future incompatible data-format upgrades, define snapshot/backup and
+restore compatibility explicitly: retaining an old executable is not a data
+rollback solution. Private WebView2 security updates also remain our release
+responsibility, not an automatic system update.
+
+Outstanding release gates: actual clean supported Windows 10/11 baseline
+(including .NET), final-installer interruption/low-disk testing, interactive
+picker/download acceptance, signing and redistribution review. None is claimed
+complete by the developer-host checks. User data were not edited during testing.

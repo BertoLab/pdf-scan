@@ -134,6 +134,12 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def bundled_assets_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS).resolve()
+    return Path(__file__).resolve().parents[2]
+
+
 def legacy_project_data_dir(root: Path | None = None) -> Path:
     return (root or project_root()) / "data"
 

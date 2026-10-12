@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "check": "node checks/capture-change-screenshots.mjs",
+    "check:desktop": "node checks/compare-desktop-browser.mjs",
     "check:feedback": "node checks/check-feedback-provenance.mjs",
     "clean": "node checks/clean-screenshots.mjs"
   },

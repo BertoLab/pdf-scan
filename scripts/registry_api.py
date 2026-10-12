@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import shutil
 import tempfile
 import threading
@@ -10,10 +11,14 @@ from dataclasses import replace
 from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from scripts.local_http import LocalHTTPServer, LocalRequestHandler
 
 from estrattore.registry import (
     DEFAULT_REGISTRY_CACHE_PATH,
@@ -104,6 +109,9 @@ PROCESSING_JOBS: dict[str, dict[str, Any]] = {}
 PROCESSING_JOBS_LOCK = threading.Lock()
 PROCESSING_JOB_QUEUE: list[str] = []
 PROCESSING_ACTIVE_JOB_ID: str | None = None
+PROCESSING_SHUTDOWN_REQUESTED = False
+PROCESSING_JOB_IDLE = threading.Event()
+PROCESSING_JOB_IDLE.set()
 INCOMPLETE_PROCESSING_CLEANUPS: list[str] = []
 STALE_ATOMIC_WRITE_CLEANUPS: list[str] = []
 COMPLETED_REVIEW_CLEANUPS: list[str] = []
@@ -119,7 +127,7 @@ PENDING_IMPORT_SOURCES: dict[str, dict[str, Any]] = {}
 PENDING_IMPORT_SOURCES_LOCK = threading.Lock()
 
 
-class RegistryApiHandler(BaseHTTPRequestHandler):
+class RegistryApiHandler(LocalRequestHandler):
     def do_OPTIONS(self) -> None:
         self._send_empty_response(204)
 
@@ -873,12 +881,6 @@ class RegistryApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-
-
 def _warning_counts(records: list[Any]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for record in records:
@@ -1382,6 +1384,8 @@ def _start_processing_job(payload: dict[str, Any]) -> dict[str, Any]:
     process_id = _new_processing_process_id(job_id)
     started_at = time.monotonic()
     with PROCESSING_JOBS_LOCK:
+        if PROCESSING_SHUTDOWN_REQUESTED:
+            raise RuntimeError("L'app si sta chiudendo. Riprova dopo averla riaperta.")
         PROCESSING_JOBS[job_id] = {
             "ok": True,
             "job_id": job_id,
@@ -1559,13 +1563,14 @@ def _start_next_processing_job_if_idle() -> None:
     global PROCESSING_ACTIVE_JOB_ID
 
     with PROCESSING_JOBS_LOCK:
-        if PROCESSING_ACTIVE_JOB_ID is not None or not PROCESSING_JOB_QUEUE:
+        if PROCESSING_SHUTDOWN_REQUESTED or PROCESSING_ACTIVE_JOB_ID is not None or not PROCESSING_JOB_QUEUE:
             return
         job_id = PROCESSING_JOB_QUEUE.pop(0)
         job = PROCESSING_JOBS.get(job_id)
         if job is None or job.get("status") != "queued":
             return
         PROCESSING_ACTIVE_JOB_ID = job_id
+        PROCESSING_JOB_IDLE.clear()
         batch_id = str(job.get("batch_id") or "")
         job["started_at_monotonic"] = time.monotonic()
         _persist_processing_jobs_locked()
@@ -1674,7 +1679,34 @@ def _finish_active_processing_job(job_id: str) -> None:
     with PROCESSING_JOBS_LOCK:
         if PROCESSING_ACTIVE_JOB_ID == job_id:
             PROCESSING_ACTIVE_JOB_ID = None
+            PROCESSING_JOB_IDLE.set()
         _persist_processing_jobs_locked()
+    _start_next_processing_job_if_idle()
+
+
+def has_active_processing_job() -> bool:
+    with PROCESSING_JOBS_LOCK:
+        return PROCESSING_ACTIVE_JOB_ID is not None
+
+
+def shutdown_processing_jobs(timeout: float = 30.0) -> bool:
+    global PROCESSING_SHUTDOWN_REQUESTED
+    with PROCESSING_JOBS_LOCK:
+        PROCESSING_SHUTDOWN_REQUESTED = True
+        if PROCESSING_ACTIVE_JOB_ID is not None:
+            job = PROCESSING_JOBS.get(PROCESSING_ACTIVE_JOB_ID)
+            if job is not None and job.get("status") not in TERMINAL_PROCESSING_JOB_STATUSES:
+                job["status"] = "cancelling"
+                job["cancel_requested"] = True
+                job["message"] = "Annullamento in corso"
+                _persist_processing_jobs_locked()
+    return PROCESSING_JOB_IDLE.wait(timeout)
+
+
+def resume_processing_after_failed_shutdown() -> None:
+    global PROCESSING_SHUTDOWN_REQUESTED
+    with PROCESSING_JOBS_LOCK:
+        PROCESSING_SHUTDOWN_REQUESTED = False
     _start_next_processing_job_if_idle()
 
 
@@ -2379,7 +2411,9 @@ def _registry_warning_label(warning: str) -> str:
 
 
 def main() -> None:
-    server = ThreadingHTTPServer((HOST, PORT), RegistryApiHandler)
+    server = LocalHTTPServer((HOST, PORT), RegistryApiHandler, dev_origins=(
+        "http://localhost:5173", "http://127.0.0.1:5173",
+    ))
     print(f"Registry API attiva su http://{HOST}:{PORT}")
     print("Endpoint import: POST /registry/import")
     server.serve_forever()

@@ -2,6 +2,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent, ReactNode, RefObject } from 'react'
 import './App.css'
+import { installDesktopLifecycle } from './desktopLifecycle'
 import { normalizeMoneyValueForInput } from './moneyFormatting'
 import type {
   BoundingBox,
@@ -19,11 +20,13 @@ import type {
 
 const sampleBatchIndexPath = '/sample/viewer_batches.json'
 const sampleIndexPath = '/sample/viewer_index.json'
+const isDesktopApp = new URLSearchParams(window.location.search).has('desktop')
 const registryApiBaseUrl =
   import.meta.env.VITE_REGISTRY_API_URL ??
   (window.location.port === '5173' ? 'http://127.0.0.1:8765' : window.location.origin)
 const manifestCacheKey = String(Date.now())
 const BASE_PAGE_SCALE = 0.45
+const MIN_PAGE_SCALE = 0.2
 const FIELD_FOCUS_SCALE = 1.4
 const REGISTRY_TABLE_ROW_HEIGHT = 64
 const REGISTRY_TABLE_HEADER_HEIGHT = 56
@@ -1952,6 +1955,7 @@ const InvoicePdfArchiveTable = memo(function InvoicePdfArchiveTable({
   onToggle,
   onToggleAll,
   onGoToSource,
+  onOpenPdf,
 }: {
   records: InvoiceArchiveRecord[]
   selectedKeys: Set<string>
@@ -1959,6 +1963,7 @@ const InvoicePdfArchiveTable = memo(function InvoicePdfArchiveTable({
   onToggle: (record: InvoiceArchiveRecord) => void
   onToggleAll: () => void
   onGoToSource: (record: InvoiceArchiveRecord) => void
+  onOpenPdf: (url: string, title: string) => void
 }) {
   if (records.length === 0) {
     return (
@@ -2008,14 +2013,13 @@ const InvoicePdfArchiveTable = memo(function InvoicePdfArchiveTable({
               </td>
               <td>
                 {record.archived_pdf_url ? (
-                  <a
+                  <button
+                    type="button"
                     className="invoice-archive-pdf-link"
-                    href={runtimeApiUrl(record.archived_pdf_url)}
-                    target="_blank"
-                    rel="noreferrer"
+                    onClick={() => onOpenPdf(record.archived_pdf_url!, 'PDF fattura')}
                   >
                     Apri PDF
-                  </a>
+                  </button>
                 ) : (
                   '-'
                 )}
@@ -2059,12 +2063,14 @@ const SourcePdfArchiveTable = memo(function SourcePdfArchiveTable({
   focusedKey,
   onToggle,
   onToggleAll,
+  onOpenPdf,
 }: {
   records: ArchivedSourceRecord[]
   selectedKeys: Set<string>
   focusedKey: string | null
   onToggle: (record: ArchivedSourceRecord) => void
   onToggleAll: () => void
+  onOpenPdf: (url: string, title: string) => void
 }) {
   const sourceRecords = records
 
@@ -2113,14 +2119,13 @@ const SourcePdfArchiveTable = memo(function SourcePdfArchiveTable({
             </div>
             <div className="source-archive-record-action">
               {record.archived_source_pdf_url ? (
-                <a
+                <button
+                  type="button"
                   className="invoice-archive-pdf-link secondary"
-                  href={runtimeApiUrl(record.archived_source_pdf_url)}
-                  target="_blank"
-                  rel="noreferrer"
+                  onClick={() => onOpenPdf(record.archived_source_pdf_url!, 'PDF origine')}
                 >
                   Apri origine
-                </a>
+                </button>
               ) : (
                 <span>-</span>
               )}
@@ -3486,13 +3491,25 @@ function archiveFieldValue(record: InvoiceArchiveRecord, fieldKind: string) {
   return ''
 }
 
-function openArchivedPdfWindow(pdfUrl: string, windowName: string) {
+async function openArchivedPdfWindow(pdfUrl: string, windowName: string) {
+  const url = runtimeApiUrl(pdfUrl)
+  if (isDesktopApp) {
+    const desktopWindow = window as Window & {
+      pywebview?: { api?: { open_pdf: (url: string, title: string) => Promise<boolean> } }
+    }
+    if (!desktopWindow.pywebview?.api?.open_pdf) {
+      throw new Error("L'anteprima PDF non è disponibile. Riprova ad aprire l'app.")
+    }
+    await desktopWindow.pywebview.api.open_pdf(url, windowName)
+    return
+  }
   const previewWindow = window.open(
-    runtimeApiUrl(pdfUrl),
+    url,
     windowName,
     'width=980,height=860,left=120,top=80,resizable=yes,scrollbars=yes',
   )
-  previewWindow?.focus()
+  if (!previewWindow) throw new Error("Il browser ha bloccato l'anteprima PDF.")
+  previewWindow.focus()
 }
 
 function invoiceRegistryRecordHasEmptyFields(record: InvoiceArchiveRecord) {
@@ -3894,6 +3911,16 @@ function reviewDraftIdForRelatedInvoice(
   return `${basePathMatch[1]}:${invoice.documentId}:${manifestInvoiceId}`
 }
 
+function fitInvoicePageScale(invoice: ViewerInvoice | undefined, viewport: HTMLDivElement | null): number {
+  const widestPage = Math.max(0, ...(invoice?.pages.map((page) => page.width) ?? []))
+  if (!viewport || widestPage === 0) return BASE_PAGE_SCALE
+  const availableWidth = Math.max(0, viewport.clientWidth - 52)
+  return Math.max(
+    MIN_PAGE_SCALE,
+    Math.min(BASE_PAGE_SCALE, Math.floor((availableWidth / widestPage) * 100) / 100),
+  )
+}
+
 function App() {
   const [invoices, setInvoices] = useState<ViewerInvoice[]>([])
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null)
@@ -3910,6 +3937,7 @@ function App() {
   const [feedbackExportState, setFeedbackExportState] =
     useState<FeedbackExportState>(null)
   const documentViewportRef = useRef<HTMLDivElement | null>(null)
+  const lastFittedInvoiceRef = useRef<string | null>(null)
   const invoiceFieldsPanelRef = useRef<HTMLElement | null>(null)
   const developerMenuRef = useRef<HTMLDivElement | null>(null)
   const registryTableViewportRef = useRef<HTMLDivElement | null>(null)
@@ -3931,6 +3959,8 @@ function App() {
     new Map(),
   )
   const reviewDraftSaveTimersRef = useRef<Map<string, number>>(new Map())
+  const reviewDraftInFlightRef = useRef<Map<string, Promise<void>>>(new Map())
+  const [isDesktopClosing, setIsDesktopClosing] = useState(false)
   const dirtyReviewInvoiceIdsRef = useRef<Set<string>>(new Set())
   const [reviewDraftChangeVersion, setReviewDraftChangeVersion] = useState(0)
   const [splitAfterPosition, setSplitAfterPosition] = useState(1)
@@ -3999,6 +4029,15 @@ function App() {
   const currentInvoice = invoices.find(
     (invoice) => invoice.invoiceId === selectedInvoiceId,
   )
+  useEffect(() => {
+    if (!currentInvoice) return
+    const fitKey = `${currentInvoice.basePath}:${currentInvoice.invoiceId}:${currentInvoice.pages.map((page) => page.width).join(',')}`
+    if (lastFittedInvoiceRef.current === fitKey) return
+    lastFittedInvoiceRef.current = fitKey
+    const scale = fitInvoicePageScale(currentInvoice, documentViewportRef.current)
+    setPageScale(scale)
+    setZoomInput(String(Math.round(scale * 100)))
+  }, [currentInvoice])
   const currentInvoiceIndex = invoices.findIndex(
     (invoice) => invoice.invoiceId === selectedInvoiceId,
   )
@@ -4303,13 +4342,15 @@ function App() {
     setReviewDraftChangeVersion((version) => version + 1)
   }
 
-  function persistPendingReviewDraftSave(draftId: string) {
+  function persistPendingReviewDraftSave(draftId: string): Promise<void> {
+    const inFlight = reviewDraftInFlightRef.current.get(draftId)
+    if (inFlight) return inFlight.then(() => persistPendingReviewDraftSave(draftId))
     const pendingSave = pendingReviewDraftSavesRef.current.get(draftId)
     if (!pendingSave) {
       return Promise.resolve()
     }
     const { invoice, reviewBatchBasePath, version } = pendingSave
-    return fetch(`${registryApiBaseUrl}/viewer/drafts`, {
+    const request = fetch(`${registryApiBaseUrl}/viewer/drafts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -4343,6 +4384,9 @@ function App() {
         })
         throw error
       })
+      .finally(() => { reviewDraftInFlightRef.current.delete(draftId) })
+    reviewDraftInFlightRef.current.set(draftId, request)
+    return request
   }
 
   function flushReviewDraftSaves() {
@@ -4390,6 +4434,8 @@ function App() {
   const loadProcessedReviewBatchesRef = useRef(loadProcessedReviewBatches)
   const loadSampleViewerBatchesRef = useRef(loadSampleViewerBatches)
   const pollProcessingJobsRef = useRef(pollProcessingJobs)
+  const persistPendingReviewDraftSaveRef = useRef(persistPendingReviewDraftSave)
+  persistPendingReviewDraftSaveRef.current = persistPendingReviewDraftSave
   loadProcessedReviewBatchesRef.current = loadProcessedReviewBatches
   loadSampleViewerBatchesRef.current = loadSampleViewerBatches
   pollProcessingJobsRef.current = pollProcessingJobs
@@ -4408,11 +4454,19 @@ function App() {
       .then(() => loadProcessedReviewBatchesRef.current())
       .then((hasReviewBatches) => {
         if (!hasReviewBatches) {
-          loadSampleViewerBatchesRef.current()
+          if (isDesktopApp) {
+            setManifestError('Nessuna fattura da revisionare')
+          } else {
+            loadSampleViewerBatchesRef.current()
+          }
         }
       })
-      .catch(() => {
-        loadSampleViewerBatchesRef.current()
+      .catch((error) => {
+        if (isDesktopApp) {
+          setManifestError(userErrorMessage(error, 'Non riesco a caricare le revisioni.'))
+        } else {
+          loadSampleViewerBatchesRef.current()
+        }
       })
   }, [])
 
@@ -4445,7 +4499,7 @@ function App() {
       }
       const timerId = window.setTimeout(() => {
         reviewDraftSaveTimersRef.current.delete(draftId)
-        void persistPendingReviewDraftSave(draftId).catch(() => undefined)
+        void persistPendingReviewDraftSaveRef.current(draftId).catch(() => undefined)
       }, 350)
       reviewDraftSaveTimersRef.current.set(draftId, timerId)
     }
@@ -4453,6 +4507,7 @@ function App() {
 
   useEffect(() => {
     function persistDraftsBeforeClose() {
+      if (isDesktopApp) return // Native close waits for acknowledged saves.
       for (const pendingSave of pendingReviewDraftSavesRef.current.values()) {
         navigator.sendBeacon(
           `${registryApiBaseUrl}/viewer/drafts`,
@@ -4475,6 +4530,21 @@ function App() {
     return () => {
       window.removeEventListener('beforeunload', persistDraftsBeforeClose)
     }
+  }, [])
+
+  const desktopCloseSnapshotRef = useRef({ busy: false, unsavedEditor: false, flush: flushReviewDraftSaves })
+  desktopCloseSnapshotRef.current = {
+    busy: Boolean(segmentationProgressState || isRegistrySaving || isRegistryCleaningRunning ||
+      isDocumentImportRunning || invoiceExport?.busy || isDeletingExportHistory ||
+      feedbackExportState?.kind === 'exporting' ||
+      invoiceReviewActionState?.kind === 'saving' || invoiceReviewActionState?.kind === 'discarding' ||
+      invoiceRegistrySaveStatus === 'Salvataggio registro in corso...'),
+    unsavedEditor: isRegistryEditMode || isInvoiceRegistryEditMode,
+    flush: flushReviewDraftSaves,
+  }
+  useEffect(() => {
+    if (!isDesktopApp) return
+    return installDesktopLifecycle(() => desktopCloseSnapshotRef.current, setIsDesktopClosing)
   }, [])
 
   function loadSampleViewerBatches() {
@@ -5788,7 +5858,15 @@ function App() {
     )
   }
 
-  function openArchiveReferenceWindow() {
+  function openArchivePdf(url: string, title: string) {
+    setInvoiceArchiveError(null)
+    void openArchivedPdfWindow(url, title).catch((error) => {
+      console.error('Anteprima PDF non disponibile', error)
+      setInvoiceArchiveError("Non riesco ad aprire il PDF. Verifica che sia ancora presente nell'archivio.")
+    })
+  }
+
+  async function openArchiveReferenceWindow() {
     if (!archiveReferenceAction) {
       return
     }
@@ -5798,11 +5876,18 @@ function App() {
       return
     }
 
-    openArchivedPdfWindow(
-      reference.url,
-      `${archiveReferenceAction.kind}-${reference.key}`,
-    )
-    setArchiveReferenceAction(null)
+    try {
+      await openArchivedPdfWindow(
+        reference.url,
+        archiveReferenceAction.kind === 'source' ? 'PDF origine' : 'PDF fattura',
+      )
+      setArchiveReferenceAction(null)
+    } catch (error) {
+      console.error('Anteprima PDF non disponibile', error)
+      setArchiveReferenceAction((currentAction) => currentAction
+        ? { ...currentAction, error: "Non riesco ad aprire il PDF. Verifica che sia ancora presente nell'archivio." }
+        : currentAction)
+    }
   }
 
   function goToArchiveReference() {
@@ -7257,7 +7342,7 @@ function App() {
   }
 
   function resetDocumentView() {
-    setZoomScale(BASE_PAGE_SCALE)
+    setZoomScale(fitInvoicePageScale(currentInvoice, documentViewportRef.current))
     resetDocumentViewportScroll()
   }
 
@@ -7476,7 +7561,7 @@ function App() {
   }
 
   function zoomOut() {
-    setZoomScale(Math.max(0.35, Number((pageScale - 0.1).toFixed(2))))
+    setZoomScale(Math.max(MIN_PAGE_SCALE, Number((pageScale - 0.1).toFixed(2))))
   }
 
   function zoomIn() {
@@ -7490,7 +7575,7 @@ function App() {
       return
     }
 
-    const clampedValue = Math.min(150, Math.max(35, parsedValue))
+    const clampedValue = Math.min(150, Math.max(MIN_PAGE_SCALE * 100, parsedValue))
     setZoomScale(Number((clampedValue / 100).toFixed(2)))
   }
 
@@ -8199,6 +8284,7 @@ function App() {
                   filteredSourceArchiveRecords.map((record) => record.source_id),
                 )
               }
+              onOpenPdf={openArchivePdf}
             />
           ) : (
             <InvoicePdfArchiveTable
@@ -8208,6 +8294,7 @@ function App() {
               onGoToSource={(record) =>
                 navigateToArchiveReference({ record, kind: 'source', error: null })
               }
+              onOpenPdf={openArchivePdf}
               onToggle={(record) => toggleArchiveSelection(record.record_id)}
               onToggleAll={() =>
                 toggleAllArchiveSelections(
@@ -8667,9 +8754,9 @@ function App() {
               <label>
                 <input
                   type="number"
-                  min="35"
+                  min={MIN_PAGE_SCALE * 100}
                   max="150"
-                  step="5"
+                  step="1"
                   value={zoomInput}
                   aria-label="Percentuale zoom"
                   onChange={(event) => setZoomInput(event.target.value)}
@@ -9407,6 +9494,17 @@ function App() {
           onCancel={() => setPendingSegmentationAction(null)}
           onConfirm={confirmSegmentationAction}
         />
+      ) : null}
+      {isDesktopClosing ? (
+        <div className="registry-dialog-backdrop segmentation-progress-backdrop">
+          <section className="registry-dialog segmentation-progress-dialog" role="status" aria-live="polite">
+            <div className="segmentation-progress-content">
+              <h2>Chiusura in corso</h2>
+              <p>Sto completando il salvataggio delle modifiche.</p>
+              <div className="segmentation-progress-bar" aria-hidden="true"><span /></div>
+            </div>
+          </section>
+        </div>
       ) : null}
       {segmentationProgressState ? (
         <SegmentationProgressDialog state={segmentationProgressState} />
