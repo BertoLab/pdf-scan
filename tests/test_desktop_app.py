@@ -55,6 +55,7 @@ def test_desktop_pdf_preview_accepts_only_own_archive(tmp_path: Path) -> None:
     created: list[tuple[str, str, Window]] = []
 
     def create_window(title: str, url: str, **_kwargs):
+        assert _kwargs.get("maximized", False) is False
         window = Window()
         created.append((title, url, window))
         return window
@@ -138,7 +139,7 @@ def test_local_server_serves_real_static_and_health_routes(
         thread.join(timeout=5)
 
 
-def test_shutdown_cancels_active_and_preserves_queue(
+def test_shutdown_interrupts_active_and_preserves_queue(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     paths = get_runtime_paths(tmp_path / "app-data")
@@ -153,11 +154,16 @@ def test_shutdown_cancels_active_and_preserves_queue(
     monkeypatch.setattr(registry_api, "PROCESSING_JOB_IDLE", threading.Event())
 
     assert registry_api.shutdown_processing_jobs(timeout=0) is False
-    assert registry_api.PROCESSING_JOBS["active"]["cancel_requested"] is True
-    assert registry_api.PROCESSING_JOBS["active"]["status"] == "cancelling"
+    assert registry_api.PROCESSING_JOBS["active"]["cancel_requested"] is False
+    assert registry_api.PROCESSING_JOBS["active"]["interrupt_requested"] is True
+    assert registry_api.PROCESSING_JOBS["active"]["status"] == "stopping"
     assert registry_api.PROCESSING_JOBS["queued"]["status"] == "queued"
     assert registry_api.PROCESSING_JOB_QUEUE == ["queued"]
     assert registry_api.PROCESSING_SHUTDOWN_REQUESTED is True
+
+    registry_api.resume_processing_after_failed_shutdown()
+    assert registry_api.PROCESSING_JOBS["active"]["status"] == "processing"
+    assert registry_api.PROCESSING_JOBS["active"]["interrupt_requested"] is False
 
 
 def test_desktop_uses_real_server_with_window_adapter(
@@ -191,10 +197,16 @@ def test_desktop_uses_real_server_with_window_adapter(
 
     def create_window(_title: str, url: str, **_kwargs: object) -> SimpleNamespace:
         window.url = url
+        window.js_api = _kwargs["js_api"]
         assert isinstance(_kwargs["js_api"], desktop_app.DesktopPreviewApi)
+        assert _kwargs["maximized"] is True
+        assert _kwargs["width"] == 1500
+        assert _kwargs["height"] == 940
         return window
 
     def start(**kwargs: object) -> None:
+        assert window.url.startswith("http://127.0.0.1:")
+        assert window.js_api._main_window is window
         with urlopen(window.url, timeout=5) as response:
             assert b"window test" in response.read()
         assert kwargs["storage_path"] == str(paths.config_dir / "webview-profile")

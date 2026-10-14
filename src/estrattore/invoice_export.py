@@ -231,7 +231,7 @@ def _withholding_summary(groups, registry_records):
     return output.getvalue()
 
 
-def export_invoices(record_ids, mode, runtime_paths=None, *, history_id=None, include_summary=False):
+def export_invoices(record_ids, mode, runtime_paths=None, *, history_id=None, include_summary=False, deliver=None):
     if not isinstance(include_summary, bool):
         raise ValueError("Selezione del riepilogo non valida.")
     if mode not in {"workbook", "separate"}:
@@ -289,6 +289,8 @@ def export_invoices(record_ids, mode, runtime_paths=None, *, history_id=None, in
                     archive.writestr("riepilogo_ritenute.xlsx", _withholding_summary(groups, registry_records))
             body = output.getvalue()
             name = "fatture_condomini.zip"
+        if deliver is not None:
+            deliver(body, name)
         directory = paths.archive_dir / "exports" / export_id
         directory.mkdir(parents=True)
         target = directory / name

@@ -18,7 +18,7 @@ body {
 main {
   height: 100vh;
   display: grid;
-  grid-template-columns: 210px minmax(0, 1fr) clamp(420px, 42vw, 828px);
+  grid-template-columns: 210px minmax(0, 1fr) clamp(360px, 32vw, 620px);
   overflow: hidden;
   background: #f1f3f2;
 }
@@ -49,16 +49,17 @@ aside {
   color: #26372f;
   min-height: 0;
   overflow-y: auto;
+  padding: 12px;
 }
 
 .invoice-fields-panel p,
 .invoice-fields-panel li {
-  font-size: clamp(25px, 1.8vw, 31px);
+  font-size: 20px;
 }
 
 .invoice-fields-panel ul {
   display: grid;
-  gap: 14px;
+  gap: 10px;
   padding-left: 0;
   list-style: none;
   line-height: 1.35;
@@ -66,18 +67,18 @@ aside {
 
 .invoice-fields-panel li {
   display: grid;
-  gap: 6px;
-  padding: 11px 13px;
+  gap: 5px;
+  padding: 8px 10px;
   border: 1px solid #d9dde3;
-  border-left: 4px solid #c5cec6;
-  border-radius: 8px;
+  border-left: 3px solid #c5cec6;
+  border-radius: 6px;
   background: #fff;
   box-shadow: 0 1px 3px rgba(31, 41, 35, 0.08);
 }
 
 .invoice-fields-panel li strong {
   color: #216951;
-  font-size: clamp(27px, 1.85vw, 32px);
+  font-size: 21px;
   display: list-item;
   list-style: disc;
   margin-left: 1em;
@@ -88,7 +89,7 @@ aside {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   list-style: none;
   margin-left: 0;
@@ -117,7 +118,7 @@ aside {
 .invoice-fields-panel li > span {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
-  column-gap: 16px;
+  column-gap: 12px;
   padding-left: calc(1em + 0.15em);
 }
 
@@ -133,7 +134,7 @@ aside {
 .invoice-fields-panel li input {
   width: 100%;
   min-width: 0;
-  padding: 5px 7px;
+  padding: 4px 5px;
   border: 1px solid #babec2;
   border-radius: 6px;
   background: #fff;
@@ -158,9 +159,9 @@ aside {
   inset: calc(100% + 4px) 0 auto 0;
   display: grid;
   gap: 2px;
-  max-height: 240px;
+  max-height: 200px;
   overflow-y: auto;
-  padding: 6px;
+  padding: 5px;
   border: 1px solid #b9c8bf;
   border-radius: 8px;
   background: #ffffff;
@@ -172,8 +173,8 @@ aside {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
   align-items: center;
-  gap: 10px;
-  padding: 7px 8px;
+  gap: 8px;
+  padding: 5px 6px;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -228,18 +229,37 @@ h2 {
 
 aside:first-child h2 {
   color: #fff;
+  font-size: 20px;
+}
+
+aside:first-child h2.invoice-sidebar-title {
+  font-size: 22px;
 }
 
 .invoice-fields-panel h2 {
-  font-size: clamp(27px, 1.85vw, 32px);
+  font-size: 22px;
 }
 
 .fields-header {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 16px;
+  gap: 8px;
+}
+
+.invoice-fields-toggle {
+  width: max-content;
+  margin: 7px 0 2px;
+}
+
+.invoice-fields-panel .checkbox-control {
+  gap: 6px;
+  font-size: 16px;
+}
+
+.invoice-fields-panel .checkbox-control input {
+  width: 16px;
+  height: 16px;
 }
 
 .checkbox-control {
@@ -315,7 +335,6 @@ aside:first-child p {
 .invoice-page-boundary-actions button:hover:not(:disabled) {
   border-color: #216951;
   background: #eef8f1;
-  transform: none;
 }
 
 .invoice-page-boundary-disabled-reason {
@@ -370,6 +389,10 @@ aside:first-child p {
   width: min(600px, calc(100vw - 2rem));
 }
 
+.batch-discard-progress-dialog:focus {
+  outline: none;
+}
+
 .segmentation-progress-content {
   display: grid;
   justify-items: center;
@@ -402,17 +425,19 @@ aside:first-child p {
 }
 
 .fields-header button {
-  padding: 6px 10px;
+  padding: 5px 8px;
 }
 
 .invoice-review-actions {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   margin-left: auto;
 }
 
 .invoice-review-actions button {
+  padding: 6px;
+  font-size: 13px;
   white-space: nowrap;
 }
 
@@ -423,18 +448,24 @@ aside:first-child p {
 }
 
 .invoice-review-actions .invoice-discard-button {
-  border-color: #d7c9b1;
-  background: #fff9ed;
-  color: #7a4d11;
+  border-color: #e0b4ad;
+  background: #fff7f6;
+  color: #9f2f24;
+}
+
+.invoice-review-actions .invoice-discard-button:hover:not(:disabled) {
+  border-color: #c95043;
+  background: #fee2df;
+  color: #7f1d1d;
 }
 
 .invoice-review-action-status {
   margin-top: 10px;
-  padding: 8px 10px;
+  padding: 6px 8px;
   border-radius: 8px;
   background: #eef4f1;
   color: #216951;
-  font-size: 16px !important;
+  font-size: 14px !important;
 }
 
 .invoice-review-action-status.error {
@@ -551,7 +582,6 @@ button:disabled {
   border-color: rgba(255, 255, 255, 0.55);
   background: rgba(255, 255, 255, 0.16);
   color: #fff;
-  transform: none;
 }
 
 .registry-sidebar-view-switch button.active {
@@ -580,7 +610,7 @@ button:disabled {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
-  gap: 8px;
+  gap: 0;
 }
 
 .batch-select-row .batch-select {
@@ -597,11 +627,11 @@ button:disabled {
   height: 32px;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.38);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.18);
+  justify-content: flex-start;
+  padding: 0 0 0 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
   color: #fff;
   font-size: 20px;
   font-weight: 900;
@@ -609,8 +639,12 @@ button:disabled {
   box-shadow: none;
 }
 
-.review-actions-menu-button:hover {
-  background: rgba(255, 255, 255, 0.28);
+button.review-actions-menu-button:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  color: #fff;
+  box-shadow: none;
+  transform: translateY(-2px);
 }
 
 .review-actions-menu {
@@ -700,6 +734,12 @@ button:disabled {
   border-top: 1px solid rgba(255, 255, 255, 0.18);
 }
 
+.sidebar-upload-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .sidebar-archive-menu-trigger {
   position: relative;
   display: inline-flex;
@@ -707,6 +747,54 @@ button:disabled {
   justify-content: center;
   border-radius: 10px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+
+.sidebar-processes-button {
+  display: inline-flex;
+  align-items: center;
+}
+
+.sidebar-archives-button,
+.sidebar-processes-button {
+  position: relative;
+  justify-content: center;
+}
+
+.sidebar-archives-button .sidebar-nav-icon,
+.sidebar-processes-button .sidebar-nav-icon {
+  position: absolute;
+  left: 16px;
+  margin-right: 0;
+}
+
+.sidebar-nav-icon {
+  flex: none;
+  margin-right: 8px;
+}
+
+.sidebar-archives-button {
+  border-color: #a8d2df;
+  background: #dceef4;
+  color: #164b63;
+}
+
+.sidebar-archives-button:hover:not(:disabled),
+.sidebar-archives-button[aria-expanded='true'] {
+  border-color: #7bb8cc;
+  background: #c7e6f0;
+  color: #123f55;
+}
+
+.sidebar-processes-button {
+  border-color: #e5d39c;
+  background: #f8ebc7;
+  color: #674713;
+}
+
+.sidebar-processes-button:hover:not(:disabled) {
+  border-color: #d9bd75;
+  background: #f4dfa8;
+  color: #593b0c;
 }
 
 .sidebar-archive-menu-dropdown {
@@ -744,7 +832,7 @@ button:disabled {
   margin: 0;
   padding: 0 0 0.05rem 0.15rem;
   color: #6b7280;
-  font-size: 0.72rem;
+  font-size: 0.95rem;
   font-weight: 800;
   letter-spacing: 0.08em;
   line-height: 1.2;
@@ -780,8 +868,8 @@ button:disabled {
 }
 
 .mystudio-tool-icon {
-  width: 70px;
-  height: 50px;
+  width: 76px;
+  height: 55px;
   display: flex;
   flex: 0 0 auto;
   align-items: center;
@@ -789,9 +877,13 @@ button:disabled {
   margin-bottom: 10px;
   border-radius: 18px;
   color: #4f7a69;
-  font-size: 0.9rem;
+  font-size: 1.05rem;
   font-weight: 900;
   letter-spacing: 0.04em;
+}
+
+.mystudio-tool-item-pdf .mystudio-tool-icon {
+  color: #a3595d;
 }
 
 .mystudio-tool-item-blue .mystudio-tool-icon {
@@ -816,7 +908,6 @@ button:disabled {
   border-color: #cfd9d4;
   background: #e8efeb;
   color: #2f4038;
-  transform: none;
 }
 
 .pdf-import-status {
@@ -951,7 +1042,6 @@ button:disabled {
   border-color: #f1a69d;
   background: #fee2df;
   color: #7f1d1d;
-  transform: none;
 }
 
 .imported-batch-process-button:hover:not(:disabled) {
@@ -979,7 +1069,6 @@ button:disabled {
   border-color: #f1a69d;
   background: #fee2df;
   color: #7f1d1d;
-  transform: none;
 }
 
 .processing-cancel-progress {
@@ -1041,8 +1130,22 @@ button:disabled {
   font-size: 13px;
 }
 
-.document-import-dialog {
-  width: min(950px, calc(100vw - 48px));
+.registry-dialog.document-import-dialog {
+  width: min(440px, calc(100vw - 2rem));
+}
+
+.registry-dialog.document-import-dialog header {
+  display: grid;
+  grid-template-columns: 45px minmax(0, 1fr) 45px;
+  gap: 0.5rem;
+}
+
+.document-import-dialog header::before {
+  content: "";
+}
+
+.document-import-dialog header h2 {
+  text-align: center;
 }
 
 .document-import-body {
@@ -1115,6 +1218,11 @@ button:disabled {
   font-size: 17.5px;
 }
 
+.document-import-empty {
+  line-height: 1.45;
+  text-align: center;
+}
+
 .batch-select span {
   color: #4b5563;
   font-weight: 700;
@@ -1128,6 +1236,10 @@ button:disabled {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.94);
   color: #26372f;
+}
+
+.batch-select-row .batch-select select {
+  font-weight: 700;
 }
 
 .page-list button {
@@ -1167,9 +1279,10 @@ button:disabled {
 
 .document-panel header {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) max-content;
-  align-items: start;
-  gap: 18px;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 7px;
   min-height: 24px;
   padding: 9px 12px;
   border: 1px solid #cfd7d1;
@@ -1181,6 +1294,20 @@ button:disabled {
 
 .document-context {
   min-width: 0;
+}
+
+.document-actions {
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.document-actions .invoice-page-reorder-menu {
+  margin-top: 0;
 }
 
 .document-panel header p {
@@ -1546,7 +1673,7 @@ button:disabled {
   flex-wrap: nowrap;
   gap: 8px;
   min-width: 0;
-  margin-top: 27px;
+  margin-left: auto;
 }
 
 .zoom-controls button {
@@ -1554,17 +1681,17 @@ button:disabled {
   padding: 5px 9px;
 }
 
-.zoom-controls .registry-import-button {
+.document-panel header > .registry-import-button {
   min-width: 0;
   border-color: #216951;
   border-radius: 999px;
   background: #216951;
   color: #fff;
-  padding: 5px 14px;
+  padding: 4px 12px;
   white-space: nowrap;
 }
 
-.zoom-controls .registry-import-button:hover {
+.document-panel header > .registry-import-button:hover:not(:disabled) {
   border-color: #295748;
   background: #295748;
   color: #fff;
@@ -1669,7 +1796,6 @@ button:disabled {
   border-color: #68776f;
   background: #dde3df;
   color: #26372f;
-  transform: none;
 }
 
 .developer-tools-menu {
@@ -1751,58 +1877,14 @@ button:disabled {
   border-color: #174c3a;
   background: #174c3a;
   color: #fff;
-  transform: none;
 }
 
-@container (max-width: 820px) {
-  .document-panel header {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 11px;
-  }
-
+@container (max-width: 440px) {
   .zoom-controls {
     width: 100%;
-    margin-top: 0;
-  }
-
-  .zoom-controls .registry-import-button {
-    margin-right: auto;
-  }
-}
-
-@container (max-width: 620px) {
-  .zoom-controls {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) max-content;
-    justify-content: stretch;
-  }
-
-  .zoom-controls .registry-import-button {
-    grid-column: 1;
-    grid-row: 1;
-    justify-self: start;
-    margin-right: 0;
-  }
-
-  .developer-tools {
-    grid-column: 2;
-    grid-row: 1;
-    justify-self: end;
+    justify-content: flex-start;
+    flex-wrap: wrap;
     margin-left: 0;
-    padding-left: 0;
-    border-left: 0;
-  }
-
-  .zoom-stepper {
-    grid-column: 1;
-    grid-row: 2;
-    justify-self: start;
-  }
-
-  .zoom-controls .document-reset-button {
-    grid-column: 2;
-    grid-row: 2;
-    justify-self: end;
   }
 }
 
@@ -2062,7 +2144,7 @@ button:disabled {
   color: #64748b;
   cursor: pointer;
   font-size: 1.375rem;
-  transition: background 0.2s ease, color 0.2s ease;
+  transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
 }
 
 .registry-dialog header button:hover {
@@ -2445,15 +2527,15 @@ button:disabled {
 .registry-add-button {
   justify-self: end;
   margin: 1.75rem 2rem 2rem;
-  min-height: 2.6rem;
-  padding: 0.75rem 1.25rem;
+  min-height: 2.15rem;
+  padding: 0.35rem 0.8rem;
   border: 1px solid #216951;
-  border-radius: 8px;
+  border-radius: 999px;
   background: #216951;
   color: #fff;
   cursor: pointer;
   font-weight: 700;
-  transition: background 0.2s ease, border-color 0.2s ease;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
 }
 
 .registry-add-button:hover {
@@ -2487,7 +2569,6 @@ button:disabled {
   border-color: #295748;
   background: #295748;
   color: #fff;
-  transform: none;
 }
 
 .registry-preview-dialog {
@@ -2529,23 +2610,74 @@ button:disabled {
 }
 
 .invoice-registry-page > header {
-  grid-template-columns:
-    minmax(150px, 0.65fr)
-    max-content
-    minmax(180px, 0.75fr)
-    minmax(220px, 0.8fr)
-    max-content;
-  gap: 12px;
+  grid-template-columns: minmax(320px, 400px) minmax(200px, 255px) max-content minmax(0, 1fr);
+  gap: 8px 12px;
+}
+
+.invoice-registry-heading {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.invoice-registry-page .invoice-registry-search {
+  position: relative;
+  width: 100%;
+  grid-column: 1;
+  grid-row: 2;
+  align-self: end;
+}
+
+.invoice-registry-toolbar-control.invoice-registry-sort-control {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  align-self: end;
+  gap: 8px;
+}
+
+.invoice-registry-sort-control select {
+  flex: 1;
+}
+
+.invoice-registry-search-icon {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  color: #63756b;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.invoice-registry-page > header .invoice-registry-search input {
+  padding-left: 39px;
+}
+
+.invoice-registry-row-actions {
+  grid-column: 3 / -1;
+  grid-row: 1;
+  align-self: center;
+  justify-self: end;
+  flex-wrap: nowrap;
 }
 
 .invoice-registry-date-actions {
+  grid-column: 2 / -1;
+  grid-row: 2;
   display: flex;
   align-items: flex-end;
-  flex-wrap: wrap;
+  justify-self: end;
   gap: 12px;
 }
 
 .invoice-registry-date-actions > label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.invoice-registry-date-actions > label input {
   width: 138px;
 }
 
@@ -2563,10 +2695,6 @@ button:disabled {
 .invoice-registry-export-button:hover:not(:disabled) {
   background: #d2e7da;
   border-color: #80ad95;
-}
-
-.invoice-registry-page > header .archive-search {
-  align-self: end;
 }
 
 .invoice-registry-page > header .archive-search input {
@@ -2603,22 +2731,48 @@ button:disabled {
   box-shadow: 0 0 0 3px rgba(33, 105, 81, 0.14);
 }
 
-@media (max-width: 1650px) {
+@media (max-width: 1200px) and (min-width: 1081px) {
   .invoice-registry-page > header {
-    grid-template-columns:
-      minmax(180px, 1fr)
-      max-content
-      minmax(190px, 0.8fr);
+    grid-template-columns: minmax(290px, 1fr) 255px max-content;
   }
 
-  .invoice-registry-page > header .archive-search {
-    grid-column: 1 / 3;
-    width: 100%;
+  .invoice-registry-date-actions {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+}
+
+@media (max-width: 1080px) {
+  .registry-page.invoice-registry-page > header {
+    grid-template-columns: minmax(0, 1fr) 255px;
   }
 
-  .invoice-registry-page > header .registry-page-actions {
-    grid-column: 3 / 4;
-    justify-content: flex-end;
+  .invoice-registry-date-actions {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    justify-self: end;
+  }
+
+  .invoice-registry-row-actions {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+}
+
+@media (max-width: 760px) {
+  .invoice-registry-date-actions {
+    grid-row: 4;
+    justify-self: start;
+    flex-wrap: wrap;
+  }
+
+  .invoice-registry-page .invoice-registry-search,
+  .invoice-registry-sort-control {
+    grid-row: 3;
+  }
+
+  .invoice-registry-row-actions {
+    grid-row: 1;
   }
 }
 
@@ -3399,7 +3553,6 @@ button:disabled {
   border-color: #c95043;
   background: #fee2df;
   color: #7f1d1d;
-  transform: none;
 }
 
 .invoice-registry-table .virtual-data-table-row > div,
@@ -3427,15 +3580,6 @@ button:disabled {
 }
 
 @media (max-width: 980px) {
-  .invoice-registry-page > header {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .invoice-registry-page > header .archive-search,
-  .invoice-registry-page > header .registry-page-actions {
-    grid-column: 1;
-  }
-
   main,
   main.registry-page-mode {
     grid-template-columns: 190px minmax(0, 1fr);
@@ -3706,13 +3850,13 @@ button:disabled {
 .field-registry-record-button {
   position: relative;
   z-index: 2;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   min-width: 0;
-  margin-left: 4px;
+  margin-left: 2px;
   padding: 0;
   border: 1px solid #38a3d1;
   border-radius: 999px;
@@ -3732,21 +3876,20 @@ button:disabled {
   border-color: #0f7fae;
   background: #c8ebff;
   color: #0b587a;
-  transform: none;
 }
 
 .field-add-registry-record-button {
   position: relative;
   z-index: 2;
-  width: 28px;
-  height: 28px;
-  margin-left: 4px;
+  width: 24px;
+  height: 24px;
+  margin-left: 2px;
   padding: 0;
   border: 1px solid #216951;
   background: #e8f5e9;
   color: #216951;
   box-shadow: 0 1px 4px rgba(33, 105, 81, 0.16);
-  font-size: 18px;
+  font-size: 16px;
   pointer-events: auto;
 }
 
@@ -3754,7 +3897,6 @@ button:disabled {
   border-color: #216951;
   background: #d7ecdc;
   color: #174b3a;
-  transform: none;
 }
 
 .field-original-scan-button {
@@ -3786,7 +3928,6 @@ button:disabled {
   border-color: #38a3d1;
   background: #e5f5ff;
   color: #155d82;
-  transform: none;
 }
 
 .field-original-scan-button[aria-pressed="true"] {
@@ -3803,16 +3944,16 @@ button:disabled {
 }
 
 .original-scan-value-view {
-  min-height: 41px;
+  min-height: 34px;
   display: flex;
   align-items: center;
   width: 100%;
-  padding: 5px 8px;
+  padding: 4px 6px;
   border: 1px solid #7fbfe3;
   border-radius: 6px;
   background: #dff3ff;
   color: #124b66;
-  font-size: 27px;
+  font-size: 20px;
   line-height: 1.18;
   box-shadow: inset 0 0 0 1px rgba(56, 163, 209, 0.16);
 }
@@ -3899,7 +4040,6 @@ button:disabled {
   border-color: #b77900;
   background: #f5b700;
   color: #3f2a00;
-  transform: none;
 }
 
 .registry-conflict-options button,

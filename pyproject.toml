@@ -19,5 +19,9 @@ dependencies = [
 dev = ["pytest>=7.0"]
 ocr = ["pytesseract>=0.3.13"]
 
+[tool.estrattore.desktop_release]
+stage = "rc"
+revision = 2
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

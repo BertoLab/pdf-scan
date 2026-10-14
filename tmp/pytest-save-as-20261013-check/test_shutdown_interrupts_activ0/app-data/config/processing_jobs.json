@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "active_job_id": "active",
+  "queued_job_ids": [
+    "queued"
+  ],
+  "jobs": [
+    {
+      "job_id": "active",
+      "status": "processing",
+      "cancel_requested": false,
+      "interrupt_requested": false,
+      "message": "Processamento OCR in corso"
+    },
+    {
+      "job_id": "queued",
+      "status": "queued",
+      "cancel_requested": false
+    }
+  ]
+}

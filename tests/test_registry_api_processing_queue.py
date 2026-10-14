@@ -10,6 +10,7 @@ import uuid
 
 from estrattore.batch_storage import import_pdf_batch, load_batch_index
 from estrattore.processing_storage import (
+    ProcessingInterrupted,
     ProcessingRunIndex,
     ReviewBatchRef,
     mark_document_processing_complete,
@@ -228,6 +229,88 @@ def test_processing_jobs_load_persistent_queue_after_restart(monkeypatch) -> Non
         assert interrupted_job["created_at"] == "2026-08-11T10:00:00"
         assert queued_job["status"] == "queued"
         assert registry_api.PROCESSING_JOB_QUEUE == ["job_000001", "job_000002"]
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_shutdown_interruption_retains_active_job_and_staging(monkeypatch) -> None:
+    workspace = _workspace()
+    try:
+        paths = get_runtime_paths(workspace / "app-data")
+        paths.ensure_directories()
+        batch_id = "batch_a"
+        process_id = "process_a"
+        batch_dir = paths.batches_dir / batch_id
+        process_dir = paths.manifests_dir / process_id
+        batch_dir.mkdir()
+        process_dir.mkdir()
+        (batch_dir / "source.pdf").write_bytes(b"%PDF")
+        (process_dir / "checkpoint").write_text("done", encoding="utf-8")
+        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", paths)
+        monkeypatch.setattr(registry_api, "PROCESSING_JOBS", {
+            "job_a": {
+                "job_id": "job_a", "batch_id": batch_id, "process_id": process_id,
+                "status": "stopping", "interrupt_requested": True,
+                "cancel_requested": False, "files": [], "progress_total": 2,
+            },
+            "job_b": {
+                "job_id": "job_b", "batch_id": "batch_b", "status": "queued",
+                "cancel_requested": False, "files": [], "progress_total": 1,
+            },
+        })
+        monkeypatch.setattr(registry_api, "PROCESSING_JOB_QUEUE", ["job_b"])
+        monkeypatch.setattr(registry_api, "PROCESSING_ACTIVE_JOB_ID", "job_a")
+        monkeypatch.setattr(registry_api, "PROCESSING_SHUTDOWN_REQUESTED", True)
+        monkeypatch.setattr(registry_api, "PROCESSING_JOB_IDLE", threading.Event())
+        monkeypatch.setattr(
+            registry_api, "process_imported_batch",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(ProcessingInterrupted()),
+        )
+
+        registry_api._run_processing_job("job_a", batch_id)
+
+        assert registry_api.PROCESSING_JOBS["job_a"]["status"] == "queued"
+        assert registry_api.PROCESSING_JOB_QUEUE == ["job_a", "job_b"]
+        assert (batch_dir / "source.pdf").is_file()
+        assert (process_dir / "checkpoint").is_file()
+        assert registry_api.PROCESSING_JOB_IDLE.is_set()
+
+        monkeypatch.setattr(registry_api, "PROCESSING_JOBS", {})
+        monkeypatch.setattr(registry_api, "PROCESSING_JOB_QUEUE", [])
+        registry_api._load_processing_jobs_from_disk()
+        assert registry_api.PROCESSING_JOB_QUEUE == ["job_a", "job_b"]
+        assert registry_api._resumable_processing_process_ids() == {process_id}
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_restart_prioritizes_interrupted_active_job_over_queued_jobs(monkeypatch) -> None:
+    workspace = _workspace()
+    try:
+        paths = get_runtime_paths(workspace / "app-data")
+        paths.ensure_directories()
+        jobs_file = paths.config_dir / "processing_jobs.json"
+        jobs_file.write_text(json.dumps({
+            "schema_version": 1,
+            "active_job_id": "job_z",
+            "queued_job_ids": ["job_b", "job_a"],
+            "jobs": [
+                {"job_id": "job_a", "batch_id": "batch_a", "status": "queued", "files": []},
+                {"job_id": "job_b", "batch_id": "batch_b", "status": "queued", "files": []},
+                {"job_id": "job_z", "batch_id": "batch_z", "process_id": "process_z",
+                 "status": "stopping", "interrupt_requested": True, "files": []},
+            ],
+        }), encoding="utf-8")
+        monkeypatch.setattr(registry_api, "RUNTIME_PATHS", paths)
+        monkeypatch.setattr(registry_api, "PROCESSING_JOBS", {})
+        monkeypatch.setattr(registry_api, "PROCESSING_JOB_QUEUE", [])
+        monkeypatch.setattr(registry_api, "PROCESSING_ACTIVE_JOB_ID", None)
+
+        registry_api._load_processing_jobs_from_disk()
+
+        assert registry_api.PROCESSING_JOB_QUEUE == ["job_z", "job_b", "job_a"]
+        assert registry_api._processing_job("job_z")["status"] == "queued"
+        assert registry_api._processing_job("job_z")["interrupt_requested"] is False
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 

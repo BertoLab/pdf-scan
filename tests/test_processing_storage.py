@@ -19,6 +19,7 @@ from estrattore.processing_storage import (
     DOCUMENT_COMPLETE_FILE_NAME,
     PROCESSING_COMPLETE_FILE_NAME,
     ProcessingCancelled,
+    ProcessingInterrupted,
     clear_all_review_batches,
     cleanup_incomplete_processing_runs,
     delete_review_invoice_drafts,
@@ -149,6 +150,65 @@ def test_worker_cancellation_removes_incomplete_processing_run(
         assert not (
             process_dir / "documents" / "doc_000001.working"
         ).exists()
+    finally:
+        _clean_workspace(workspace)
+
+
+def test_shutdown_interruption_keeps_completed_pdf_checkpoint_for_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace()
+    try:
+        sources = [workspace / "first.pdf", workspace / "second.pdf"]
+        for source in sources:
+            source.write_bytes(b"%PDF")
+        paths = get_runtime_paths(workspace / "app-data")
+        batch = import_pdf_batch(sources, runtime_paths=paths)
+        process_id = "process_resume_after_close"
+        worker_calls: list[str] = []
+        interrupted = True
+
+        def fake_worker(execution, **_checks):
+            worker_calls.append(execution.document_id)
+            if interrupted and len(worker_calls) == 2:
+                execution.working_output_dir.mkdir(parents=True)
+                raise WorkerCancelled("desktop closing")
+            execution.output_dir.mkdir(parents=True)
+            (execution.output_dir / "viewer_manifest.json").write_text(
+                json.dumps({"invoices": [{
+                    "invoice_id": f"invoice-{execution.first_invoice_number:03d}",
+                    "title": "Fattura", "fields": [],
+                }]}),
+                encoding="utf-8",
+            )
+            processing_storage.mark_document_processing_complete(
+                execution.output_dir, execution.document_id, 1,
+            )
+
+        monkeypatch.setattr(processing_storage, "run_document_worker", fake_worker)
+        with pytest.raises(ProcessingInterrupted):
+            process_imported_batch(
+                batch.batch_id, runtime_paths=paths, process_id=process_id,
+                resume_existing=True,
+                should_interrupt=lambda: interrupted and len(worker_calls) >= 2,
+            )
+
+        process_dir = paths.manifests_dir / process_id
+        assert (process_dir / "documents" / batch.documents[0].document_id / DOCUMENT_COMPLETE_FILE_NAME).is_file()
+        assert not (process_dir / "documents" / f"{batch.documents[1].document_id}.working").exists()
+        assert (paths.batches_dir / batch.batch_id).is_dir()
+
+        interrupted = False
+        result = process_imported_batch(
+            batch.batch_id, runtime_paths=paths, process_id=process_id,
+            resume_existing=True,
+        )
+        assert result.invoice_count == 2
+        assert worker_calls == [
+            batch.documents[0].document_id,
+            batch.documents[1].document_id,
+            batch.documents[1].document_id,
+        ]
     finally:
         _clean_workspace(workspace)
 

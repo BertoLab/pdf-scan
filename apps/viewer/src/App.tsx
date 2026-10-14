@@ -1,6 +1,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent, ReactNode, RefObject } from 'react'
+import { Archive, CloudUpload, Cog, EllipsisVertical, Search } from 'lucide-react'
 import './App.css'
 import { installDesktopLifecycle } from './desktopLifecycle'
 import { normalizeMoneyValueForInput } from './moneyFormatting'
@@ -21,6 +22,16 @@ import type {
 const sampleBatchIndexPath = '/sample/viewer_batches.json'
 const sampleIndexPath = '/sample/viewer_index.json'
 const isDesktopApp = new URLSearchParams(window.location.search).has('desktop')
+type DesktopExportApi = {
+  export_invoices_native: (ids: string[], mode: 'workbook' | 'separate', historyId: string | null, includeSummary: boolean) => Promise<{ ok: boolean; cancelled?: boolean; export_id: string; download_url: string; file_name: string; invoice_count: number }>
+  save_existing_export: (exportId: string) => Promise<{ ok: boolean; cancelled?: boolean }>
+  save_named_export: (kind: 'registry' | 'cleaning_report' | 'invoice_registry') => Promise<{ ok: boolean; cancelled?: boolean }>
+}
+
+function desktopExportApi(): DesktopExportApi | null {
+  if (!isDesktopApp) return null
+  return (window as Window & { pywebview?: { api?: DesktopExportApi } }).pywebview?.api ?? null
+}
 const registryApiBaseUrl =
   import.meta.env.VITE_REGISTRY_API_URL ??
   (window.location.port === '5173' ? 'http://127.0.0.1:8765' : window.location.origin)
@@ -397,6 +408,7 @@ type ProcessingJobPayload = {
   status:
     | 'queued'
     | 'processing'
+    | 'stopping'
     | 'finalizing'
     | 'cancelling'
     | 'completed'
@@ -2376,6 +2388,7 @@ type RegistryCleaningReportDialogProps = {
   mode: RegistryCleaningReportMode
   isRunning: boolean
   reportFileUrl: string | null
+  downloadError: string | null
   onClose: () => void
   onApply: (selectedMergeGroupKeys: string[]) => void
   onDownload: () => void
@@ -2386,6 +2399,7 @@ function RegistryCleaningReportDialog({
   mode,
   isRunning,
   reportFileUrl,
+  downloadError,
   onClose,
   onApply,
   onDownload,
@@ -2485,6 +2499,7 @@ function RegistryCleaningReportDialog({
             />
           ) : null}
         </div>
+        {downloadError ? <p className="feedback-export-error" role="alert">{downloadError}</p> : null}
         <div className="registry-cleaning-actions">
           <button onClick={onDownload} disabled={!reportFileUrl || isRunning}>
             Scarica Excel
@@ -2731,7 +2746,7 @@ function RegistryDeleteConfirmDialog({
     <div className="registry-dialog-backdrop" role="presentation">
       <section className="registry-dialog registry-delete-dialog" role="dialog" aria-modal="true">
         <header>
-          <h2>Cancella anagrafica</h2>
+          <h2>Elimina anagrafica</h2>
           <button onClick={onCancel} aria-label="Chiudi">
             x
           </button>
@@ -2744,7 +2759,7 @@ function RegistryDeleteConfirmDialog({
         <div className="registry-cleaning-actions">
           <button onClick={onCancel}>Annulla</button>
           <button className="registry-delete-button" onClick={onConfirm}>
-            Cancella
+            Elimina
           </button>
         </div>
       </section>
@@ -2959,6 +2974,40 @@ function BatchReviewActionConfirmDialog({
                 ? 'Correggi gli importi'
                 : 'Continua e salva gruppo'}
           </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function BatchDiscardProgressDialog() {
+  const dialogRef = useRef<HTMLElement>(null)
+
+  useEffect(() => {
+    dialogRef.current?.focus()
+    function blockKeyboardInteraction(event: KeyboardEvent) {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+    }
+    window.addEventListener('keydown', blockKeyboardInteraction, true)
+    return () => window.removeEventListener('keydown', blockKeyboardInteraction, true)
+  }, [])
+
+  return (
+    <div className="registry-dialog-backdrop segmentation-progress-backdrop">
+      <section
+        ref={dialogRef}
+        className="registry-dialog segmentation-progress-dialog batch-discard-progress-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-busy="true"
+        aria-labelledby="batch-discard-progress-title"
+        tabIndex={-1}
+      >
+        <div className="segmentation-progress-content">
+          <h2 id="batch-discard-progress-title">Scarto del gruppo in corso</h2>
+          <p>Stiamo eliminando i record delle fatture. Attendere...</p>
+          <div className="segmentation-progress-bar" aria-hidden="true"><span /></div>
         </div>
       </section>
     </div>
@@ -3241,7 +3290,9 @@ function DocumentImportDialog({
         </header>
         <div className="document-import-body">
           <p className="document-import-empty">
-            Scegli più PDF oppure una cartella. La lavorazione OCR partirà subito.
+            Scegli più PDF oppure una cartella.
+            <br />
+            La lavorazione OCR partirà subito.
           </p>
           <div className="document-import-actions">
             <button onClick={onSelectFiles} disabled={isImporting}>
@@ -3703,6 +3754,9 @@ function sourceArchiveProcessingStatusLabel(job: ProcessingJobPayload) {
   if (job.status === 'processing') {
     return 'in corso'
   }
+  if (job.status === 'stopping') {
+    return 'interruzione in corso'
+  }
   if (job.status === 'finalizing') {
     return job.archive_sources === false ? 'completamento' : 'archiviazione'
   }
@@ -3950,6 +4004,8 @@ function App() {
   const [isDocumentImportRunning, setIsDocumentImportRunning] = useState(false)
   const [invoiceReviewActionState, setInvoiceReviewActionState] =
     useState<InvoiceReviewActionState>(null)
+  const [isBatchDiscarding, setIsBatchDiscarding] = useState(false)
+  const batchReviewActionInFlightRef = useRef(false)
   const [pendingSegmentationAction, setPendingSegmentationAction] =
     useState<PendingSegmentationAction | null>(null)
   const [segmentationProgressState, setSegmentationProgressState] =
@@ -4010,6 +4066,7 @@ function App() {
     useState<RegistryCleaningReportMode>('preview')
   const [registryCleaningReportFileUrl, setRegistryCleaningReportFileUrl] =
     useState<string | null>(null)
+  const [registryCleaningExportError, setRegistryCleaningExportError] = useState<string | null>(null)
   const archiveMenuTriggerRef = useRef<HTMLButtonElement | null>(null)
   const archiveMenuCloseTimeoutRef = useRef<number | null>(null)
   const [isArchiveMenuOpen, setIsArchiveMenuOpen] = useState(false)
@@ -4093,7 +4150,7 @@ function App() {
     mode: 'workbook' | 'separate'
     busy: boolean
     error?: string
-    result?: { download_url: string; file_name: string; invoice_count: number }
+    result?: { export_id?: string; download_url: string; file_name: string; invoice_count: number }
   } | null>(null)
   const [invoiceExportHistory, setInvoiceExportHistory] = useState<InvoiceExportHistoryEntry[]>([])
   const [exportHistoryInfo, setExportHistoryInfo] = useState<InvoiceExportHistoryEntry | null>(null)
@@ -4134,7 +4191,7 @@ function App() {
   )
   const activeProcessingJobs = processingJobs
     .filter((job) =>
-      ['queued', 'processing', 'finalizing', 'cancelling'].includes(job.status),
+      ['queued', 'processing', 'stopping', 'finalizing', 'cancelling'].includes(job.status),
     )
     .sort((left, right) => {
       const leftActive = left.status === 'queued' ? 1 : 0
@@ -4148,6 +4205,7 @@ function App() {
     (job) =>
       job.status === 'queued' ||
       job.status === 'processing' ||
+      job.status === 'stopping' ||
       job.status === 'finalizing' ||
       job.status === 'cancelling',
   )
@@ -5221,6 +5279,7 @@ function App() {
             (job) =>
               job.status === 'queued' ||
               job.status === 'processing' ||
+              job.status === 'stopping' ||
               job.status === 'finalizing' ||
               job.status === 'cancelling',
           )
@@ -5324,6 +5383,9 @@ function App() {
     }
     if (job.status === 'cancelling') {
       return 'Annullamento della lavorazione in corso.'
+    }
+    if (job.status === 'stopping') {
+      return "Interruzione in corso. La lavorazione riprendera' alla prossima apertura."
     }
     if (job.status === 'finalizing') {
       return 'Archiviazione dei file origine in corso.'
@@ -5488,6 +5550,7 @@ function App() {
         if (
           job.status === 'queued' ||
           job.status === 'processing' ||
+          job.status === 'stopping' ||
           job.status === 'finalizing' ||
           job.status === 'cancelling'
         ) {
@@ -5660,7 +5723,7 @@ function App() {
   }
 
   function confirmBatchReviewAction() {
-    if (!pendingBatchReviewAction) {
+    if (!pendingBatchReviewAction || batchReviewActionInFlightRef.current) {
       return
     }
 
@@ -5673,7 +5736,9 @@ function App() {
 
     const { action, invoices: targetInvoices } = pendingBatchReviewAction
     const isDiscard = action === 'discard'
+    batchReviewActionInFlightRef.current = true
     setPendingBatchReviewAction(null)
+    if (isDiscard) setIsBatchDiscarding(true)
     setInvoiceReviewActionState({
       kind: isDiscard ? 'discarding' : 'saving',
       message: isDiscard
@@ -5687,7 +5752,7 @@ function App() {
         await persistInvoiceReviewAction(invoice, action)
       }
     })()
-      .then(() => {
+      .then(async () => {
         setInvoices((currentInvoices) => {
           const persistedIds = new Set(targetInvoices.map((invoice) => invoice.invoiceId))
           return currentInvoices.filter((invoice) => !persistedIds.has(invoice.invoiceId))
@@ -5695,6 +5760,7 @@ function App() {
         setSelectedInvoiceId(null)
         setSelectedFieldKind(null)
         setActiveSuggestionFieldKind(null)
+        await loadProcessedReviewBatches()
         setInvoiceReviewActionState({
           kind: 'success',
           message: isDiscard
@@ -5706,9 +5772,13 @@ function App() {
             currentState?.kind === 'success' ? null : currentState,
           )
         }, 1600)
-        loadProcessedReviewBatches()
       })
-      .catch((error) => {
+      .catch(async (error) => {
+        try {
+          await loadProcessedReviewBatches()
+        } catch {
+          // Keep the original write error visible if refreshing also fails.
+        }
         setInvoiceReviewActionState({
           kind: 'error',
           message: `Operazione sul gruppo non completata. ${userErrorMessage(
@@ -5716,6 +5786,10 @@ function App() {
             'Alcune fatture potrebbero non essere state aggiornate.',
           )}`,
         })
+      })
+      .finally(() => {
+        batchReviewActionInFlightRef.current = false
+        if (isDiscard) setIsBatchDiscarding(false)
       })
   }
 
@@ -6241,7 +6315,17 @@ function App() {
     setInvoiceExport({ ids, mode: 'workbook', includeSummary: false, busy: false })
   }
 
-  function downloadGeneratedInvoiceExport(url: string, name: string) {
+  async function downloadGeneratedInvoiceExport(url: string, name: string, exportId?: string) {
+    if (isDesktopApp) {
+      try {
+        const api = desktopExportApi()
+        if (!api || !exportId) throw new Error('Esportazione non disponibile. Riapri l\'app.')
+        await api.save_existing_export(exportId)
+      } catch (error) {
+        setInvoiceExport((current) => current ? { ...current, error: userErrorMessage(error, 'Non riesco a salvare il file. Riprova.') } : current)
+      }
+      return
+    }
     const link = document.createElement('a')
     link.href = `${registryApiBaseUrl}${url}`
     link.download = name
@@ -6255,17 +6339,29 @@ function App() {
     const snapshot = invoiceExport
     setInvoiceExport({ ...snapshot, busy: true, error: undefined })
     try {
-      const response = await fetch(`${registryApiBaseUrl}/invoices/export`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ record_ids: snapshot.ids, mode: snapshot.mode, history_id: snapshot.historyId, include_summary: snapshot.includeSummary }),
-      })
-      const result = await response.json()
-      if (!response.ok || !result.download_url) throw new Error(result.error || 'Esportazione non riuscita.')
+      let result
+      if (isDesktopApp) {
+        const api = desktopExportApi()
+        if (!api) throw new Error('Esportazione non disponibile. Riapri l\'app.')
+        result = await api.export_invoices_native(snapshot.ids, snapshot.mode, snapshot.historyId ?? null, snapshot.includeSummary)
+        if (result.cancelled) {
+          setInvoiceExport({ ...snapshot, busy: false })
+          return
+        }
+      } else {
+        const response = await fetch(`${registryApiBaseUrl}/invoices/export`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ record_ids: snapshot.ids, mode: snapshot.mode, history_id: snapshot.historyId, include_summary: snapshot.includeSummary }),
+        })
+        result = await response.json()
+        if (!response.ok) throw new Error(result.error || 'Esportazione non riuscita.')
+      }
+      if (!result.download_url) throw new Error('Esportazione non riuscita.')
       setInvoiceExport({ ...snapshot, busy: false, result })
       setSelectedArchiveKeys(new Set())
       await loadInvoiceArchive()
-      downloadGeneratedInvoiceExport(result.download_url, result.file_name)
+      if (!isDesktopApp) downloadGeneratedInvoiceExport(result.download_url, result.file_name)
     } catch (error) {
       setInvoiceExport({ ...snapshot, busy: false, error: userErrorMessage(error, 'Non riesco a esportare le fatture. Riprova.') })
     }
@@ -6344,7 +6440,7 @@ function App() {
 
   function deleteRegistryFile() {
     setIsRegistryDeleteConfirmOpen(false)
-    setRegistrySaveStatus('Cancellazione anagrafica...')
+    setRegistrySaveStatus('Eliminazione anagrafica...')
     fetch(`${registryApiBaseUrl}/registry`, {
       method: 'DELETE',
     })
@@ -6363,13 +6459,13 @@ function App() {
         setRegistryCleaningReport(null)
         setRegistryCleaningReportFileUrl(null)
         setIsRegistryEditMode(false)
-        setRegistrySaveStatus('Anagrafica cancellata')
+        setRegistrySaveStatus('Anagrafica eliminata')
       })
       .catch((error) => {
         setRegistrySaveStatus(
-          `Anagrafica non cancellata. ${userErrorMessage(
+          `Anagrafica non eliminata. ${userErrorMessage(
             error,
-            "Non riesco a cancellare l'anagrafica.",
+            "Non riesco a eliminare l'anagrafica.",
           )}`,
         )
       })
@@ -6680,8 +6776,20 @@ function App() {
       })
   }
 
-  function downloadRegistryCleaningReport() {
+  async function downloadRegistryCleaningReport() {
     if (!registryCleaningReportFileUrl) {
+      return
+    }
+
+    if (isDesktopApp) {
+      setRegistryCleaningExportError(null)
+      try {
+        const api = desktopExportApi()
+        if (!api) throw new Error('Esportazione non disponibile. Riapri l\'app.')
+        await api.save_named_export('cleaning_report')
+      } catch (error) {
+        setRegistryCleaningExportError(userErrorMessage(error, 'Non riesco a salvare il report. Riprova.'))
+      }
       return
     }
 
@@ -6708,8 +6816,19 @@ function App() {
     })
   }
 
-  function downloadRegistryFile() {
+  async function downloadRegistryFile() {
     if (!registryStatus?.export_file_url) {
+      return
+    }
+
+    if (isDesktopApp) {
+      try {
+        const api = desktopExportApi()
+        if (!api) throw new Error('Esportazione non disponibile. Riapri l\'app.')
+        await api.save_named_export('registry')
+      } catch (error) {
+        setRegistryStatusError(userErrorMessage(error, 'Non riesco a salvare l\'anagrafica. Riprova.'))
+      }
       return
     }
 
@@ -7690,6 +7809,7 @@ function App() {
   }
 
   useEffect(() => {
+    if (appView !== 'review') return
     const viewport = documentViewportRef.current
     if (!viewport) return
     const activeViewport = viewport
@@ -7726,7 +7846,7 @@ function App() {
     return () => {
       activeViewport.removeEventListener('wheel', handleDocumentWheel)
     }
-  }, [pageScale])
+  }, [pageScale, appView])
 
   useEffect(() => {
     function handleInvoiceShortcut(event: KeyboardEvent) {
@@ -7907,10 +8027,11 @@ function App() {
           </div>
         ) : (
           <>
-            <h2>Fatture</h2>
+            <h2 className="invoice-sidebar-title">Fatture</h2>
             <div className="pdf-import-panel">
               <span className="sidebar-section-label">Caricamento</span>
-              <button className="pdf-import-button" onClick={openDocumentImportDialog}>
+              <button className="pdf-import-button sidebar-upload-button" onClick={openDocumentImportDialog}>
+                <CloudUpload className="sidebar-nav-icon" size={19} strokeWidth={2.3} aria-hidden="true" />
                 Carica documenti
               </button>
               {shouldShowPdfImportState ? (
@@ -7922,13 +8043,14 @@ function App() {
             <div className="sidebar-archive-menu">
               <button
                 ref={archiveMenuTriggerRef}
-                className="pdf-import-button sidebar-archive-menu-trigger"
+                className="pdf-import-button sidebar-archive-menu-trigger sidebar-archives-button"
                 onClick={toggleArchiveMenu}
                 onMouseEnter={keepArchiveMenuOpen}
                 onMouseLeave={scheduleArchiveMenuClose}
                 aria-expanded={isArchiveMenuOpen}
                 aria-haspopup="menu"
               >
+                <Archive className="sidebar-nav-icon" size={19} strokeWidth={2.3} aria-hidden="true" />
                 Archivi
               </button>
               {isArchiveMenuOpen ? (
@@ -7945,7 +8067,7 @@ function App() {
                   <div className="mystudio-tools-grid">
                     <div className="mystudio-tools-section-label">Archivi</div>
                     <button
-                      className="mystudio-tool-item mystudio-tool-item-green"
+                      className="mystudio-tool-item mystudio-tool-item-pdf"
                       onClick={openInvoiceArchive}
                       role="menuitem"
                     >
@@ -7976,7 +8098,8 @@ function App() {
                 </div>
               ) : null}
             </div>
-            <button className="pdf-import-button" onClick={openProcessingJobsPage}>
+            <button className="pdf-import-button sidebar-processes-button" onClick={openProcessingJobsPage}>
+              <Cog className="sidebar-nav-icon" size={19} strokeWidth={2.3} aria-hidden="true" />
               Processi
             </button>
             {batches.length > 0 ? (
@@ -8002,7 +8125,7 @@ function App() {
                     title="Azioni revisioni"
                     onClick={toggleReviewActionsMenu}
                   >
-                    ...
+                    <EllipsisVertical size={22} strokeWidth={2.5} aria-hidden="true" />
                   </button>
                   {isReviewActionsMenuOpen ? (
                     <div
@@ -8140,7 +8263,7 @@ function App() {
                 onClick={() => setIsRegistryDeleteConfirmOpen(true)}
                 disabled={!registryStatus?.has_file}
               >
-                Cancella
+                Elimina
               </button>
               <button
                 className="registry-download-button"
@@ -8213,6 +8336,7 @@ function App() {
               mode={registryCleaningReportMode}
               isRunning={isRegistryCleaningRunning}
               reportFileUrl={registryCleaningReportFileUrl}
+              downloadError={registryCleaningExportError}
               onClose={() => setRegistryCleaningReport(null)}
               onApply={runRegistryCleaning}
               onDownload={downloadRegistryCleaningReport}
@@ -8320,13 +8444,13 @@ function App() {
               tableClassName="export-history-table"
               headerCells={['Esportazione', 'Fatture', 'Formato', <span className="visually-hidden">Azioni</span>]}
               renderRow={(entry) => [
-                <strong>{new Date(entry.exported_at).toLocaleString('it-IT')}</strong>,
+                <strong>{formatProcessingDateTime(entry.exported_at)}</strong>,
                 entry.invoices.length,
                 entry.mode === 'workbook' ? 'Excel unico' : 'Excel per condominio',
                 <div className="export-history-actions">
-                  <button className="processing-info-button" onClick={() => setExportHistoryInfo(entry)} title="Mostra fatture coinvolte" aria-label="Mostra fatture coinvolte">i</button>
                   <button onClick={() => reexportHistoryEntry(entry)}>Riesporta</button>
                   <button className="archive-trash-button" disabled={isDeletingExportHistory} onClick={() => setExportHistoryDelete(entry)} title="Elimina esportazione dallo storico" aria-label="Elimina esportazione dallo storico"><TrashIcon /></button>
+                  <button className="processing-info-button" onClick={() => setExportHistoryInfo(entry)} title="Mostra fatture coinvolte" aria-label="Mostra fatture coinvolte">i</button>
                 </div>,
               ]}
             />
@@ -8337,149 +8461,151 @@ function App() {
       ) : appView === 'invoiceRegistry' ? (
         <section className="registry-page archive-page invoice-registry-page">
           <header>
-            <div>
-              <h1>Registro fatture</h1>
-              <p>
-                {filteredInvoiceRegistryRecords.length}{' '}
-                {invoiceRegistryViewMode === 'saved'
-                  ? 'fatture da esportare'
-                  : invoiceRegistryViewMode === 'exported'
-                    ? 'fatture esportate'
-                    : 'fatture scartate'}
-              </p>
-              {invoiceRegistrySaveStatus ? (
-                <div className="registry-saving-inline" role="status">
-                  <span>{invoiceRegistrySaveStatus}</span>
-                  {invoiceRegistrySaveStatus.includes('corso') ? (
-                    <div className="registry-saving-bar" aria-hidden="true">
-                      <i />
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
+            <div className="invoice-registry-heading">
+                <h1>Registro fatture</h1>
+                <p>
+                  {filteredInvoiceRegistryRecords.length}{' '}
+                  {invoiceRegistryViewMode === 'saved'
+                    ? 'fatture da esportare'
+                    : invoiceRegistryViewMode === 'exported'
+                      ? 'fatture esportate'
+                      : 'fatture scartate'}
+                </p>
+                {invoiceRegistrySaveStatus ? (
+                  <div className="registry-saving-inline" role="status">
+                    <span>{invoiceRegistrySaveStatus}</span>
+                    {invoiceRegistrySaveStatus.includes('corso') ? (
+                      <div className="registry-saving-bar" aria-hidden="true">
+                        <i />
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+              <div className="invoice-registry-date-actions">
+                <label className="invoice-registry-toolbar-control">
+                  <span>Da</span>
+                  <input
+                    type="date"
+                    value={invoiceArchiveFilters.dateFrom}
+                    onChange={(event) =>
+                      setInvoiceArchiveFilters((currentFilters) => ({
+                        ...currentFilters,
+                        dateFrom: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label className="invoice-registry-toolbar-control">
+                  <span>A</span>
+                  <input
+                    type="date"
+                    value={invoiceArchiveFilters.dateTo}
+                    onChange={(event) =>
+                      setInvoiceArchiveFilters((currentFilters) => ({
+                        ...currentFilters,
+                        dateTo: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                {invoiceRegistryViewMode !== 'discarded' ? (
+                  <button
+                    type="button"
+                    className="invoice-registry-export-button"
+                    onClick={downloadInvoiceArchiveExcel}
+                    title="Esporta registro fatture in Excel"
+                    disabled={filteredInvoiceRegistryRecords.length === 0 || isInvoiceRegistryEditMode}
+                  >
+                    Esporta
+                  </button>
+                ) : null}
             </div>
-            <div className="invoice-registry-date-actions">
-            <label className="invoice-registry-toolbar-control">
-              <span>Da</span>
-              <input
-                type="date"
-                value={invoiceArchiveFilters.dateFrom}
-                onChange={(event) =>
-                  setInvoiceArchiveFilters((currentFilters) => ({
-                    ...currentFilters,
-                    dateFrom: event.target.value,
-                  }))
-                }
-              />
-            </label>
-            <label className="invoice-registry-toolbar-control">
-              <span>A</span>
-              <input
-                type="date"
-                value={invoiceArchiveFilters.dateTo}
-                onChange={(event) =>
-                  setInvoiceArchiveFilters((currentFilters) => ({
-                    ...currentFilters,
-                    dateTo: event.target.value,
-                  }))
-                }
-              />
-            </label>
-              {invoiceRegistryViewMode !== 'discarded' ? (
+            <div className="archive-search invoice-registry-search">
+                  <Search className="invoice-registry-search-icon" size={18} strokeWidth={2} aria-hidden="true" />
+                  <input
+                    value={invoiceArchiveSearch}
+                    aria-label="Cerca per emittente, condominio, numero o totale"
+                    placeholder="Cerca emittente, condominio, numero, totale"
+                    onChange={(event) => setInvoiceArchiveSearch(event.target.value)}
+                  />
+            </div>
+                <label className="invoice-registry-toolbar-control invoice-registry-sort-control">
+                  <span>Ordina</span>
+                  <select
+                    value={invoiceArchiveSortKey}
+                    onChange={(event) =>
+                      setInvoiceArchiveSortKey(event.target.value as InvoiceArchiveSortKey)
+                    }
+                  >
+                    <option value="saved_at_desc">
+                      {invoiceRegistryViewMode === 'saved'
+                        ? 'Salvataggio recente'
+                        : invoiceRegistryViewMode === 'exported'
+                          ? 'Esportazione recente'
+                          : 'Scarto recente'}
+                    </option>
+                    <option value="saved_at_asc">
+                      {invoiceRegistryViewMode === 'saved'
+                        ? 'Salvataggio meno recente'
+                        : invoiceRegistryViewMode === 'exported'
+                          ? 'Esportazione meno recente'
+                          : 'Scarto meno recente'}
+                    </option>
+                    <option value="data_fattura_desc">Data fattura decrescente</option>
+                    <option value="data_fattura_asc">Data fattura crescente</option>
+                    <option value="emittente_asc">Emittente A-Z</option>
+                    <option value="condominio_asc">Condominio A-Z</option>
+                    <option value="totale_desc">Totale decrescente</option>
+                    <option value="totale_asc">Totale crescente</option>
+                  </select>
+                </label>
+              <div className="registry-page-actions invoice-registry-row-actions">
+                {invoiceRegistryViewMode === 'saved' && isInvoiceRegistryEditMode ? (
+                  <>
+                    <button
+                      className="registry-save-button"
+                      onClick={saveInvoiceRegistryDraft}
+                      disabled={invoiceRegistrySaveStatus?.includes('corso')}
+                    >
+                      Salva
+                    </button>
+                    <button onClick={cancelInvoiceRegistryEdit}>Annulla</button>
+                  </>
+                ) : invoiceRegistryViewMode === 'saved' ? (
+                  <button onClick={startInvoiceRegistryEdit}>Modifica</button>
+                ) : null}
                 <button
                   type="button"
-                  className="invoice-registry-export-button"
-                  onClick={downloadInvoiceArchiveExcel}
-                  title="Esporta registro fatture in Excel"
-                  disabled={filteredInvoiceRegistryRecords.length === 0 || isInvoiceRegistryEditMode}
+                  onClick={requestReprocessSelectedArchivedInvoices}
+                  disabled={selectedArchiveKeys.size === 0}
                 >
-                  Esporta
+                  Riprocessa
                 </button>
-              ) : null}
-            </div>
-            <label className="invoice-registry-toolbar-control invoice-registry-sort-control">
-              <span>Ordina</span>
-              <select
-                value={invoiceArchiveSortKey}
-                onChange={(event) =>
-                  setInvoiceArchiveSortKey(event.target.value as InvoiceArchiveSortKey)
-                }
-              >
-                <option value="saved_at_desc">
-                  {invoiceRegistryViewMode === 'saved'
-                    ? 'Salvataggio recente'
-                    : invoiceRegistryViewMode === 'exported'
-                      ? 'Esportazione recente'
-                      : 'Scarto recente'}
-                </option>
-                <option value="saved_at_asc">
-                  {invoiceRegistryViewMode === 'saved'
-                    ? 'Salvataggio meno recente'
-                    : invoiceRegistryViewMode === 'exported'
-                      ? 'Esportazione meno recente'
-                      : 'Scarto meno recente'}
-                </option>
-                <option value="data_fattura_desc">Data fattura decrescente</option>
-                <option value="data_fattura_asc">Data fattura crescente</option>
-                <option value="emittente_asc">Emittente A-Z</option>
-                <option value="condominio_asc">Condominio A-Z</option>
-                <option value="totale_desc">Totale decrescente</option>
-                <option value="totale_asc">Totale crescente</option>
-              </select>
-            </label>
-            <div className="archive-search">
-              <input
-                value={invoiceArchiveSearch}
-                placeholder="Cerca emittente, condominio, numero, totale"
-                onChange={(event) => setInvoiceArchiveSearch(event.target.value)}
-              />
-            </div>
-            <div className="registry-page-actions">
-              {invoiceRegistryViewMode === 'saved' && isInvoiceRegistryEditMode ? (
-                <>
-                  <button
-                    className="registry-save-button"
-                    onClick={saveInvoiceRegistryDraft}
-                    disabled={invoiceRegistrySaveStatus?.includes('corso')}
-                  >
-                    Salva
-                  </button>
-                  <button onClick={cancelInvoiceRegistryEdit}>Annulla</button>
-                </>
-              ) : invoiceRegistryViewMode === 'saved' ? (
-                <button onClick={startInvoiceRegistryEdit}>Modifica</button>
-              ) : null}
-              <button
-                type="button"
-                onClick={requestReprocessSelectedArchivedInvoices}
-                disabled={selectedArchiveKeys.size === 0}
-              >
-                Riprocessa
-              </button>
-              <button
-                type="button"
-                className="archive-trash-button"
-                onClick={() =>
-                  requestDeleteSelectedArchives(
+                <button
+                  type="button"
+                  className="archive-trash-button"
+                  onClick={() =>
+                    requestDeleteSelectedArchives(
+                      invoiceRegistryViewMode === 'saved'
+                        ? 'discard_registry'
+                        : 'registry',
+                    )
+                  }
+                  disabled={selectedArchiveKeys.size === 0}
+                  aria-label={
                     invoiceRegistryViewMode === 'saved'
-                      ? 'discard_registry'
-                      : 'registry',
-                  )
-                }
-                disabled={selectedArchiveKeys.size === 0}
-                aria-label={
-                  invoiceRegistryViewMode === 'saved'
-                    ? 'Sposta tra le fatture scartate'
-                    : 'Elimina righe selezionate'
-                }
-                title={
-                  invoiceRegistryViewMode === 'saved'
-                    ? 'Sposta tra le fatture scartate'
-                    : 'Elimina righe selezionate'
-                }
-              >
-                <TrashIcon />
-              </button>
+                      ? 'Sposta tra le fatture scartate'
+                      : 'Elimina righe selezionate'
+                  }
+                  title={
+                    invoiceRegistryViewMode === 'saved'
+                      ? 'Sposta tra le fatture scartate'
+                      : 'Elimina righe selezionate'
+                  }
+                >
+                  <TrashIcon />
+                </button>
             </div>
           </header>
           {invoiceArchiveError ? (
@@ -8658,6 +8784,11 @@ function App() {
                 </strong>
               </p>
             </div>
+          </div>
+          <button className="registry-import-button" onClick={openRegistryPreview}>
+            Anagrafica clienti
+          </button>
+          <div className="document-actions">
             {currentInvoice ? (() => {
               const firstToPreviousState =
                 currentInvoiceBoundaryPageMoveState('first_to_previous')
@@ -8738,12 +8869,7 @@ function App() {
               )
             })() : null}
 
-          </div>
-
           <div className="zoom-controls">
-            <button className="registry-import-button" onClick={openRegistryPreview}>
-              Anagrafica clienti
-            </button>
             <div className="zoom-stepper" aria-label="Controlli zoom">
               <button
                 className="zoom-out-button"
@@ -8844,6 +8970,7 @@ function App() {
                 </div>
               ) : null}
             </div>
+          </div>
           </div>
         </header>
 
@@ -9009,14 +9136,6 @@ function App() {
       <aside ref={invoiceFieldsPanelRef} className="invoice-fields-panel">
         <div className="fields-header">
           <h2>Campi fattura</h2>
-          <label className="checkbox-control">
-            <input
-              type="checkbox"
-              checked={showAllTargetBoxes}
-              onChange={(event) => setShowAllTargetBoxes(event.target.checked)}
-            />
-            Tutti i campi
-          </label>
           <div className="invoice-review-actions">
             {canPersistCurrentInvoice ? (
               <button
@@ -9045,7 +9164,15 @@ function App() {
             ) : null}
           </div>
         </div>
-        {invoiceReviewActionState ? (
+        <label className="checkbox-control invoice-fields-toggle">
+          <input
+            type="checkbox"
+            checked={showAllTargetBoxes}
+            onChange={(event) => setShowAllTargetBoxes(event.target.checked)}
+          />
+          Tutti i campi
+        </label>
+        {invoiceReviewActionState && !isBatchDiscarding ? (
           <p className={`invoice-review-action-status ${invoiceReviewActionState.kind}`}>
             {invoiceReviewActionState.message}
           </p>
@@ -9446,6 +9573,7 @@ function App() {
           onConfirm={confirmBatchReviewAction}
         />
       ) : null}
+      {isBatchDiscarding ? <BatchDiscardProgressDialog /> : null}
       {isProcessingCancelConfirmOpen ? (
         <ProcessingCancelConfirmDialog
           onCancel={() => {
@@ -9574,7 +9702,7 @@ function App() {
       {exportHistoryDelete ? (
         <DestructiveActionConfirmDialog
           title="Elimina esportazione dallo storico"
-          message={`Vuoi eliminare la voce del ${new Date(exportHistoryDelete.exported_at).toLocaleString('it-IT')}? Le fatture e i PDF verranno conservati.`}
+          message={`Vuoi eliminare la voce del ${formatProcessingDateTime(exportHistoryDelete.exported_at)}? Le fatture e i PDF verranno conservati.`}
           onCancel={() => setExportHistoryDelete(null)}
           onConfirm={deleteExportHistoryEntry}
         />
@@ -9583,7 +9711,7 @@ function App() {
         <div className="registry-dialog-backdrop">
           <section className="registry-dialog export-history-info" role="dialog" aria-modal="true" aria-labelledby="export-history-info-title">
             <header>
-              <h2 id="export-history-info-title">Esportazione del {new Date(exportHistoryInfo.exported_at).toLocaleString('it-IT')}</h2>
+              <h2 id="export-history-info-title">Esportazione del {formatProcessingDateTime(exportHistoryInfo.exported_at)}</h2>
               <button onClick={() => setExportHistoryInfo(null)} aria-label="Chiudi">x</button>
             </header>
             {exportHistoryInfo.invoices.some((invoice) => !availableExportInvoiceIds.has(invoice.record_id)) ? (
@@ -9648,7 +9776,8 @@ function App() {
             <footer className="registry-cleaning-actions">
               {invoiceExport.result ? (
                 <>
-                  <button onClick={() => downloadGeneratedInvoiceExport(invoiceExport.result!.download_url, invoiceExport.result!.file_name)}><DownloadIcon /> Scarica file</button>
+                  <button onClick={() => downloadGeneratedInvoiceExport(invoiceExport.result!.download_url, invoiceExport.result!.file_name, invoiceExport.result!.export_id)}><DownloadIcon /> Scarica file</button>
+                  {invoiceExport.error ? <p role="alert">{invoiceExport.error}</p> : null}
                   <button className="registry-save-button" onClick={() => setInvoiceExport(null)}>Chiudi</button>
                 </>
               ) : (

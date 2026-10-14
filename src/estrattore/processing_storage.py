@@ -56,6 +56,10 @@ class ProcessingCancelled(RuntimeError):
     pass
 
 
+class ProcessingInterrupted(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class ProcessedInvoiceRef:
     invoice_id: str
@@ -125,6 +129,7 @@ def process_imported_batch(
     now: datetime | None = None,
     progress_callback: ProgressCallback | None = None,
     should_cancel: CancelCheck | None = None,
+    should_interrupt: CancelCheck | None = None,
     process_id: str | None = None,
     resume_existing: bool = False,
 ) -> ProcessingRunIndex:
@@ -165,6 +170,8 @@ def process_imported_batch(
         for processed_document_count, document in enumerate(batch_index.documents, start=1):
             if should_cancel and should_cancel():
                 raise ProcessingCancelled("Processamento annullato dall'utente")
+            if should_interrupt and should_interrupt():
+                raise ProcessingInterrupted("Processamento interrotto dalla chiusura dell'app")
             source_path = batch_dir / document.relative_path
             output_dir = documents_dir / document.document_id
             working_output_dir = documents_dir / (
@@ -219,7 +226,10 @@ def process_imported_batch(
                             first_invoice_number=next_invoice_number,
                             control_dir=process_dir / "workers" / document.document_id,
                         ),
-                        should_cancel=should_cancel,
+                        should_cancel=lambda: bool(
+                            (should_cancel and should_cancel())
+                            or (should_interrupt and should_interrupt())
+                        ),
                     )
                     manifest_path = output_dir / "viewer_manifest.json"
                 else:
@@ -264,6 +274,10 @@ def process_imported_batch(
                 next_invoice_number += len(manifest_invoice_refs)
             except WorkerCancelled as error:
                 shutil.rmtree(working_output_dir, ignore_errors=True)
+                if should_interrupt and should_interrupt() and not (should_cancel and should_cancel()):
+                    raise ProcessingInterrupted(
+                        "Processamento interrotto dalla chiusura dell'app"
+                    ) from error
                 raise ProcessingCancelled(
                     "Processamento annullato dall'utente"
                 ) from error
@@ -278,6 +292,8 @@ def process_imported_batch(
                 )
             if should_cancel and should_cancel():
                 raise ProcessingCancelled("Processamento annullato dall'utente")
+            if should_interrupt and should_interrupt():
+                raise ProcessingInterrupted("Processamento interrotto dalla chiusura dell'app")
 
         review_batches = _append_global_review_batches(
             process_id=process_id,
@@ -307,6 +323,9 @@ def process_imported_batch(
         else:
             _discard_staged_extraction_feedback(process_id, paths)
         return run_index
+    except ProcessingInterrupted:
+        _cleanup_working_document_dirs(documents_dir)
+        raise
     except ProcessingCancelled:
         _discard_staged_extraction_feedback(process_id, paths)
         shutil.rmtree(process_dir, ignore_errors=True)

@@ -1,0 +1,4 @@
+[2026-10-13T19:35:29] App locale avviata
+url=http://127.0.0.1:54001
+app_data_dir=C:\Projects\estrattore-scan-fatture\tmp\pytest-save-as-20261013-check\test_local_server_serves_real_0\app-data
+viewer_dist=C:\Projects\estrattore-scan-fatture\tmp\pytest-save-as-20261013-check\test_local_server_serves_real_0\dist

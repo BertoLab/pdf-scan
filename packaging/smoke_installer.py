@@ -16,7 +16,13 @@ from prepare_inno import BUILD_DIR, ROOT, prepare_compiler
 
 
 def run(command):
-    return subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    if result.returncode:
+        raise RuntimeError(
+            f"Command exited {result.returncode}: {command[0]}\n"
+            f"stdout: {result.stdout[-2000:]}\nstderr: {result.stderr[-2000:]}"
+        )
+    return result
 
 
 def main():
@@ -32,36 +38,90 @@ def main():
         runtime.mkdir(parents=True)
         (runtime / "msedgewebview2.exe").write_bytes(b"fixture-not-executable")
         (bundle / "EstrattoreScanFatture.exe").write_bytes(b"fixture-not-executable")
+        for relative in (
+            "apps/viewer/dist/index.html",
+            "vendor/poppler/bin/pdfinfo.exe",
+            "vendor/tesseract/tesseract.exe",
+        ):
+            target = bundle / "_internal" / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"fixture")
         data.mkdir()
         (data / "business-sentinel.txt").write_text("preserve on upgrade")
-        marker = work / "marker"
-        marker.write_text("complete")
         installers = {}
+        releases = {
+            "A": "0.1.0-aaaaaaaaaaaa",
+            "B": "0.1.0-bbbbbbbbbbbb",
+            "C": "0.1.0-cccccccccccc",
+        }
         try:
-            for release in ("A", "B", "C"):
+            for label, release in releases.items():
+                marker = work / f"{label}.marker"
+                marker.write_text(f"version=0.1.0\nrelease={release}\n", encoding="ascii")
                 defines = {
                     "BundleRoot": bundle, "ReleaseId": release, "Version": "0.1.0",
                     "MarkerFile": marker, "ProductId": identity, "DataRoot": data,
                     "InstallRoot": app, "SmokeBuild": "1", "ShortcutName": shortcut,
+                    "ArtifactBaseName": f"EstrattoreScanFatture-Setup-{release}",
                 }
                 run([str(compiler), *(f"/D{k}={v}" for k, v in defines.items()),
                      f"/O{work}", str(ROOT / "packaging" / "EstrattoreScanFatture.iss")])
-                installers[release] = work / f"EstrattoreScanFatture-Setup-{release}.exe"
-            for release, expected in (("A", {"A"}), ("B", {"A", "B"}), ("B", {"A", "B"}), ("C", {"B", "C"})):
-                run([str(installers[release]), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
-                assert {p.name for p in (app / "releases").iterdir()} == expected
+                installers[label] = work / f"EstrattoreScanFatture-Setup-{release}.exe"
+            broken_release = "0.1.0-dddddddddddd"
+            broken_bundle = work / "broken-bundle"
+            broken_bundle.mkdir()
+            (broken_bundle / "EstrattoreScanFatture.exe").write_bytes(b"fixture-not-executable")
+            broken_marker = work / "broken.marker"
+            broken_marker.write_text(
+                f"version=0.1.0\nrelease={broken_release}\n", encoding="ascii"
+            )
+            broken_defines = {
+                "BundleRoot": broken_bundle, "ReleaseId": broken_release,
+                "Version": "0.1.0", "MarkerFile": broken_marker,
+                "ProductId": identity, "DataRoot": data, "InstallRoot": app,
+                "SmokeBuild": "1", "ShortcutName": shortcut,
+                "ArtifactBaseName": f"EstrattoreScanFatture-Setup-{broken_release}",
+            }
+            run([str(compiler), *(f"/D{k}={v}" for k, v in broken_defines.items()),
+                 f"/O{work}", str(ROOT / "packaging" / "EstrattoreScanFatture.iss")])
+            for step, label in enumerate(("A", "B", "B", "C")):
+                release = releases[label]
+                if step == 1:
+                    broken_result = subprocess.run(
+                        [str(work / f"EstrattoreScanFatture-Setup-{broken_release}.exe"),
+                         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                         f"/LOG={work / 'broken-install.log'}"],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    if broken_result.returncode != 10:
+                        log = (work / "broken-install.log").read_text(errors="replace")
+                        raise AssertionError(
+                            f"Broken install returned {broken_result.returncode}, expected 10. Releases: "
+                            f"{[p.name for p in (app / 'releases').iterdir()]}\n"
+                            f"{log[-5000:]}"
+                        )
+                    assert (app / "releases" / releases["A"]).exists()
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"Software\\{identity}") as key:
+                        # Inno does not roll back shortcuts or registry after post-install validation.
+                        assert winreg.QueryValueEx(key, "ActiveRelease")[0] == broken_release
+                run([str(installers[label]), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+                assert {p.name for p in (app / "releases").iterdir()} == {release}
                 assert (data / "business-sentinel.txt").read_text() == "preserve on upgrade"
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"Software\\{identity}") as key:
                     assert winreg.QueryValueEx(key, "ActiveRelease")[0] == release
-                    if release != "A":
-                        assert winreg.QueryValueEx(key, "PreviousRelease")[0] == ("A" if release == "B" else "B")
+                    try:
+                        winreg.QueryValueEx(key, "PreviousRelease")
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise AssertionError("Obsolete PreviousRelease registry value remains")
             # Inspect the real generated shortcut, not just the .iss template.
             link = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs" / f"{shortcut}.lnk"
             escaped_link = str(link).replace("'", "''")
             output = run(["powershell", "-NoProfile", "-Command",
                           f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{escaped_link}'); $s.Arguments"]).stdout.strip()
             assert output == f'--data-dir "{data}"', output
-            print("Installer A -> B -> B -> C, isolated shortcut and data retention: OK")
+            print("Installer A -> B -> B -> C, immediate pruning and data retention: OK")
         finally:
             uninstallers = sorted(app.glob("unins*.exe")) if app.exists() else []
             if uninstallers:
@@ -70,7 +130,7 @@ def main():
                 deadline = time.monotonic() + 30
                 while data.exists() and time.monotonic() < deadline:
                     time.sleep(0.1)
-            assert not data.exists(), "Fixture data was not removed by explicit uninstall"
+                assert not data.exists(), "Fixture data was not removed by explicit uninstall"
     print("Isolated fixture uninstall: OK")
 
 

@@ -1,0 +1,195 @@
+{
+  "schema_version": 3,
+  "records": [
+    {
+      "record_id": "r1",
+      "status": "saved",
+      "saved_at": "2026-09-28T14:00:00",
+      "source_file_name": "sorgente.pdf",
+      "archived_pdf_path": "archive/invoices/fattura.pdf",
+      "invoice": {
+        "fields": [
+          {
+            "kind": "condominio",
+            "value": "Condominio Via Roma / Scala A"
+          },
+          {
+            "kind": "codice_fiscale",
+            "value": "01234567890"
+          },
+          {
+            "kind": "nome_emittente",
+            "value": "Impresa Rossi",
+            "registry_id": "other",
+            "registry_source_row": 99
+          },
+          {
+            "kind": "codice_fiscale_emittente",
+            "value": "00123456789"
+          },
+          {
+            "kind": "p_iva",
+            "value": "00123456789"
+          },
+          {
+            "kind": "numero_fattura",
+            "value": "0008"
+          },
+          {
+            "kind": "data_fattura",
+            "value": "20-09-2026"
+          },
+          {
+            "kind": "totale_fattura",
+            "value": "132.37"
+          },
+          {
+            "kind": "ritenuta",
+            "value": "4.34"
+          },
+          {
+            "kind": "totale_netto_fattura",
+            "value": "128.03"
+          },
+          {
+            "kind": "pagata_il",
+            "value": "25-09-2026"
+          }
+        ]
+      },
+      "last_exported_at": "2026-10-13T19:37:24.499638+02:00",
+      "last_export_url": "/runtime/archive/exports/0483b14f1454493288b86e3346479d29/fatture_condomini.xlsx"
+    },
+    {
+      "record_id": "r2",
+      "status": "saved",
+      "saved_at": "2026-09-28T14:00:00",
+      "source_file_name": "sorgente.pdf",
+      "archived_pdf_path": "archive/invoices/fattura.pdf",
+      "invoice": {
+        "fields": [
+          {
+            "kind": "condominio",
+            "value": "Condominio Via Roma / Scala A"
+          },
+          {
+            "kind": "codice_fiscale",
+            "value": "01234567890"
+          },
+          {
+            "kind": "nome_emittente",
+            "value": "Impresa Rossi"
+          },
+          {
+            "kind": "codice_fiscale_emittente",
+            "value": "00123456789"
+          },
+          {
+            "kind": "p_iva",
+            "value": "00123456789"
+          },
+          {
+            "kind": "numero_fattura",
+            "value": "0008"
+          },
+          {
+            "kind": "data_fattura",
+            "value": "20-09-2026"
+          },
+          {
+            "kind": "totale_fattura",
+            "value": "132.37"
+          },
+          {
+            "kind": "ritenuta",
+            "value": "4.34"
+          },
+          {
+            "kind": "totale_netto_fattura",
+            "value": "128.03"
+          },
+          {
+            "kind": "pagata_il",
+            "value": "25-09-2026"
+          }
+        ]
+      }
+    },
+    {
+      "record_id": "r3",
+      "status": "saved",
+      "saved_at": "2026-09-28T14:00:00",
+      "source_file_name": "sorgente.pdf",
+      "archived_pdf_path": "archive/invoices/fattura.pdf",
+      "invoice": {
+        "fields": [
+          {
+            "kind": "condominio",
+            "value": "Condominio Via Roma / Scala A"
+          },
+          {
+            "kind": "codice_fiscale",
+            "value": "09876543210"
+          },
+          {
+            "kind": "nome_emittente",
+            "value": "Impresa Rossi"
+          },
+          {
+            "kind": "codice_fiscale_emittente",
+            "value": "00123456789"
+          },
+          {
+            "kind": "p_iva",
+            "value": "00123456789"
+          },
+          {
+            "kind": "numero_fattura",
+            "value": "0008"
+          },
+          {
+            "kind": "data_fattura",
+            "value": "20-09-2026"
+          },
+          {
+            "kind": "totale_fattura",
+            "value": "132.37"
+          },
+          {
+            "kind": "ritenuta",
+            "value": "4.34"
+          },
+          {
+            "kind": "totale_netto_fattura",
+            "value": "128.03"
+          },
+          {
+            "kind": "pagata_il",
+            "value": "25-09-2026"
+          }
+        ]
+      }
+    }
+  ],
+  "updated_at": "2026-10-13T19:37:24.499638+02:00",
+  "export_history": [
+    {
+      "export_id": "0483b14f1454493288b86e3346479d29",
+      "exported_at": "2026-10-13T19:37:24.499638+02:00",
+      "mode": "workbook",
+      "include_summary": false,
+      "download_url": "/runtime/archive/exports/0483b14f1454493288b86e3346479d29/fatture_condomini.xlsx",
+      "source_export_id": null,
+      "invoices": [
+        {
+          "record_id": "r1",
+          "numero_fattura": "0008",
+          "data_fattura": "20-09-2026",
+          "nome_emittente": "Impresa Rossi",
+          "condominio": "Condominio Via Roma / Scala A",
+          "totale_fattura": "132.37"
+        }
+      ]
+    }
+  ]
+}

@@ -10,14 +10,14 @@
 #ifndef MarkerFile
   #error MarkerFile must be defined by build_installer.py
 #endif
+#ifndef ArtifactBaseName
+  #error ArtifactBaseName must be defined by build_installer.py
+#endif
 #ifndef ProductId
   #define ProductId "EstrattoreScanFatture.Desktop"
 #endif
 #ifndef DataRoot
   #define DataRoot "{localappdata}\EstrattoreScanFatture"
-#endif
-#ifndef BuildSuffix
-  #define BuildSuffix ""
 #endif
 #ifndef ShortcutName
   #define ShortcutName "Estrattore Scan Fatture"
@@ -33,6 +33,7 @@
 AppId={#ProductId}
 AppName=Estrattore Scan Fatture
 AppVersion={#Version}
+SetupIconFile=assets\Scan_icona_trasparente.ico
 DefaultDirName={#InstallRoot}
 #if SmokeBuild
 UsePreviousAppDir=no
@@ -40,6 +41,7 @@ UsePreviousAppDir=no
 UsePreviousAppDir=yes
 #endif
 DisableDirPage=yes
+DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 SetupArchitecture=x64
 ArchitecturesAllowed=x64os
@@ -51,7 +53,7 @@ UninstallDisplayIcon={app}\releases\{#ReleaseId}\EstrattoreScanFatture.exe
 Compression=lzma2/normal
 SolidCompression=yes
 WizardStyle=modern
-OutputBaseFilename=EstrattoreScanFatture-Setup-{#ReleaseId}{#BuildSuffix}
+OutputBaseFilename={#ArtifactBaseName}
 
 [Languages]
 Name: "italian"; MessagesFile: "compiler:Languages\Italian.isl"
@@ -61,7 +63,7 @@ Name: "desktopicon"; Description: "Crea un collegamento sul desktop"; Flags: unc
 
 [Files]
 Source: "{#BundleRoot}\*"; DestDir: "{app}\releases\{#ReleaseId}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#MarkerFile}"; DestDir: "{app}\releases\{#ReleaseId}"; DestName: "release.complete"; Flags: ignoreversion; BeforeInstall: ConfigureRuntimeAcl
+Source: "{#MarkerFile}"; DestDir: "{app}\releases\{#ReleaseId}"; DestName: "release.complete"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#ShortcutName}"; Filename: "{app}\releases\{#ReleaseId}\EstrattoreScanFatture.exe"; Parameters: "--data-dir ""{#DataRoot}"""
@@ -69,7 +71,6 @@ Name: "{autodesktop}\{#ShortcutName}"; Filename: "{app}\releases\{#ReleaseId}\Es
 
 [Registry]
 Root: HKCU; Subkey: "Software\{#ProductId}"; ValueType: string; ValueName: "ActiveRelease"; ValueData: "{#ReleaseId}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\{#ProductId}"; ValueType: string; ValueName: "PreviousRelease"; ValueData: "{code:GetPreviousRelease}"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{#DataRoot}\config\webview-profile"
@@ -77,23 +78,7 @@ Type: filesandordirs; Name: "{#DataRoot}\config\webview-profile"
 [Code]
 var
   RemoveBusinessData: Boolean;
-  PreviousRelease: String;
-  ActiveRelease: String;
-
-function InitializeSetup: Boolean;
-begin
-  Result := True;
-  RegQueryStringValue(HKCU, 'Software\{#ProductId}', 'ActiveRelease', ActiveRelease);
-  if ActiveRelease = '{#ReleaseId}' then
-    RegQueryStringValue(HKCU, 'Software\{#ProductId}', 'PreviousRelease', PreviousRelease)
-  else
-    PreviousRelease := ActiveRelease;
-end;
-
-function GetPreviousRelease(Param: String): String;
-begin
-  Result := PreviousRelease;
-end;
+  SetupValidationFailed: Boolean;
 
 #if SmokeBuild
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -105,23 +90,30 @@ begin
 end;
 #endif
 
-procedure PruneOldReleases;
+function PruneOldReleases: Boolean;
 var
   RootPath, ReleasePath: String;
   Entry: TFindRec;
 begin
+  Result := True;
   RootPath := ExpandConstant('{app}\releases');
   if not FileExists(RootPath + '\{#ReleaseId}\release.complete') then
+  begin
+    Result := False;
     Exit;
+  end;
   if FindFirst(RootPath + '\*', Entry) then
   try
     repeat
       if (Entry.Name <> '.') and (Entry.Name <> '..') and
-         (Entry.Name <> '{#ReleaseId}') and (Entry.Name <> PreviousRelease) then
+         (Entry.Name <> '{#ReleaseId}') then
       begin
         ReleasePath := RootPath + '\' + Entry.Name;
         if DirExists(ReleasePath) and not DelTree(ReleasePath, True, True, True) then
+        begin
+          Result := False;
           Log('Could not remove old release: ' + ReleasePath);
+        end;
       end;
     until not FindNext(Entry);
   finally
@@ -160,26 +152,55 @@ begin
   end;
 end;
 
+function ValidateInstalledRuntime: Boolean;
+var
+  ReleasePath, RuntimePath: String;
+  ExitCode: Integer;
+begin
+  ReleasePath := ExpandConstant('{app}\releases\{#ReleaseId}');
+  RuntimePath := ReleasePath + '\_internal\vendor\webview2';
+  Result := FileExists(ReleasePath + '\EstrattoreScanFatture.exe') and
+    FileExists(ReleasePath + '\release.complete') and
+    FileExists(ReleasePath + '\_internal\apps\viewer\dist\index.html') and
+    FileExists(ReleasePath + '\_internal\vendor\poppler\bin\pdfinfo.exe') and
+    FileExists(ReleasePath + '\_internal\vendor\tesseract\tesseract.exe') and
+    FileExists(RuntimePath + '\msedgewebview2.exe');
+  if not Result then
+    Exit;
+  Result := Exec(ExpandConstant('{sys}\icacls.exe'),
+    '"' + RuntimePath + '" /grant *S-1-15-2-2:(OI)(CI)(RX) *S-1-15-2-1:(OI)(CI)(RX) /T',
+    '', SW_HIDE, ewWaitUntilTerminated, ExitCode) and (ExitCode = 0);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
-    PruneOldReleases
+  begin
+    if not ValidateInstalledRuntime then
+    begin
+      SetupValidationFailed := True;
+      Log('Installed runtime validation failed; old releases retained.');
+    end
+    else if not PruneOldReleases then
+    begin
+      SetupValidationFailed := True;
+      Log('Old release cleanup failed; rerun Setup to retry.');
+    end
+    else
+      RegDeleteValue(HKCU, 'Software\{#ProductId}', 'PreviousRelease');
+    if SetupValidationFailed and not WizardSilent then
+      MsgBox('L''aggiornamento non e stato completato. La versione precedente e stata conservata. Ripeti l''installazione o controlla il registro dell''installer.', mbError, MB_OK);
+  end
   else if CurStep = ssDone then
     RemoveInterruptedUninstallLogs;
 end;
 
-procedure ConfigureRuntimeAcl;
-var
-  RuntimePath: String;
-  ExitCode: Integer;
+function GetCustomSetupExitCode: Integer;
 begin
-  RuntimePath := ExpandConstant('{app}\releases\{#ReleaseId}\_internal\vendor\webview2');
-  if not DirExists(RuntimePath) then
-    RaiseException('Il motore WebView2 non e presente nel pacchetto.');
-  if not Exec(ExpandConstant('{sys}\icacls.exe'),
-    '"' + RuntimePath + '" /grant *S-1-15-2-2:(OI)(CI)(RX) *S-1-15-2-1:(OI)(CI)(RX) /T',
-    '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
-    RaiseException('Impossibile configurare i permessi del motore WebView2.');
+  if SetupValidationFailed then
+    Result := 10
+  else
+    Result := 0;
 end;
 
 function HasRemoveDataOption: Boolean;

@@ -4,6 +4,7 @@ from pathlib import Path
 root = Path(SPEC).resolve().parent.parent
 assets = root / "build" / "desktop-assets"
 required = (
+    root / "packaging" / "assets" / "Scan_icona_trasparente.ico",
     assets / "apps" / "viewer" / "dist" / "index.html",
     assets / "vendor" / "poppler" / "bin" / "pdfinfo.exe",
     assets / "vendor" / "tesseract" / "tesseract.exe",
@@ -40,6 +41,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="EstrattoreScanFatture",
+    icon=str(root / "packaging" / "assets" / "Scan_icona_trasparente.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

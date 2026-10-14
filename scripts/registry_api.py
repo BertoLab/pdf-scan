@@ -73,6 +73,7 @@ from estrattore.source_archive_storage import (
 )
 from estrattore.processing_storage import (
     ProcessingCancelled,
+    ProcessingInterrupted,
     ProcessingRunIndex,
     ReviewBatchRef,
     clear_all_review_batches,
@@ -121,6 +122,7 @@ SOURCE_DELETE_BLOCKING_JOB_STATUSES = {
     "queued",
     "processing",
     "cancelling",
+    "stopping",
     "finalizing",
 }
 PENDING_IMPORT_SOURCES: dict[str, dict[str, Any]] = {}
@@ -1253,11 +1255,17 @@ def _load_processing_jobs_from_disk() -> None:
     loaded_jobs = payload.get("jobs", [])
     if not isinstance(loaded_jobs, list):
         return
+    saved_queue = payload.get("queued_job_ids", [])
+    if not isinstance(saved_queue, list):
+        saved_queue = []
+    saved_active_id = str(payload.get("active_job_id") or "")
 
     with PROCESSING_JOBS_LOCK:
         PROCESSING_JOBS.clear()
         PROCESSING_JOB_QUEUE.clear()
         PROCESSING_ACTIVE_JOB_ID = None
+        recovered_queue: list[str] = []
+        recovered_active_id = ""
 
         for raw_job in loaded_jobs:
             if not isinstance(raw_job, dict):
@@ -1275,12 +1283,15 @@ def _load_processing_jobs_from_disk() -> None:
             if not isinstance(job.get("files"), list):
                 job["files"] = _job_files_from_batch(batch_id)
             status = str(job.get("status") or "")
-            if status == "processing":
+            if status in {"processing", "stopping"}:
                 if job.get("process_id"):
                     job["status"] = "queued"
                     job["message"] = "Ripresa in coda dopo chiusura dell'app"
                     job["cancel_requested"] = False
-                    PROCESSING_JOB_QUEUE.append(job_id)
+                    job["interrupt_requested"] = False
+                    recovered_queue.append(job_id)
+                    if job_id == saved_active_id:
+                        recovered_active_id = job_id
                 else:
                     job["status"] = "cancelled"
                     job["message"] = "Processamento interrotto dalla chiusura dell'app"
@@ -1299,13 +1310,19 @@ def _load_processing_jobs_from_disk() -> None:
                 job["cancel_requested"] = True
                 job["estimated_remaining_seconds"] = None
             elif status == "queued":
-                PROCESSING_JOB_QUEUE.append(job_id)
+                job["interrupt_requested"] = False
+                recovered_queue.append(job_id)
 
             job.pop("pause_requested", None)
 
             job.pop("started_at_monotonic", None)
             PROCESSING_JOBS[job_id] = job
 
+        ordered_ids = [recovered_active_id, *saved_queue, *recovered_queue]
+        PROCESSING_JOB_QUEUE.extend(
+            job_id for job_id in dict.fromkeys(ordered_ids)
+            if job_id in recovered_queue
+        )
         _persist_processing_jobs_locked()
 
 
@@ -1613,6 +1630,7 @@ def _run_processing_job(job_id: str, batch_id: str) -> None:
                 )
             ),
             should_cancel=lambda: bool(_processing_job(job_id).get("cancel_requested")),
+            should_interrupt=lambda: bool(_processing_job(job_id).get("interrupt_requested")),
         )
         _update_processing_job(
             job_id,
@@ -1635,6 +1653,18 @@ def _run_processing_job(job_id: str, batch_id: str) -> None:
             **_processing_time_estimate(job_id, progress_total, progress_total),
             result=_processing_run_payload(run_index),
         )
+    except ProcessingInterrupted:
+        with PROCESSING_JOBS_LOCK:
+            job = PROCESSING_JOBS[job_id]
+            job.update(
+                status="queued",
+                message="Ripresa in coda dopo chiusura dell'app",
+                cancel_requested=False,
+                interrupt_requested=False,
+                estimated_remaining_seconds=None,
+            )
+            PROCESSING_JOB_QUEUE.insert(0, job_id)
+            _persist_processing_jobs_locked()
     except ProcessingCancelled as error:
         job = _processing_job(job_id)
         _delete_job_process_dir(job)
@@ -1696,9 +1726,9 @@ def shutdown_processing_jobs(timeout: float = 30.0) -> bool:
         if PROCESSING_ACTIVE_JOB_ID is not None:
             job = PROCESSING_JOBS.get(PROCESSING_ACTIVE_JOB_ID)
             if job is not None and job.get("status") not in TERMINAL_PROCESSING_JOB_STATUSES:
-                job["status"] = "cancelling"
-                job["cancel_requested"] = True
-                job["message"] = "Annullamento in corso"
+                job["status"] = "stopping"
+                job["interrupt_requested"] = True
+                job["message"] = "Interruzione in corso"
                 _persist_processing_jobs_locked()
     return PROCESSING_JOB_IDLE.wait(timeout)
 
@@ -1707,6 +1737,13 @@ def resume_processing_after_failed_shutdown() -> None:
     global PROCESSING_SHUTDOWN_REQUESTED
     with PROCESSING_JOBS_LOCK:
         PROCESSING_SHUTDOWN_REQUESTED = False
+        if PROCESSING_ACTIVE_JOB_ID is not None:
+            job = PROCESSING_JOBS.get(PROCESSING_ACTIVE_JOB_ID)
+            if job is not None and job.get("status") == "stopping":
+                job["status"] = "processing"
+                job["interrupt_requested"] = False
+                job["message"] = "Processamento OCR in corso"
+                _persist_processing_jobs_locked()
     _start_next_processing_job_if_idle()
 
 

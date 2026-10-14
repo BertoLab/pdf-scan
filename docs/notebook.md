@@ -6032,3 +6032,674 @@ Outstanding release gates: actual clean supported Windows 10/11 baseline
 (including .NET), final-installer interruption/low-disk testing, interactive
 picker/download acceptance, signing and redistribution review. None is claimed
 complete by the developer-host checks. User data were not edited during testing.
+
+## Packaged OCR parity audit - 2026-10-13
+
+Status: first source-versus-installed OCR comparison complete.
+
+Problem: a successful packaged OCR smoke proves that the worker runs, but does
+not establish whether packaging changes the evidence or extracted fields. The
+real risk is at the PDF rasterizer boundary: source mode resolves the machine's
+MiKTeX `pdftoppm`, while the frozen app selects bundled Poppler 26.09.0. The
+Tesseract executable and language data are copied from the project's vendor
+runtime, and the worker requests the same `crop-only` fallback in both modes.
+
+Resolution approach: run the identical source PDF through the actual document
+worker twice, once with the project Python runtime and once with the installed
+frozen executable. Give each run an isolated output and data directory; leave
+the archived source PDF untouched. Compare page dimensions, OCR token text and
+geometry, invoice grouping, and raw extraction fields. Report elapsed time as
+an observation, not a benchmark, until repeated runs control for cache and
+startup effects. This is a development-only diagnostic, not app functionality.
+
+Micro-steps:
+1. Add a reusable paired-worker comparison command using the existing worker
+   request/result protocol; exclude volatile paths/timestamps from comparison.
+2. Run it on at least one existing short archived PDF without changing app data.
+3. Investigate any mismatch at rendering, OCR or extraction level and state the
+   exact boundary verified; record remaining performance uncertainty.
+
+Closure:
+- Added `packaging/compare_packaged_ocr.py`. It drives the actual document worker
+  protocol in source Python and the installed release executable, with the same
+  read-only PDF and isolated temporary data/output directories under `build`.
+  It compares page dimensions, OCR token text/order/geometry/confidence/source,
+  remaining page intermediates, fallback metadata, invoice page grouping and raw
+  extraction fields. The temporary worker outputs are removed after each run.
+- Archived two-page PDF (SHA-256 prefix `197b5a043a02`): both modes produced
+  284 tokens and one invoice, with no differences. Initial source/package times
+  were 11.8/17.6 seconds; reverse-order warm run 6.7/7.1 seconds; final run
+  after comparator expansion 11.5/11.3 seconds.
+- Archived four-page PDF (SHA-256 prefix `12bbdbffc34d`): both modes produced
+  881 tokens and two invoices, with no token, geometry, grouping or extraction
+  field differences. Source/package times were 21.4/21.7 seconds.
+- The first sandbox attempt failed before OCR because it could not create a
+  temporary directory; rerunning with normal Windows permissions succeeded.
+  No production data were written or deleted by these comparisons.
+
+Assessment: the installed package preserves OCR and extraction behavior on the
+tested real PDFs, including a multi-invoice document. The first timing gap did
+not recur. This is paired integration evidence, not a statistical performance
+benchmark or proof across every PDF layout. A broader representative corpus is
+the next gate if a claim of general extraction parity is needed; tests of GUI
+import, queue and archive paths remain separate packaging choices to inspect.
+
+## Windows OCR console flicker - 2026-10-13
+
+Status: investigating an observed 0.1.0 installer defect; no published artifact
+will be changed in place.
+
+Problem: a desktop application must keep its background native tools invisible
+and must not steal focus during a long-running OCR job. This spans the desktop
+window, document worker, PDF renderer, OCR wrappers, and Windows process
+creation. The user's small windows appear in groups every few seconds during
+processing; initial `pdfinfo` calls alone cannot explain a long single PDF.
+
+Resolution theory: identify the owner of visible transient windows in an
+isolated packaged worker run. On Windows, use no-console creation flags for
+console tools, without altering their arguments, stdout/stderr capture,
+termination, or OCR data. Prefer a process-scoped, narrowly targeted policy
+over editing installed dependency files or changing the renderer/OCR engine.
+
+Plan:
+1. Inspect all native child-process launch paths and capture transient window
+   owners during real packaged OCR on a read-only PDF.
+2. Apply a bounded no-console policy at the document-worker boundary for the
+   bundled Poppler/Tesseract executables, or a simpler explicit adapter if the
+   observed owner warrants it. Cover any library import aliases.
+3. Test process flags and cancellation at unit level; run an isolated packaged
+   worker and compare OCR evidence against the current release. Verify no
+   visible console windows with an observer. Update the release issue with
+   findings, limits, and the resulting fix status.
+
+Closure:
+- Added `packaging/observe_worker_windows.py` for development-only Windows
+  window-event observation. It identified `PseudoConsoleWindow` events owned
+  by `pdfinfo.exe`, `pdftoppm.exe`, and `tesseract.exe` in the installed release.
+  On the two-page control PDF, all four events occurred during the old packaged
+  worker; none occurred during the corrected source worker.
+- Added a worker-scoped `Popen` subclass installed before third-party OCR
+  imports. It adds `CREATE_NO_WINDOW` only when a Windows child command starts
+  one of four known PDF/OCR executables. The caller's arguments, I/O and other
+  creation flags remain unchanged. This avoids changing site-packages and does
+  not affect the desktop launcher or queue supervisor process.
+- Rebuilt the development onedir bundle, not the published installer. The new
+  worker produced zero vendor-tool window events on a two-page PDF (435 tokens,
+  one invoice) and a four-page PDF (1010 tokens, two invoices). In both cases,
+  source and new package matched in tokens, geometry, grouping and extraction
+  fields. The old installed worker still produced four window events on the
+  two-page PDF, confirming the comparison signal.
+- Focused tests covered executable recognition, process flags and worker
+  cancellation. Remaining limit: the new bundle has been observed in isolated
+  OCR mode, not yet visually accepted through a rebuilt installed GUI. The
+  currently published 0.1.0 installer remains unchanged. A local iterative
+  installer candidate was built from the verified onedir bundle:
+  `build/installer-dist/EstrattoreScanFatture-Setup-0.1.0-8030e921c32c.exe`
+  (390,249,808 bytes; SHA-256
+  `9784F52D23B9D0D334AB777DE894DCC413F53123A03FD00433CBE3447E5F36A0`).
+  It was not installed or uploaded. Its full desktop UI still needs visual
+  acceptance before this release issue is considered closed for users.
+
+## Prune old code after verified startup - 2026-10-13
+
+Status: implemented and verified in isolated installer and packaged-app tests.
+User chose one installed code release after the new one starts successfully,
+instead of retaining the predecessor until another update.
+
+Problem: installation completion and application readiness are distinct. The
+installer must not erase the last runnable program while staging new code, but
+keeping a full old Python/OCR/WebView2 runtime indefinitely wastes disk on a
+single-office-PC deployment. Business data are separately owned and are never
+part of this code-release cleanup.
+
+Resolution theory: install into an immutable versioned sibling, activate the
+new shortcut only after the new release marker exists, and defer pruning valid
+old code until the newly active desktop window and local backend have loaded.
+If startup fails or the machine shuts down before cleanup, retain the old code
+and retry cleanup at the next successful launch. Cleanup must validate active
+release identity and every target path before deletion; an old manually opened
+executable must not prune the newer active version. Do not block UI startup on
+deleting a large runtime. A successful launch is a readiness gate, not proof
+that every later workflow or data migration works.
+
+Chosen approach (final for the current data format): keep release directories
+and the stable user-facing shortcut. Installer pruning removes only incomplete
+staging folders. The desktop launcher, after the real page-load event, checks
+the active release registration and deletes only complete, directly contained
+older code releases asynchronously. It clears stale previous-release metadata
+only after successful cleanup. The source app and isolated smoke identity must
+not touch the production install. New installer should replace the OCR-only
+local candidate before the user tests an upgrade.
+
+Micro-steps:
+1. Add a bounded release cleanup component with path/marker/active-identity
+   checks and idempotent retries.
+2. Invoke it after the desktop load event, with explicit product identity from
+   installed shortcuts and no UI blocking; preserve logs on failure.
+3. Change Inno pruning to incomplete releases only; adapt fixture tests to
+   simulate install A -> B -> successful B startup and failed-start cases.
+4. Run focused Python tests, actual installer-policy fixtures, and a packaged
+   isolated startup test where feasible. Rebuild the local candidate installer
+   and record exact remaining acceptance limits.
+
+Closure:
+- The installer now preserves complete older releases and removes only
+  incomplete staging directories. The stable shortcuts pass the install product
+  identity to the launcher. The frontend signals readiness through the real
+  pywebview bridge; the launcher requires both window load and that signal,
+  then starts bounded code cleanup off the UI thread. The cleanup component
+  validates the registry's active release, executable path, release marker and
+  sibling directory before deleting. Interrupted deletion is retried through
+  `.deleting-*` directories on a later successful start. The source app cannot
+  prune an installed release.
+- Focused tests: 13 passed (release cleanup, desktop lifecycle, OCR child
+  processes); a later 11-test rerun including a simulated Windows removal
+  failure also passed. Frontend build passed. Lint had zero errors and the
+  pre-existing `App.tsx` effect dependency warning.
+- Isolated Inno fixture test A -> B -> B -> C passed, including successful
+  startup pruning, preservation of the temporary data sentinel and uninstall.
+  The real rebuilt bundle passed a separate isolated Windows startup test:
+  the unmocked React -> pywebview -> Python readiness path removed a fake old
+  release, cleared `PreviousRelease`, preserved temporary data, then completed
+  OCR queue -> review and native window close. The first packaged smoke before
+  adding this explicit gate also passed.
+- Full clean build produced local installer
+  `build/installer-dist/EstrattoreScanFatture-Setup-0.1.0-19339933cc81.exe`
+  (390,258,396 bytes; SHA-256
+  `A85DED85D71CF820957BEE65C5ABC48FD9D62C754D85192D17A7F9AC85F511CB`).
+  It supersedes the OCR-only local candidate `...-8030e921c32c.exe` but was
+  not installed or uploaded. User's installed 0.1.0 release and business data
+  were not modified.
+
+Assessment: the code/data ownership and readiness boundary are explicit, and
+the full packaged bridge has been exercised. This is satisfactory for a local
+upgrade candidate. Remaining acceptance: user-run upgrade of the actual
+installed application, observation of a failed/interrupted real installation,
+visual UI review and the open 0.1.0 release-note issues. Readiness does not
+claim every later workflow is valid; it only proves the new local app launched
+and its frontend initialized before pruning old code.
+
+## Simplify update completion to installer success - 2026-10-13
+
+Status: implemented and verified in isolated tests; supersedes the preceding
+first-launch cleanup policy.
+
+Problem: a hidden first-launch readiness gate is not useful when the user
+personally manages updates for one office PC and there is no rollback UI. It
+adds frontend/backend coupling, a registry predecessor field, and deferred
+disk cleanup without giving the operator a usable recovery choice. The actual
+boundary the operator accepts is a completed installer run.
+
+Resolution theory: keep code and business data separately owned. Stage the new
+code as a versioned release and never delete the currently installed release
+before the new payload, marker, shortcuts and registry have been installed.
+After that successful setup phase, prune only sibling code directories inside
+the install root. Do not move deletion into the app runtime. An interrupted
+installation must not enter the post-install prune. Installed runtime
+validation or deletion failure must be reported as a nonzero setup result
+while retaining the old code. This is not rollback: Inno may already have
+written the new shortcut and registry entry, requiring a manual repair. There
+is no automatic rollback if the new app later fails to launch.
+
+Chosen approach: final for this single-PC managed deployment. Inno performs
+post-install code pruning. Remove the first-launch handshake and predecessor
+registry field, retaining only the active-release record and data separation.
+
+Micro-steps:
+1. Restore installer-side sibling pruning after completed installation; leave
+   the new release marker and user data untouched.
+2. Remove obsolete runtime/frontend cleanup contracts and their tests.
+3. Change isolated installer tests to assert one release immediately after
+   each completed upgrade, before any app launch; rerun packaged startup smoke.
+4. Build a new installer candidate and record its identity and limitations.
+
+Important finding during implementation: an exception from the former marker
+`BeforeInstall` ACL check did not abort Inno. Under silent setup, a deliberately
+incomplete bundle logged the exception, continued, wrote `release.complete`,
+replaced the shortcut, pruned the old release, and returned exit code 0. This
+made post-install pruning unsafe. Inno's `GetCustomSetupExitCode` contract was
+checked against official documentation; the fix uses an explicit final
+validation result rather than relying on a script exception to abort setup.
+
+Closure:
+- The installer now checks that the installed release contains the executable,
+  frontend entry, Poppler, Tesseract, private WebView2 and completion marker;
+  it then grants WebView2 permissions. Only when these checks pass does it
+  remove every other code release under `{app}\releases`. A failure to validate
+  or delete returns custom setup exit code 10 and retains old code. The obsolete
+  `PreviousRelease` registry value is deleted after successful pruning. User
+  data remain under `%LOCALAPPDATA%\EstrattoreScanFatture`, outside install
+  code. The React/Python readiness bridge, runtime cleanup component and its
+  dedicated tests were removed rather than left dormant.
+- Tiny real-Inno fixtures A -> B -> B -> C pass: one code release remains after
+  each successful installer, no first launch needed, shortcut points to it,
+  business-data sentinel survives, and explicit fixture uninstall succeeds.
+  A deliberately incomplete upgrade returns exit code 10 and preserves A;
+  the following valid B install removes both A and the incomplete code.
+- Focused launcher/OCR tests: 9 passed. A clean desktop/installer build ran
+  frontend lint and build and produced the candidate below. Direct lint had
+  zero errors and one pre-existing `App.tsx` effect dependency warning. The
+  new frozen bundle passed isolated startup, OCR queue, review and close smoke.
+- Local installer candidate:
+  `build/installer-dist/EstrattoreScanFatture-Setup-0.1.0-929e14e85496.exe`
+  (390,318,214 bytes; SHA-256
+  `7D8B73B59286FC387327F523F863D5A3D612D1B99DDBCBE83D999295F7C21C65`).
+  It supersedes both earlier local candidates; it was not installed or
+  uploaded. The user's existing app and business data were not modified.
+
+Assessment: installer success is now the only code-pruning boundary, matching
+the user's managed-update workflow. The negative fixture exposed and removed
+a real false-success failure mode. Remaining limit: a post-install validation
+or deletion error is correctly reported as failure but does not automatically
+restore the old shortcut/registry, although old code is retained; manual repair
+may be needed. A completed installer also does not prove every application
+workflow; the user must still accept the actual installed upgrade and visual
+layout on the office PC.
+
+## Human-readable installer artifacts - 2026-10-13
+
+Status: complete.
+
+Problem: a content fingerprint is useful for internal reproducibility but is
+not a release version. Nine unrelated-looking `0.1.0-<hash>` installers
+accumulated in one directory; the operator could only infer which to use from
+timestamps and chat history. Renaming an artifact by hand alone would not
+prevent the next build from reverting to the opaque convention or overwriting
+a candidate with different bytes.
+
+Resolution theory: separate the product version, distribution stage, and
+internal payload identity. Assign a human-readable, monotonic label to each
+candidate (`0.1.0-rc.1`, `0.1.0-rc.2`, then `0.1.0` for an approved release),
+while keeping the content digest in the installed release ID and checksum
+records. Generate the artifact name from a single checked release declaration.
+An already named candidate is immutable; a changed payload requires a new RC
+number. Development-only smoke artifacts remain clearly marked and isolated.
+The published GitHub asset name will not change merely because a local file
+is renamed; that requires an explicit release edit later.
+
+Chosen approach: store desktop release stage/revision alongside the project
+version in `pyproject.toml`; derive the installer basename in
+`packaging/build_installer.py` and pass it to Inno. Keep `ReleaseId` based on
+the bundle digest. Refuse to overwrite an existing non-smoke artifact before
+starting an expensive rebuild. Rename the locally retained rc.1 copy and
+rebuild rc.2 with the new generator, preserving the old published bytes.
+
+Micro-steps:
+1. Add and validate the release declaration; separate artifact basename from
+   the internal release ID in the Inno build contract.
+2. Add focused naming/immutability tests and run the real installer fixture.
+3. Generate the rc.2 artifact from the verified bundle, rename the local rc.1
+   copy, and record checksums. Do not modify the GitHub release or installed app.
+4. Update current packaging instructions and close this notebook point after
+   confirming the exact two remaining local filenames.
+
+Closure:
+- Added `[tool.estrattore.desktop_release]` to `pyproject.toml` with `stage =
+  "rc"` and `revision = 2`. The builder derives the human-readable basename
+  from this declaration and the project version, while the internal `ReleaseId`
+  remains `0.1.0-929e14e85496` for the currently verified bundle. The Inno
+  script requires an explicit artifact basename. A first fallback attempt
+  exposed Inno's lack of recursive macro expansion in this context; the real
+  fixture now passes the basename explicitly too.
+- A non-smoke build exits before preparation or compression if its named
+  artifact already exists. Smoke names are visibly separate. The next changed
+  candidate requires increasing the revision to 3; switching to stable drops
+  the RC suffix. Six focused naming/immutability tests passed, and a real
+  repeat command rejected the existing rc.2 immediately. The isolated real-Inno
+  installer fixture passed again after making the artifact basename mandatory.
+- Recompiled the verified onedir bundle using `--use-existing-bundle`; Inno
+  produced `EstrattoreScanFatture-Setup-0.1.0-rc.2.exe` (390,318,214 bytes,
+  SHA-256 `7FCE28A681321C7FEDCC2D65249DA84FEDD734FCDC6430E1D31606894D72531E`).
+  The prior local hash-named candidate was removed only after verifying the new
+  installer and internal release marker. The published rc.1 copy was renamed
+  locally to `EstrattoreScanFatture-Setup-0.1.0-rc.1.exe`; its original SHA-256
+  `06D793ABD1B7AC3960D519927EC684B1D1E2B9F94A5C19BD3DB76BCD8F37EBE4`
+  was verified before the move. Only these two files remain in installer-dist.
+- The already published GitHub rc.1 asset still has its original hash-based
+  filename; the local rename has not modified it. The rc.2 candidate remains
+  uninstalled and unpublished. Packaging instructions and current release
+  notes now distinguish the published name from local artifact names.
+
+Assessment: the distribution label is now legible and controlled at one source
+of truth; artifact immutability prevents accidentally reusing an RC number.
+The content digest remains available internally for exact provenance. Remaining
+publication work is an explicit GitHub release-asset edit or a future new
+release; no remote release was changed in this point.
+
+## Desktop close must preserve active OCR work - 2026-10-13
+
+Problem: application lifecycle interruption and an explicit user discard are
+different operations. Today native close calls the same cancellation path as
+the Processes page, deleting the active job's staging and completed-document
+checkpoints. Queued jobs survive, so the distinction is visible and confusing.
+
+Resolution theory: persist user intent separately from worker termination.
+Stopping a child process is mechanical; whether its durable work is retained
+depends on why it stopped. Keep the existing PDF-level checkpoint boundary:
+completed source PDFs can be skipped on resume, but a partially processed PDF
+is reprocessed. Do not claim invoice/page-level resume.
+
+Chosen approach: add a shutdown-only interruption signal to the job and
+processing loop. On close, stop the active child, retain its batch and process
+directory, return the job to the front of the persisted queue, and leave all
+other queued jobs untouched. Explicit Cancel continues to discard both staging
+and checkpoints. Startup recovers a shutdown-interrupted job as queued, including
+an unexpected exit during the stop. A failed close must clear the shutdown gate
+and allow the retained job to continue or restart.
+
+Micro-steps:
+1. Separate interruption from cancellation in storage and job supervision.
+2. Update close confirmation wording to describe restart rather than discard.
+3. Test explicit cancel, graceful close, restart, and partial-document cleanup
+   with isolated temporary data; inspect the real queue/startup contract.
+
+Open risk to verify: an app crash still uses the pre-existing processing-job
+recovery path. The worker may not have reached the shutdown handler, but the
+persisted process ID must protect completed checkpoints during startup cleanup.
+
+Closure:
+- Introduced `ProcessingInterrupted` and a separate shutdown-only check. The
+  worker is terminated immediately as before, but completed document markers,
+  process directory and staged source PDFs remain. Explicit user cancellation
+  still removes them. On restart the active job is placed ahead of the saved
+  queue; the loader now respects persisted queue order rather than sorted job IDs.
+- Native close text says the job will resume at the unfinished PDF. A failed
+  close clears the interruption request and returns the live job to processing.
+  The UI recognizes the transient `stopping` state while the worker exits.
+- 75 focused Python tests passed, including checkpoint reuse, restart ordering,
+  explicit cancellation and lifecycle checks. Frontend build passed; lint had
+  zero errors and one pre-existing `useEffect` dependency warning. These tests
+  used isolated temporary data and did not touch the installed app.
+- Satisfactory because app close and explicit discard now express different
+  durable intentions without changing the established PDF-level checkpoint
+  boundary. Residual: a new installer and manual close/reopen during real OCR
+  remain necessary before claiming installed-app acceptance. A single source
+  PDF with many invoices still restarts that entire PDF, not the last invoice.
+
+## Maximize the desktop main window on launch - 2026-10-13
+
+Problem: the desktop shell currently opens its main window at a fixed initial
+size even on larger office displays. The app should use the available working
+area immediately while preserving a usable restored size and normal Windows
+chrome. PDF preview windows must remain independently sized.
+
+Resolution theory: use the native window creation state rather than resizing
+after the window is shown. Post-show maximization can expose a brief smaller
+window and may race with page layout. The packaged pywebview version exposes
+`create_window(maximized=True)` and its WinForms backend sets `WindowState`
+before displaying the form.
+
+Chosen approach: set `maximized=True` only on the main window. Retain its
+1500 x 940 restore dimensions, minimum size and normal title bar. Verify the
+creation contract in an isolated launcher test; defer installed-window visual
+acceptance until the next installer because the user's current app is running
+OCR and must not be disturbed.
+
+Closure: implemented on main-window creation only. The PDF preview path is
+unchanged. Seven isolated desktop-launcher tests passed, including explicit
+main-window maximize and preview-window non-maximize assertions. Local packaged
+pywebview source confirms the state is applied by WinForms before display.
+This is satisfactory at source-contract level and avoids a post-show resize;
+native visual acceptance remains open for the next installer, particularly
+restore/remaximize, taskbar/title bar and Windows display scaling.
+
+## Visible progress for review-group discard - 2026-10-13
+
+Problem: a long-running destructive operation currently gives feedback only in
+the invoice-fields status line. After confirming group discard, users cannot
+tell whether the app is still deleting invoice records or whether it stalled,
+and the rest of the interface remains visually actionable.
+
+Resolution theory: confirmation and execution are separate states. Once a
+destructive action is accepted, show a blocking busy state tied to the real
+request lifecycle; do not invent a percentage or dismiss it on a timer. An
+indeterminate progress bar is appropriate here because each invoice is saved
+sequentially and the duration of a single backend call is unknown. Return to
+the normal view only after the operation and the review-list refresh settle.
+
+Chosen approach: reuse the established progress-dialog visual system but add
+a group-discard-specific busy state and synchronous duplicate-submission guard.
+Keep the existing confirmation dialog and backend contract. On rejection, close
+the progress dialog and show the existing non-technical error in the fields
+panel. Protect pointer and keyboard interaction while the busy dialog is open.
+
+Micro-steps: add the modal and state guard; await the existing discard and
+review-refresh chain; build/lint; exercise success, failure and duplicate-click
+behavior against isolated test data; inspect the visible dialog with temporary
+screenshots if the development runtime can be launched without touching user
+data.
+
+Closure:
+- Added a blocking group-discard progress dialog after confirmation. It uses
+  the established modal and moving-bar styles, does not display a fabricated
+  percentage, and blocks pointer/keyboard actions while active. A ref rejects
+  duplicate submissions before React state updates. The original lower-panel
+  status is hidden only while this dialog is visible.
+- The dialog remains until all per-invoice requests and review-list reload
+  finish. On partial failure, the list is refreshed before showing the error so
+  already discarded invoices do not remain displayed as pending. The existing
+  backend discard contract is unchanged.
+- Frontend build passed. Lint reported zero errors and one pre-existing
+  `useEffect` dependency warning. Two isolated backend discard tests passed.
+  Playwright against a separate static preview with mocked API data covered
+  two viewport sizes, held-request busy state, visibly moving bar, disabled
+  repeat command, Escape blocking, success and partial failure. No real user
+  data or installed application were touched. The preview was stopped and all
+  temporary screenshots were deleted after inspection.
+- Visual critique: confirmation-to-progress transition and dialog composition
+  8/10; compact viewport 8/10; failure return state 8/10; overall 8/10. The
+  first screenshot showed redundant background status text; hiding it during
+  progress resolved that concern. The mock document page was intentionally
+  blank, so this visual score applies to the touched dialog and surrounding
+  control layout, not to actual PDF rendering.
+- Satisfactory at source/UI-integration level. Installed-app acceptance remains
+  for the next installer. The Playwright API was mocked, so it verifies UI
+  state transitions but not HTTP routing or persistence; existing backend
+  discard tests cover storage behavior separately.
+
+## User-selected destinations for application exports - 2026-10-13
+
+Problem: an installed desktop app must let the user choose both filename and
+destination for files deliberately delivered outside app storage. This covers
+invoice exports and re-exports, registry Excel, registry cleaning report, and
+the invoice-register Excel endpoint. The developer-feedback bundle is explicitly
+excluded by user decision and keeps its current Desktop-folder workflow.
+
+Resolution theory: use one native Save dialog at the desktop boundary, not a
+browser download whose location depends on WebView settings. Internal archived
+artifacts are distinct from delivered user copies. For state-changing exports,
+cancel must happen before any export-history mutation. File writing and registry
+history are separate filesystems and cannot be one atomic transaction; perform
+the user delivery first, then commit internal history, and report any failure.
+
+Chosen approach: extend the existing pywebview bridge with narrowly scoped
+export methods. They accept an allowed export kind or invoice identifiers, not
+an arbitrary source or destination path from JavaScript. The native dialog
+returns a path only inside Python. Keep HTTP/browser download behavior for
+development mode. Re-download of an existing invoice export selects a new
+destination but does not create another history event.
+
+Micro-steps: add native bridge and safe file-writing helper; add an invoice
+export delivery callback before the history commit; wire all user-facing
+download buttons; test cancel, rename, failure and re-export on isolated data;
+build/lint and verify desktop bridge wiring without touching installed data.
+
+Closure:
+- Implemented the native Save dialog for invoice exports/re-exports, registry
+  Excel and cleaning report. The bridge also supports the invoice-register
+  Excel endpoint, though the current UI does not expose that older endpoint.
+  PDF archive viewing is not a generated-file export. Feedback export stays
+  unchanged on the Desktop, per explicit user instruction.
+- The bridge accepts only known export kinds or a validated export ID; it never
+  accepts a filesystem path supplied by JavaScript. The selected filename and
+  directory are held in Python. A temporary file in the selected directory is
+  flushed and atomically replaced, preserving an existing destination when a
+  write or replacement fails. The native dialog runs before generating an
+  invoice export and before modifying export history. Re-saving an existing
+  export does not create another history event.
+- 32 focused Python tests passed: cancellation leaves the invoice registry
+  byte-for-byte unchanged, a renamed workbook is valid, re-download creates no
+  extra history entry, ZIP output with withholding summary is valid, named
+  exports use chosen names, wrong extensions are
+  rejected, and failed replacement leaves the old file intact. The launcher
+  test verifies that the real desktop bridge is bound to the created window.
+  Frontend build passed; lint had zero errors and one pre-existing React Hook
+  warning. `git diff --check` found no whitespace errors.
+- Critical limit: delivery to a user-selected folder and persistence of the
+  internal registry are not a single filesystem transaction. The user copy is
+  written first, so a rare subsequent registry-write failure can leave a valid
+  file without a history entry. This is preferable to marking invoices exported
+  when no user file exists; it should be explained if observed in practice.
+  Interactive Windows Save dialog, renaming, overwrite confirmation and visual
+  acceptance still need checking in the next installer. No real user data or
+  the currently installed app were touched.
+- Visual judgment: existing export modals and buttons retain their layout;
+  the only new in-app visual state is an inline report-save error. No screenshot
+  of the native Windows dialog was captured, so its appearance is not scored
+  here. Functional checks are isolated bridge/backend tests, not an installed
+  desktop end-to-end test.
+
+## Windows application icon - 2026-10-13
+
+Problem: a desktop product has several identity surfaces (setup executable,
+installed application, shortcuts, taskbar/window and uninstall entry). A
+generic icon on any one of them weakens recognition. The source of truth must
+be one user-provided icon asset, not manually copied variants.
+
+Resolution theory: embed a multi-resolution ICO in the PE executable, set the
+installer executable's icon at compilation, and let shortcuts and uninstall
+metadata refer to the installed executable. This avoids duplicate icon files
+inside each release directory and ensures an upgrade carries the new icon.
+Windows may cache an old shortcut icon temporarily; that is a shell refresh
+issue, not a second icon source.
+
+Chosen approach: use the supplied `packaging/assets/Scan_icona_trasparente.ico`
+directly. Pillow confirms its ICO entries at 16, 20, 24, 32, 40, 48, 64, 128
+and 256 pixels. Add it to PyInstaller's EXE configuration and Inno Setup's
+`SetupIconFile`. The existing shortcut and uninstall entries target the EXE.
+
+Micro-steps: wire both builders, fail early if the icon is missing, compile an
+isolated installer fixture, inspect PE icon resources if tooling permits, and
+record that real desktop/taskbar visual acceptance needs a new installer.
+
+Closure:
+- PyInstaller embeds the user-provided ICO in the desktop executable; Inno
+  Setup uses that same source for the setup executable. The existing Start and
+  optional Desktop shortcuts plus uninstall metadata point at the EXE, so no
+  additional copies or icon identifiers are maintained.
+- A real isolated Inno fixture compiled and passed upgrade A -> B -> B -> C and
+  uninstall checks. The clean full desktop bundle built successfully. PE
+  resource inspection found nine `RT_ICON` entries and one `RT_GROUP_ICON`.
+  A temporary 64-pixel preview was inspected and removed. The icon is readable
+  and uses transparent edges; no source asset was modified.
+- The first full-build attempt used the packaging virtualenv as the driver and
+  failed while trying to recreate that same virtualenv. Rerunning via the
+  documented system Python command succeeded. This was a test-command error,
+  not an application or icon defect.
+- The frontend build passed; lint reported only the previously known React
+  Hook warning. `npm ci` also reported dependency advisories (one moderate,
+  six high) without changing versions; dependency triage is separate from this
+  icon point.
+- Satisfactory at source and generated-binary level. The next installer must
+  still be installed and visually checked on Desktop, Start, taskbar/window,
+  setup executable and Programs & Features. No production app or user data were
+  changed. Windows shortcut-icon caching may require Explorer refresh.
+
+## Isolated desktop UI fixture - 2026-10-13
+
+Problem: visual review needs representative application states without modifying studio data or waiting for OCR. This is a test-data lifecycle problem, not a frontend mockup problem: review, archive, registry and export pages read several related persistent stores, and startup cleanup checks their consistency.
+
+Resolution theory: create deterministic synthetic data through the same import/review/archive contracts used in production, then run the real local desktop composition against a separate data root. Keep the fixture generator outside the distributed application, make repeated launches idempotent, and do not seed a persisted active OCR job: startup would resume actual processing. A terminal history row and a genuine empty active state are safer than a deceptive job.
+
+Chosen approach: a development-only launcher creates `build/ui-demo-data` and opens the source desktop app. It uses a separate source-only mutex namespace so it can coexist with the installed app. The fixture has a real review manifest and image, anagrafica, source and invoice archives, saved/exported/discarded registry records, export history, and process history. All names, tax identifiers and PDFs are synthetic.
+
+Micro-steps:
+1. Generate valid synthetic source PDF/page image and a processed review with the existing storage API.
+2. Seed the remaining independent stores with contract-compliant synthetic records, and generate the export with the real export service.
+3. Add the isolated launcher and source-only instance namespace; preserve the production mutex.
+4. Verify runtime API/read paths and desktop launch, then run focused tests, lint/build and visual inspection. Record the empty active-job limitation explicitly.
+
+Closure:
+- `scripts/ui_demo.py` creates one real review via import/processing with a synthetic four-page PDF and page images. The other three invoices flow through the real save, discard and export services. It seeds two anagrafica rows, one archived source, three invoice PDFs, one export receipt, and one completed process-history entry. The profile lives only under ignored `build/ui-demo-data`, carries a marker, and can be restored with `--reset` after closing the demo window.
+- The source desktop launcher accepts `--dev-instance` only for a marked demo profile and chooses a profile-specific mutex; the packaged app retains its existing mutex. The demo window is titled `[Demo]` and has a separate WebView profile. No real user-data directory was read or modified to populate it.
+- The real local-app HTTP entry point returned the review, registry, source archive, invoice registry and process history; GET served all three invoice PDFs. Playwright verified the visible review image and the saved/exported/discarded and archive tabs. Temporary screenshots were inspected and removed.
+- The active-process page intentionally remains empty: persisting a fabricated queued/running job would trigger actual OCR on startup. For visual review of active progress, start a genuine process separately in this isolated profile; do not fake a resumable job in production storage.
+- Focused fixture and desktop tests: 8 passed. Frontend build passed. Lint passed with one pre-existing React Hook warning at `App.tsx:4756`. Native window loading itself still needs a manual visual check by running the command; browser/HTTP checks do not prove WebView-specific appearance.
+
+## Review header and sidebar navigation colors - 2026-10-14
+
+Problem: the review screen uses three visual bands for document identity, the registry command, and document tools, which reduces PDF space. Archive and process navigation have equal white styling despite leading to different destinations. The user supplied a visual reference but requested only these two ideas, not a full redesign.
+
+Resolution: keep the existing component and control styles. Place document identity and registry navigation on the first header row; place page reordering and zoom/developer controls on the second. Use restrained blue and amber surfaces for Archive and Processes, keeping the white import command as the primary neutral action. Permit wrapping when the document pane becomes narrow; do not compress or overlap controls to preserve two rows at all costs.
+
+Micro-steps: move the existing controls without changing handlers; adjust the scoped CSS and container queries; run build/lint and inspect review, open archive menu, and narrow-window screenshots using the isolated demo runtime. Score each touched state and remove temporary screenshots.
+
+Closure:
+- The existing registry button now sits at the top right of the document header; page reordering and zoom/developer controls share the lower band. No handlers or underlying data paths changed. The Archive and Processes sidebar commands use quiet blue and amber fills, distinct from the white import button and the green sidebar.
+- At 1500 px and 980 px the document header has two layout rows. At 1100 px the 379 px document-header width forces the action band to wrap; accepting a third row here keeps every command readable and avoids overlap. The reference image was used only for placement and color hierarchy, not copied wholesale.
+- Visual scores: standard review/header 8/10 (clear hierarchy, more PDF space); open Archive menu 8/10 (the blue trigger remains distinguishable while the menu overlays correctly); narrow 1100 px review 7/10 (readable, but toolbar wraps); 980 px review 8/10 (two rows after the right field pane collapses). Overall 8/10. The main residual compromise is the narrow middle pane at 1100 px, not a clipping defect.
+- Real local-app demo + Playwright checked loaded PDF images, no header horizontal overflow, the open Archive menu and Registry navigation from the moved button. Build passed; lint finished with the existing single React Hook warning at `App.tsx:4756`. Six temporary screenshots were inspected and deleted. No persistence or backend interaction changed, and no installed-app screenshot was captured.
+
+Follow-up, 2026-10-14: the user requested a slightly smaller registry button and the archive/cog symbols from the reference. Added `lucide-react` to the viewer package, used `Archive` and `Cog` with existing blue/amber buttons, and reduced only the registry button padding (from 5x14 to 4x12 px). An initial 12 px font made the button disproportionately small; screenshot critique led to retaining the original font size. Final button changed from about 136x32 to 132x30 px. Visual score: standard review 8/10, narrow 1100 px 7/10 (existing toolbar wrap remains), open Archive menu 8/10. The icons are centered and legible, the menu opens, and the PDF renders. Build passed; lint: 0 errors and the same pre-existing Hook warning. Three temporary screenshots were inspected and deleted. npm reported seven dependency advisories, the same count noted before this dependency addition; security triage remains separate.
+
+Follow-up, 2026-10-14: enlarged the Archive menu's PDF/REG symbols from 0.9rem to 1.2rem within slightly larger fixed icon areas, and its heading from 0.72rem to 0.8rem. PDF uses a muted document red (#b4474b), REG retains blue, and the invoice review's Elimina command now uses the established destructive red treatment (#9f2f24) rather than amber. Kept text symbols instead of adopting a product logo. Visual critique: open menu 8/10 (symbols are more visible without overpowering destinations), review action row 8/10 (red elimination is clear but remains quieter than primary Save), overall 8/10. Local-app demo screenshot showed no overlap; build passed and lint had 0 errors with the existing Hook warning. No handlers or persistence paths changed.
+
+Refinement: after inspecting the open menu, the user preferred a stronger heading and more restrained symbols. Final heading is 0.95rem, PDF/REG symbols 1.05rem, and PDF uses a less saturated red (#a3595d); Elimina is unchanged. The menu screenshot shows clear hierarchy and no crowding (8/10). Build passed; lint still has only the existing Hook warning. The temporary screenshot was removed.
+
+## Document import dialog proportions - 2026-10-14
+
+Problem: the two-sentence import instruction occupied one long line in a wide dialog, leaving excessive horizontal space around the file/folder commands. The earlier 950 px width rule was overridden by the later generic dialog rule, so the actual width was 630 px.
+
+Resolution: keep the existing import actions and dialog behavior, break the two sentences at their semantic boundary, center the instruction with the actions, and give this dialog a specific responsive 480 px width. At desktop width this produces two lines and a less stretched 480x315 px surface; at 450 px viewport it becomes 415 px wide without overflow. Visual scores: desktop dialog 8/10, narrow dialog 8/10, overall 8/10. Local-app demo/Playwright opened the dialog in both viewports and inspected temporary screenshots; no picker, import, or persistence action was invoked. Build passed; lint had 0 errors and the existing Hook warning.
+
+Refinement: narrowed the dialog further to 440 px and centered its heading with balanced 45 px side columns, reserving the right column for Close. The local-app screenshot shows a centered heading and more compact desktop proportions (8/10). At 375 and 320 px the title remains centered and does not overlap Close; it wraps at 320 px (7/10), which is preferable to clipping. Playwright geometry confirmed equal title/dialog centers and no horizontal overflow. Build passed; lint still reports only the existing Hook warning. Temporary screenshots were removed.
+
+## Invoice review field density in the desktop window - 2026-10-14
+
+Problem: the old browser-oriented right pane consumes a disproportionate share of the desktop window. At a 1500 px viewport it is 630 px wide, its field labels and values are about 28/27 px, and each row is about 116 px tall. The issue is a coordinated scale mismatch, not one oversized font: width, card rhythm, inputs, badges, and actions need to remain in proportion.
+
+Resolution theory: reduce the right pane and its contents together while keeping controls operable, retaining enough width for longer Italian labels and preserving readable field values. Use fixed font sizes instead of viewport-based font scaling, responsive constraints for pane width, and an approximately 25% reduction in row height. Keep small icon targets near the 24 px usability floor rather than mechanically shrinking them by 25%.
+
+Plan: (1) narrow the review pane and scale its header, rows, input and view states; (2) adjust adjacent icon buttons and suggestion list spacing; (3) compare baseline and revised row measurements and screenshots at normal and narrower desktop widths; (4) test one active field/suggestion or anagrafica control; (5) run build and lint, review visual scores, and remove temporary screenshots. Baseline was captured from the isolated local-app demo; no studio data is involved.
+
+Closure: the right pane now uses `clamp(360px, 32vw, 620px)` rather than `clamp(420px, 42vw, 828px)`. At 1500 px it shrank from 630 to 480 px (-24%); at 1100 px from 462 to 360 px (-22%). Field labels went from 27.75 to 21 px at 1500 px, values from 27 to 20 px, and a representative card from 115.9 to 88.3 px (-24%). Eight cards instead of six fit in a 900 px high viewport. Header, checkbox, card spacing, input padding, original-scan view, suggestion spacing, and registry action buttons were scaled proportionally; icon buttons remain at least 24 px where practical. No storage or invoice behavior changed.
+
+Verification and critique: local-app demo screenshots at 1500 and 1100 px showed coherent PDF/panel balance, no panel horizontal overflow, and no clipped labels among all eleven fields at 1100 px. The focused field suggestion popup stayed visible above following cards. Visual scores: 1500 px review 8/10 (better document space and scanning density); 1100 px review 8/10 (two-row action header is orderly, labels fit); active suggestion 7/10 (functional and readable, though long suggestion values are ellipsized in the narrow panel as before). Overall 8/10. Build passed; lint had 0 errors and the existing React Hook warning. Temporary screenshots were inspected and removed.
+
+Follow-up: moved Save/Restore/Delete beside the review title and placed the All fields checkbox directly below it. Slightly increased the review and left-sidebar titles (21 to 22 px and 16 to 18 px respectively). Scoped action-button padding and font to keep the title/actions on one row at the 360 px pane minimum. Local-app screenshots at 1500 and 1100 px showed no title/action overlap or horizontal overflow (both 8/10; overall 8/10). The checkbox toggled on and off in Playwright without persistence actions. Build passed; lint still has only the known Hook warning. Temporary screenshots were removed.
+
+Final visual adjustment: enlarged the left-sidebar Fatture title to 20 px and the review action buttons from 12 to 13 px with one more pixel of vertical padding. Existing flex centering was already the right alignment rule; the larger buttons make it visually legible. At 1100 px, Playwright measured title and action centers at 28.086 and 28.094 px with a 14 px horizontal gap; no overlap or overflow at 1100 or 1500 px. Visual scores: narrow header 8/10, wide header 8/10, overall 8/10. Build passed, lint has only the known Hook warning, and temporary screenshots were removed.
+
+## Invoice registry toolbar grouping - 2026-10-14
+
+Problem: the registry header treats title, dates/export, sorting, search, and row actions as five peer columns. At 1500 px its search expands to about 853 px while sorting is stranded at the far right, so the visual hierarchy does not match the workflow.
+
+Chosen approach: retain every existing filter and handler, but group title/search/sort on the left and date range/export/row actions on the right in two aligned rows. Give the registry search a familiar inline search icon and an explicit accessible name; constrain its width. Keep responsive layout rather than forcing the right group into the minimum supported viewport. Increase only the home sidebar's Fatture title, not the other page titles.
+
+Micro-steps: group the JSX without moving state ownership; replace the five-column header CSS with two coherent columns; inspect saved, exported, and discarded modes plus narrower desktop widths; check filter/search interactions and build/lint; critique screenshots and remove them. Baseline screenshot uses the isolated local-app demo, not studio data.
+
+Closure: the home Fatture sidebar title alone is now 22 px. The registry header uses two independent flex rows: title with date range/export above, 300 px search plus 230 px sort with row actions below. Search has a Lucide magnifier, short placeholder, and a full accessible name covering its searchable fields. The baseline 1500 px search was about 853 px wide; the new search is 300 px. An initial shared two-column grid made the search unnecessarily narrow at 1100 px because the top-row date controls fixed the second column width, so it was replaced with independently wrapping rows. No search, sort, date, export, edit, or delete handler changed.
+
+Verification: local-app demo screenshots covered saved/exported/discarded registry states and 1500/1100/900 px widths. Header height is 171 px at 1500 and 1100 px with no overlap or horizontal overflow; at 900 px the row actions wrap below, producing a 221 px header without overlap. Search filtered the fixture from one match to zero and back, sort selection persisted in the control, and a future From date filtered the record to zero. Returning home showed the Fatture title at 22 px. Build passed; lint had 0 errors and the known Hook dependency warning. Visual scores: 1500 px saved/exported/discarded 8/10; 1100 px 8/10; 900 px 7/10 (actions need an extra line); overall 8/10. Screenshots were temporary and removed. No real user data was touched.
+
+Correction after user review: the two independent flex rows and abbreviated search placeholder were a visual regression despite the earlier self-score. Restore a compact grid with title and dates/export on the first row, original search text and Sort adjacent on the second, and row commands immediately after Sort. The magnifier is the only search-content addition. At 900 px row commands use a third row. Visual inspection of temporary 1500/900 px header screenshots confirmed the intended grouping and no overflow. Earlier visual scores for this header are withdrawn; geometric checks alone did not establish aesthetic quality.
+
+Follow-up: align Edit/Reprocess/Delete to the far right and make Sort an inline label/select pair, eliminating the false visual third row caused by its label above the control. At 1500/1100 px the header is 140 px tall with two rows; at 900 px the actions wrap to a third row. Widened the sort track to show its selected label at 1100 px. Playwright checked right alignment and no overflow, and a temporary screenshot was inspected.
+
+## Button hover consistency - 2026-10-14
+
+Problem: the viewer has a shared button hover lift, but scattered component-specific `transform: none` declarations suppress it on visually similar commands. This makes the same interaction feel inconsistent between review, archive, and registry surfaces.
+
+Approach: retain the existing shared `translateY(-1px)` rather than adding a competing animation. Remove local lift suppressions on command and navigation buttons; keep stationary list suggestions and the zoom +/- stepper because moving items in these controls can undermine stable scanning or repeated clicking. Keep the review overflow button's existing slightly stronger lift. Ensure local transition declarations include `transform` so the movement stays smooth.
+
+Checks: build and lint; inspect computed hover transforms in representative review, archive, registry, and dialog controls, including the stationary exceptions; visually inspect touched surfaces with temporary screenshots when available.
+
+Closure: removed the per-component `transform: none` overrides from action buttons in the review, archive, registry, imported-batch, developer, and sidebar navigation surfaces. The remaining `transform: none` rules are limited to field/registry suggestion rows and the zoom stepper. Existing hover colors remain unchanged. Added transform to the two local transition lists that had suppressed smooth movement. Playwright on the isolated local-app demo observed `translateY(-1px)` for the developer trigger, field registry button, archive menu tile, registry row action, sidebar navigation, and document-import dialog close/action buttons, while zoom +/- stayed at `none`; the export command was disabled in this fixture and was not claimed as an active-hover check. Temporary screenshots of review, menu, and registry were inspected. Build passed; lint has zero errors and the existing React Hook dependency warning. No backend or persistence path changed.
+
+## PDF wheel zoom after returning to review - 2026-10-14
+
+Problem: the native `wheel` handler is attached to the review viewport from a React effect that depends only on zoom scale. Leaving review unmounts that viewport. Returning creates a new DOM node at the same zoom scale, so the effect does not rerun and the new node has no handler. This is a listener lifecycle defect, not a scrollbar limitation.
+
+Approach: make the effect follow the view lifecycle while retaining its native non-passive wheel listener and cursor-centered zoom math. Verify a one-page PDF at the 35% minimum with no scrollbar, before and after navigation, and confirm that unmodified wheel scrolling does not change zoom.
+
+Closure: the effect now depends on `appView` as well as `pageScale`; it detaches on leaving review and attaches to the newly mounted viewport on return. The isolated local-app Playwright check reproduced the bug before the change: 35% to 40% worked before navigation, but a second Ctrl+wheel after returning stayed at 40%. After the change the same sequence became 35% to 40% to 45%, with one page and no vertical scrollbar. An unmodified wheel left zoom at 45%; after enlarging the page, normal wheel advanced scrollTop from 0 to 280. Build passed; lint has zero errors and the existing unrelated Hook dependency warning. No screenshot was necessary because no visual layout changed; the checked boundary was the live browser wheel event on the local-app viewport, not a mocked handler.

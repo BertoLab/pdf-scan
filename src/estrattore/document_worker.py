@@ -237,6 +237,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    from estrattore.ocr_child_processes import install_worker_ocr_process_policy
+
+    install_worker_ocr_process_policy()
     args = _parse_args()
     return run_worker(args.request, args.result, args.start_gate)
 

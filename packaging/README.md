@@ -59,6 +59,9 @@ py -3.12 packaging/build_desktop.py
 ```
 
 The executable is `build/desktop-dist/EstrattoreScanFatture/EstrattoreScanFatture.exe`.
+The Windows product icon is `packaging/assets/Scan_icona_trasparente.ico`.
+PyInstaller embeds it in the executable; Inno Setup uses the same source for
+the installer. Desktop and Start shortcuts inherit the executable icon.
 The frozen smoke copies the entire bundle to a temporary path with spaces,
 processes a PDF both directly and through the live HTTP/OCR queue, checks the
 private WebView2 process, and deletes its isolated test data. For an iterative
@@ -73,7 +76,15 @@ py -3.12 packaging/build_installer.py
 
 The command rebuilds the frontend and `onedir` bundle, verifies the pinned and
 signed Inno Setup 7 compiler in ignored `build/`, and produces
-`build/installer-dist/EstrattoreScanFatture-Setup-<version>-<bundle-hash>.exe`.
+`build/installer-dist/EstrattoreScanFatture-Setup-<version>-rc.<revision>.exe`
+for a release candidate. The version comes from `[project]` and the release
+stage/revision from `[tool.estrattore.desktop_release]` in `pyproject.toml`.
+Use `stage = "stable"` with no revision for the final `<version>.exe` name.
+The bundle hash remains in the installed release directory and marker, not in
+the user-facing filename. A non-smoke installer name is immutable: increment
+the RC revision before building a new candidate; an existing filename is never
+overwritten. GitHub assets must be renamed explicitly when publishing; local
+renames do not change already published releases.
 `--use-existing-bundle` skips the clean rebuild for local iteration only.
 `--smoke` builds a separate AppId with isolated code and data under
 `build/installer-smoke/app` and `build/installer-smoke/data`. Its generated
@@ -85,9 +96,12 @@ private WebView2 runtime. No external runtime installer is launched.
 
 The setup installs code under `%LOCALAPPDATA%/Programs/EstrattoreScanFatture`
 and stores business data separately under `%LOCALAPPDATA%/EstrattoreScanFatture`.
-It applies WebView2 AppContainer read/execute ACLs to the installed files before
-writing `release.complete` and switching the shortcut. Updates retain the
-current and immediately previous release; older program copies are pruned.
+It validates the installed executable, frontend, PDF/OCR engines, WebView2 and
+completion marker, then applies WebView2 AppContainer read/execute ACLs. After
+successful validation, updates remove all previous code releases immediately;
+they do not wait for the app's first launch. If validation or deletion fails,
+Setup returns an error and retains the old code, but does not automatically
+restore the old shortcut or registry entry.
 The default uninstall preserves business data. Interactive uninstall asks before
 full removal; silent uninstall preserves data unless explicitly passed
 `/REMOVEAPPDATA`. This switch only deletes the application's internal data

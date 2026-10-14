@@ -57,11 +57,13 @@ class DesktopCloseCoordinator:
             if not self.server.drain_mutations(timeout=30):
                 raise RuntimeError("Un salvataggio e' ancora in corso. Attendi e riprova a chiudere.")
             if self.has_ocr() and not self.window.create_confirmation_dialog(
-                "Lavorazione in corso", "Una lavorazione OCR e' in corso. Annullarla e chiudere l'app?",
+                "Lavorazione in corso",
+                "Una lavorazione OCR e' in corso. Interromperla e chiudere l'app? "
+                "Riprendera' alla prossima apertura dal PDF non completato.",
             ):
                 return
             if not self.stop_ocr(timeout=30):
-                raise RuntimeError("L'annullamento richiede ancora tempo. Riprova a chiudere tra poco.")
+                raise RuntimeError("L'interruzione richiede ancora tempo. Riprova a chiudere tra poco.")
             self.close_previews()
             self.allowed = True
             self.window.destroy()
