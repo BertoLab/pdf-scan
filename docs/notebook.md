@@ -6703,3 +6703,35 @@ Problem: the native `wheel` handler is attached to the review viewport from a Re
 Approach: make the effect follow the view lifecycle while retaining its native non-passive wheel listener and cursor-centered zoom math. Verify a one-page PDF at the 35% minimum with no scrollbar, before and after navigation, and confirm that unmodified wheel scrolling does not change zoom.
 
 Closure: the effect now depends on `appView` as well as `pageScale`; it detaches on leaving review and attaches to the newly mounted viewport on return. The isolated local-app Playwright check reproduced the bug before the change: 35% to 40% worked before navigation, but a second Ctrl+wheel after returning stayed at 40%. After the change the same sequence became 35% to 40% to 45%, with one page and no vertical scrollbar. An unmodified wheel left zoom at 45%; after enlarging the page, normal wheel advanced scrollTop from 0 to 280. Build passed; lint has zero errors and the existing unrelated Hook dependency warning. No screenshot was necessary because no visual layout changed; the checked boundary was the live browser wheel event on the local-app viewport, not a mocked handler.
+
+## Installer candidate rc.3 - 2026-10-14
+
+Problem: a release candidate must be attributable to the exact application payload and must not overwrite an earlier candidate with the same public name. The current source has accumulated UI and runtime changes after rc.2; the user now needs a new installable candidate for manual acceptance.
+
+Approach: increment the desktop release revision to rc.3, perform the full clean preparation/frontend lint and build/PyInstaller/Inno path, then inspect the produced executable's name, size, signature state and SHA-256. Preserve rc.1, rc.2, installed application code and user data. A successful compilation is not a clean-machine or in-place upgrade acceptance test.
+
+Micro-steps: (1) check build prerequisites and existing candidate names; (2) increment the release revision; (3) run the full builder without reusing the previous bundle; (4) verify the resulting artifact and relevant packaging tests; (5) record the exact result and remaining manual checks here.
+
+Closure: `pyproject.toml` now selects rc.3. The full builder recreated the packaging Python environment, staged and linted/built the React frontend, prepared bundled OCR/PDF engines and private WebView2, built the PyInstaller onedir payload, then compiled the offline installer with Inno Setup. Output: `build/installer-dist/EstrattoreScanFatture-Setup-0.1.0-rc.3.exe`, 390,427,527 bytes, SHA-256 `C96630DC92000720F1335287BAA139CDFB02DF5DD07C2E592CBCCF9968DDE4A0`; internal release marker `0.1.0-b99cd6edcf68`. The installer is unsigned, consistent with the previous candidates. Existing rc.1/rc.2 artifacts were preserved.
+
+The existing-candidate test had hardcoded rc.2 and, after the version bump, accidentally started a second clean build while the first was running. That caused the first attempt to lose its PyInstaller environment. The test now derives the candidate name from the current project metadata; its six cases pass, and a single clean rebuild then completed successfully. Do not run two packaging preparations concurrently against the shared `build/` paths. Frontend lint completed with zero errors and the existing one Hook dependency warning; npm reported seven dependency advisories. A fresh frozen-bundle smoke passed upload, OCR queue, review, private runtime, native window and clean close using isolated temporary data.
+
+Assessment: the artifact is suitable for the user's next local upgrade test, but compilation and the frozen-bundle smoke do not prove the exact installer upgrade/uninstall sequence or clean-machine compatibility. Those remain manual acceptance checks; no installed application or business data was touched during this build.
+
+## Uninstall data warning - 2026-10-14
+
+Problem: uninstalling program code and deleting persistent business data are separate actions, but the current Yes/No question makes the destructive branch easy to misread. The confirmation must communicate consequences at the decision point without making uninstall itself difficult.
+
+Resolution theory: destructive actions should name the affected data, distinguish the safe and destructive choices in the button labels, default to preservation, and never treat dismissing the dialog as consent. Prefer the operating system's native dialog semantics over custom painting when they provide a clear heading, explanatory body and named actions.
+
+Chosen approach (final): use Inno Setup's native task dialog with a prominent main instruction, specific button labels and short notes. The first/default action preserves all business data; only the explicit second action sets `RemoveBusinessData`. The existing silent `/REMOVEAPPDATA` contract remains unchanged. No extra confirmation should appear after choosing preservation.
+
+Micro-steps: replace the interactive Yes/No prompt in `InitializeUninstall`; compile and exercise the real Inno script with isolated fixture data; inspect the interactive dialog if feasible; build a new immutable RC installer rather than rewriting rc.3; record what was and was not verified.
+
+Implementation note: `TaskDialogMsgBox` provides a distinct main instruction and descriptive custom action labels. The destructive choice alone maps to `IDNO`; closing or failing the dialog leaves `RemoveBusinessData` false. The default visible choice is to preserve business data. `mbError` supplies the native caution treatment rather than a neutral confirmation. Silent uninstall with explicit `/REMOVEAPPDATA` is unchanged.
+
+Test discovery: the fixture installer originally shared production's `AppMutex`, so its silent setup failed while an installed application instance was running. The smoke build now uses its own `ProductId` as mutex while the production installer retains `Local\EstrattoreScanFattureDesktop`. The isolated real-Inno A -> B -> B -> C and uninstall fixture passed with the installed app open. This is a test-isolation correction, not a change to production process ownership.
+
+Closure: the full clean dependency/frontend/PyInstaller/Inno build succeeded for `build/installer-dist/EstrattoreScanFatture-Setup-0.1.0-rc.4.exe` (390,482,507 bytes; SHA-256 `D41BAD1AE3EFE82A1B3ECB72B2EFB9A0946D9835CEC34598C7FE0824457A1062`; internal release marker `0.1.0-a17610474729`). The rc.3 hash remains `C96630DC92000720F1335287BAA139CDFB02DF5DD07C2E592CBCCF9968DDE4A0`, confirming it was not overwritten. The naming regression tests passed 6/6, the real Inno fixture passed install/update/uninstall with an existing production instance open, and `git diff --check` found no whitespace errors. The candidate is unsigned like its predecessor.
+
+The dialog itself was compiled but not visually accepted in an interactive uninstall; fixture tests exercise the silent branches. A real rc.4 uninstall should verify heading, warning icon, both custom action labels, default focus on preservation, and preservation after choosing that action. The user's installed application and business data were not modified by this build.

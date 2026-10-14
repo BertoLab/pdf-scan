@@ -46,7 +46,11 @@ PrivilegesRequired=lowest
 SetupArchitecture=x64
 ArchitecturesAllowed=x64os
 MinVersion=10.0
+#if SmokeBuild
+AppMutex=Local\{#ProductId}
+#else
 AppMutex=Local\EstrattoreScanFattureDesktop
+#endif
 CloseApplications=no
 RestartApplications=no
 UninstallDisplayIcon={app}\releases\{#ReleaseId}\EstrattoreScanFatture.exe
@@ -216,15 +220,22 @@ end;
 function InitializeUninstall: Boolean;
 var
   DataPath: String;
+  Choices: TArrayOfString;
 begin
   Result := True;
   DataPath := ExpandConstant('{#DataRoot}');
   RemoveBusinessData := HasRemoveDataOption;
   if (not RemoveBusinessData) and (not UninstallSilent) and DirExists(DataPath) then
-    RemoveBusinessData := MsgBox(
-      'Vuoi eliminare anche tutti i dati dell''app? Questa operazione cancella fatture, PDF archiviati, anagrafica e bozze da:' + #13#10 + DataPath + #13#10 + #13#10 +
-      'Scegli No per conservare i dati.',
-      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  begin
+    SetArrayLength(Choices, 2);
+    Choices[0] := 'Conserva i dati'#13#10'Rimuovi solo il programma.';
+    Choices[1] := 'Elimina anche i dati'#13#10'Cancella definitivamente tutti i dati dell''app.';
+    RemoveBusinessData := TaskDialogMsgBox(
+      'ATTENZIONE! Vuoi eliminare anche tutti i dati dell''app?',
+      'La disinstallazione del programma non richiede di cancellare i dati.' + #13#10 + #13#10 +
+      'Eliminandoli perderai definitivamente fatture, PDF archiviati, anagrafica e bozze presenti in:' + #13#10 + DataPath,
+      mbError, MB_YESNO, Choices, 0) = IDNO;
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

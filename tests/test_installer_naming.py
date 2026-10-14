@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,8 @@ def test_invalid_desktop_release_is_rejected(stage: str, revision: int | None) -
 def test_existing_candidate_is_rejected_before_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    candidate = tmp_path / "EstrattoreScanFatture-Setup-0.1.0-rc.2.exe"
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    candidate = tmp_path / f"{build_installer.artifact_basename(build_installer.release_label(config))}.exe"
     candidate.write_bytes(b"already published candidate")
     monkeypatch.setattr(build_installer, "DIST", tmp_path)
     monkeypatch.setattr(sys, "argv", ["build_installer.py"])
