@@ -78,13 +78,15 @@ def main() -> None:
         )
 
     if not args.use_existing_bundle:
-        build = subprocess.run(
+        print("[1/4] Preparo le dipendenze e compilo l'app desktop...", flush=True)
+        subprocess.run(
             [sys.executable, str(PROJECT_ROOT / "packaging" / "build_desktop.py")],
-            cwd=PROJECT_ROOT, capture_output=True, text=True,
+            cwd=PROJECT_ROOT, check=True,
         )
-        if build.returncode:
-            raise RuntimeError(f"Desktop bundle build failed:\n{build.stdout[-6000:]}\n{build.stderr[-2000:]}")
-        print("\n".join(build.stdout.splitlines()[-5:]))
+    else:
+        print("[1/4] Riutilizzo il bundle desktop esistente...", flush=True)
+
+    print("[2/4] Verifico il bundle e calcolo la sua impronta...", flush=True)
     _validate_bundle(APP_DIR)
     release_id = f"{version}-{bundle_digest(APP_DIR)[:12]}"
     if args.smoke_suffix:
@@ -106,16 +108,15 @@ def main() -> None:
         defines["ProductId"] = "EstrattoreScanFatture.Desktop.Smoke"
         defines["DataRoot"] = str(PROJECT_ROOT / "build" / "installer-smoke" / "data" / "EstrattoreScanFatture")
         defines["ShortcutName"] = "Estrattore Scan Fatture (Smoke)"
+    print("[3/4] Verifico il compilatore dell'installer...", flush=True)
     compiler = prepare_compiler()
     command = [str(compiler), *(f"/D{name}={value}" for name, value in defines.items()),
                f"/O{DIST}", str(SCRIPT)]
-    result = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True)
-    if result.returncode:
-        raise RuntimeError(f"Inno Setup failed:\n{result.stdout[-6000:]}\n{result.stderr[-2000:]}")
-    print("\n".join(result.stdout.splitlines()[-7:]))
+    print("[4/4] Compilo l'installer offline...", flush=True)
+    subprocess.run(command, cwd=PROJECT_ROOT, check=True)
     if not output.is_file():
         raise RuntimeError(f"Inno Setup did not create {output}")
-    print(f"Installer: {output}")
+    print(f"Completato. Installer: {output}", flush=True)
 
 
 if __name__ == "__main__":

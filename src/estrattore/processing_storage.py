@@ -1227,14 +1227,6 @@ def mutate_review_invoice_segmentation(
         for state in review_states:
             _refresh_review_state(state)
 
-        if result.created_invoice_id:
-            _cascade_review_overflow(
-                review_states=review_states,
-                current_state=current_state,
-                process_payload=process_payload,
-                paths=paths,
-            )
-
         selected_state = _review_state_for_invoice(
             review_states,
             document_id,
@@ -1635,67 +1627,6 @@ def _processed_invoice_ref_from_payload(invoice: dict) -> ProcessedInvoiceRef:
         ],
         display_number=_positive_int(invoice.get("display_number")),
     )
-
-
-def _cascade_review_overflow(
-    review_states: list[dict],
-    current_state: dict,
-    process_payload: dict,
-    paths: RuntimePaths,
-) -> None:
-    state_index = review_states.index(current_state)
-    while state_index < len(review_states):
-        state = review_states[state_index]
-        pending = [
-            invoice
-            for invoice in state["review_payload"].get("invoices", [])
-            if isinstance(invoice, dict)
-            and invoice.get("status", "pending") == "pending"
-        ]
-        if len(pending) <= REVIEW_BATCH_SIZE:
-            break
-
-        overflow_invoice = pending[-1]
-        state["review_payload"]["invoices"].remove(overflow_invoice)
-        if state_index + 1 >= len(review_states):
-            review_states.append(
-                _new_review_state(process_payload, paths)
-            )
-        next_state = review_states[state_index + 1]
-        next_state["review_payload"].setdefault("invoices", []).insert(
-            0,
-            overflow_invoice,
-        )
-        _refresh_review_state(state)
-        _refresh_review_state(next_state)
-        state_index += 1
-
-
-def _new_review_state(process_payload: dict, paths: RuntimePaths) -> dict:
-    batch_number = _next_global_review_batch_number(paths)
-    batch_id = f"review_batch_{batch_number:04d}"
-    base_path = f"/runtime/manifests/_review_queue/{batch_id}"
-    batch_dir = _global_review_queue_dir(paths) / batch_id
-    batch_ref = {
-        "id": batch_id,
-        "label": f"Revisione {batch_number:03d}",
-        "base_path": base_path,
-        "invoice_count": 0,
-    }
-    process_payload.setdefault("review_batches", []).append(batch_ref)
-    return {
-        "batch_ref": batch_ref,
-        "base_path": base_path,
-        "batch_dir": batch_dir,
-        "review_index_path": batch_dir / "review_batch_index.json",
-        "viewer_index_path": batch_dir / "viewer_index.json",
-        "review_payload": {
-            "review_batch_id": batch_id,
-            "invoice_count": 0,
-            "invoices": [],
-        },
-        "viewer_payload": {"documents": []},
-    }
 
 
 def review_batch_dir_from_base_path(

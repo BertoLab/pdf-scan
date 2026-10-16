@@ -1246,7 +1246,7 @@ def _write_registry(output_path: Path, payload: dict[str, Any]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_name(f".{output_path.name}.writing")
     temporary_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
     temporary_path.replace(output_path)

@@ -1,7 +1,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent, ReactNode, RefObject } from 'react'
-import { Archive, CloudUpload, Cog, EllipsisVertical, Search } from 'lucide-react'
+import { Archive, CloudUpload, Cog, EllipsisVertical, Lock, LockOpen, Search } from 'lucide-react'
 import './App.css'
 import { installDesktopLifecycle } from './desktopLifecycle'
 import { normalizeMoneyValueForInput } from './moneyFormatting'
@@ -37,8 +37,9 @@ const registryApiBaseUrl =
   (window.location.port === '5173' ? 'http://127.0.0.1:8765' : window.location.origin)
 const manifestCacheKey = String(Date.now())
 const BASE_PAGE_SCALE = 0.45
-const MIN_PAGE_SCALE = 0.2
+const MIN_PAGE_SCALE = 0.1
 const FIELD_FOCUS_SCALE = 1.4
+const ZOOM_STEP = 0.05
 const REGISTRY_TABLE_ROW_HEIGHT = 64
 const REGISTRY_TABLE_HEADER_HEIGHT = 56
 const REGISTRY_TABLE_OVERSCAN_ROWS = 8
@@ -1178,6 +1179,47 @@ function parseInvoiceMoneyValue(value: string) {
   return Number.isFinite(amount) ? amount : null
 }
 
+function reconcileInvoiceAmounts(fields: InvoiceField[]) {
+  const fieldsByKind = new Map(fields.map((field) => [field.kind, field]))
+  const amounts = (['totale_fattura', 'ritenuta', 'totale_netto_fattura'] as const).map(
+    (kind) => {
+      const field =
+        fieldsByKind.get(`economic_summary.${kind}.value`) ?? fieldsByKind.get(kind)
+      const value = field?.value.trim() ?? ''
+      const amount = value ? parseInvoiceMoneyValue(value) : null
+      const cents = amount === null ? null : Math.round(amount * 100)
+      return { field, value, cents: cents !== null && Number.isSafeInteger(cents) ? cents : null }
+    },
+  )
+  const [total, withholding, net] = amounts
+  const validCount = amounts.filter(({ cents }) => cents !== null).length
+
+  if (validCount === 3) {
+    return { mismatch: total.cents !== withholding.cents! + net.cents!, suggestion: null }
+  }
+
+  if (validCount !== 2 || amounts.some(({ value, cents }) => value && cents === null)) {
+    return { mismatch: false, suggestion: null }
+  }
+
+  const missing = amounts.find(({ value }) => !value)
+  if (!missing?.field) {
+    return { mismatch: false, suggestion: null }
+  }
+  const suggestedCents = !total.value
+    ? withholding.cents! + net.cents!
+    : !withholding.value
+      ? total.cents! - net.cents!
+      : total.cents! - withholding.cents!
+  return {
+    mismatch: false,
+    suggestion:
+      suggestedCents >= 0 && Number.isSafeInteger(suggestedCents)
+        ? { kind: missing.field.kind, value: (suggestedCents / 100).toFixed(2) }
+        : null,
+  }
+}
+
 function normalizeLegacyWithholdingFields(fields: InvoiceField[]) {
   const fieldsByKind = new Map(fields.map((field) => [field.kind, field]))
   const total = parseInvoiceMoneyValue(
@@ -1316,8 +1358,7 @@ function validateInvoiceFields(fields: InvoiceField[]): InvoiceSaveValidationIss
   )
 
   if (totaleFattura !== null && ritenuta !== null && totaleNetto !== null) {
-    const expectedNet = totaleFattura - ritenuta
-    if (Math.abs(expectedNet - totaleNetto) > 0.01) {
+    if (reconcileInvoiceAmounts(fields).mismatch) {
       issues.push({
         kind: 'economic_mismatch',
         title: 'Totali da controllare',
@@ -2980,8 +3021,9 @@ function BatchReviewActionConfirmDialog({
   )
 }
 
-function BatchDiscardProgressDialog() {
+function BatchReviewProgressDialog({ action }: { action: 'save' | 'discard' }) {
   const dialogRef = useRef<HTMLElement>(null)
+  const isDiscard = action === 'discard'
 
   useEffect(() => {
     dialogRef.current?.focus()
@@ -2997,16 +3039,22 @@ function BatchDiscardProgressDialog() {
     <div className="registry-dialog-backdrop segmentation-progress-backdrop">
       <section
         ref={dialogRef}
-        className="registry-dialog segmentation-progress-dialog batch-discard-progress-dialog"
+        className="registry-dialog segmentation-progress-dialog batch-review-progress-dialog"
         role="alertdialog"
         aria-modal="true"
         aria-busy="true"
-        aria-labelledby="batch-discard-progress-title"
+        aria-labelledby="batch-review-progress-title"
         tabIndex={-1}
       >
         <div className="segmentation-progress-content">
-          <h2 id="batch-discard-progress-title">Scarto del gruppo in corso</h2>
-          <p>Stiamo eliminando i record delle fatture. Attendere...</p>
+          <h2 id="batch-review-progress-title">
+            {isDiscard ? 'Scarto del gruppo in corso' : 'Salvataggio del gruppo in corso'}
+          </h2>
+          <p>
+            {isDiscard
+              ? 'Stiamo eliminando i record delle fatture. Attendere...'
+              : 'Stiamo salvando le fatture nel registro. Attendere...'}
+          </p>
           <div className="segmentation-progress-bar" aria-hidden="true"><span /></div>
         </div>
       </section>
@@ -3967,19 +4015,25 @@ function reviewDraftIdForRelatedInvoice(
 
 function fitInvoicePageScale(invoice: ViewerInvoice | undefined, viewport: HTMLDivElement | null): number {
   const widestPage = Math.max(0, ...(invoice?.pages.map((page) => page.width) ?? []))
-  if (!viewport || widestPage === 0) return BASE_PAGE_SCALE
+  const tallestPage = Math.max(0, ...(invoice?.pages.map((page) => page.height) ?? []))
+  if (!viewport || widestPage === 0 || tallestPage === 0) return BASE_PAGE_SCALE
   const availableWidth = Math.max(0, viewport.clientWidth - 52)
-  return Math.max(
-    MIN_PAGE_SCALE,
-    Math.min(BASE_PAGE_SCALE, Math.floor((availableWidth / widestPage) * 100) / 100),
+  const availableHeight = Math.max(0, viewport.clientHeight - 40)
+  const fitScale = Math.min(
+    BASE_PAGE_SCALE,
+    availableWidth / widestPage,
+    availableHeight / tallestPage,
   )
+  return Math.max(MIN_PAGE_SCALE, Math.floor(fitScale * 100) / 100)
 }
 
 function App() {
   const [invoices, setInvoices] = useState<ViewerInvoice[]>([])
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null)
+  const [appView, setAppView] = useState<AppView>('review')
   const [pageScale, setPageScale] = useState(BASE_PAGE_SCALE)
   const [zoomInput, setZoomInput] = useState('45')
+  const [isZoomLocked, setIsZoomLocked] = useState(false)
   const [selectedFieldKind, setSelectedFieldKind] = useState<string | null>(null)
   const [originalScanFieldKind, setOriginalScanFieldKind] = useState<string | null>(null)
   const [showAllTargetBoxes, setShowAllTargetBoxes] = useState(false)
@@ -4004,7 +4058,7 @@ function App() {
   const [isDocumentImportRunning, setIsDocumentImportRunning] = useState(false)
   const [invoiceReviewActionState, setInvoiceReviewActionState] =
     useState<InvoiceReviewActionState>(null)
-  const [isBatchDiscarding, setIsBatchDiscarding] = useState(false)
+  const [batchReviewProgressAction, setBatchReviewProgressAction] = useState<'save' | 'discard' | null>(null)
   const batchReviewActionInFlightRef = useRef(false)
   const [pendingSegmentationAction, setPendingSegmentationAction] =
     useState<PendingSegmentationAction | null>(null)
@@ -4088,17 +4142,23 @@ function App() {
   )
   useEffect(() => {
     if (!currentInvoice) return
+    if (!documentViewportRef.current?.clientHeight) return
     const fitKey = `${currentInvoice.basePath}:${currentInvoice.invoiceId}:${currentInvoice.pages.map((page) => page.width).join(',')}`
     if (lastFittedInvoiceRef.current === fitKey) return
     lastFittedInvoiceRef.current = fitKey
     const scale = fitInvoicePageScale(currentInvoice, documentViewportRef.current)
     setPageScale(scale)
     setZoomInput(String(Math.round(scale * 100)))
-  }, [currentInvoice])
+  }, [currentInvoice, appView])
+
+  useEffect(() => {
+    setIsZoomLocked(false)
+  }, [selectedInvoiceId])
   const currentInvoiceIndex = invoices.findIndex(
     (invoice) => invoice.invoiceId === selectedInvoiceId,
   )
   const displayedFields = currentInvoice?.fields ?? []
+  const amountReconciliation = reconcileInvoiceAmounts(displayedFields)
   const selectedField = displayedFields.find(
     (field) => field.kind === selectedFieldKind,
   )
@@ -4118,7 +4178,6 @@ function App() {
   const [manifestError, setManifestError] = useState<string | null>(null)
   const [batches, setBatches] = useState<ViewerBatchIndexEntry[]>([])
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null)
-  const [appView, setAppView] = useState<AppView>('review')
   const [invoiceArchiveRecords, setInvoiceArchiveRecords] = useState<
     InvoiceArchiveRecord[]
   >([])
@@ -5738,7 +5797,7 @@ function App() {
     const isDiscard = action === 'discard'
     batchReviewActionInFlightRef.current = true
     setPendingBatchReviewAction(null)
-    if (isDiscard) setIsBatchDiscarding(true)
+    setBatchReviewProgressAction(action)
     setInvoiceReviewActionState({
       kind: isDiscard ? 'discarding' : 'saving',
       message: isDiscard
@@ -5789,7 +5848,7 @@ function App() {
       })
       .finally(() => {
         batchReviewActionInFlightRef.current = false
-        if (isDiscard) setIsBatchDiscarding(false)
+        setBatchReviewProgressAction(null)
       })
   }
 
@@ -7680,11 +7739,11 @@ function App() {
   }
 
   function zoomOut() {
-    setZoomScale(Math.max(MIN_PAGE_SCALE, Number((pageScale - 0.1).toFixed(2))))
+    setZoomScale(Math.max(MIN_PAGE_SCALE, Number((pageScale - ZOOM_STEP).toFixed(2))))
   }
 
   function zoomIn() {
-    setZoomScale(Math.min(1.5, Number((pageScale + 0.1).toFixed(2))))
+    setZoomScale(Math.min(1.5, Number((pageScale + ZOOM_STEP).toFixed(2))))
   }
 
   function applyZoomInput() {
@@ -7748,6 +7807,8 @@ function App() {
     setSelectedFieldKind(field.kind)
     setOriginalScanFieldKind(null)
 
+    if (isZoomLocked) return
+
     const evidence = getFieldEvidence(field, currentInvoice)
 
     if (!evidence) {
@@ -7779,6 +7840,8 @@ function App() {
 
     setSelectedFieldKind(field.kind)
     setOriginalScanFieldKind(field.kind)
+
+    if (isZoomLocked) return
 
     const evidence = getFieldEvidence(field, currentInvoice, true)
     if (!evidence) {
@@ -7821,9 +7884,9 @@ function App() {
 
       event.preventDefault()
 
-      const zoomStep = event.deltaY > 0 ? -0.05 : 0.05
+      const zoomStep = event.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP
       const nextScale = pageScale + zoomStep
-      const clampedScale = Math.min(1.5, Math.max(0.35, nextScale))
+      const clampedScale = Math.min(1.5, Math.max(MIN_PAGE_SCALE, nextScale))
       const roundedScale = Number(clampedScale.toFixed(2))
       const scaleRatio = roundedScale / pageScale
       const viewportRect = activeViewport.getBoundingClientRect()
@@ -7857,6 +7920,15 @@ function App() {
       const isNonFieldInput =
         target instanceof HTMLInputElement &&
         !target.hasAttribute('data-field-index')
+
+      if (
+        isDesktopApp && appView === 'review' && selectedInvoiceId &&
+        event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'l'
+      ) {
+        event.preventDefault()
+        setIsZoomLocked((locked) => !locked)
+        return
+      }
 
       if (event.ctrlKey && event.key === 'ArrowDown') {
         event.preventDefault()
@@ -7899,7 +7971,7 @@ function App() {
     return () => {
       window.removeEventListener('keydown', handleInvoiceShortcut)
     }
-  }, [invoices, selectedFieldIndex, selectedFieldKind, selectedInvoiceId])
+  }, [appView, invoices, selectedFieldIndex, selectedFieldKind, selectedInvoiceId])
 
   return (
     <main className={appView !== 'review' ? 'registry-page-mode' : ''}>
@@ -8900,6 +8972,16 @@ function App() {
                 +
               </button>
             </div>
+            <button
+              type="button"
+              className={`document-zoom-lock-button${isZoomLocked ? ' active' : ''}`}
+              aria-label={isZoomLocked ? 'Sblocca zoom automatico' : 'Blocca zoom automatico'}
+              aria-pressed={isZoomLocked}
+              title={`${isZoomLocked ? 'Sblocca' : 'Blocca'} lo zoom automatico sui campi${isDesktopApp ? ' (Ctrl+L)' : ''}`}
+              onClick={() => setIsZoomLocked((locked) => !locked)}
+            >
+              {isZoomLocked ? <Lock size={16} strokeWidth={2.3} /> : <LockOpen size={16} strokeWidth={2.3} />}
+            </button>
             <button className="document-reset-button" onClick={resetDocumentView}>
               Ripristina
             </button>
@@ -9172,7 +9254,7 @@ function App() {
           />
           Tutti i campi
         </label>
-        {invoiceReviewActionState && !isBatchDiscarding ? (
+        {invoiceReviewActionState && !batchReviewProgressAction ? (
           <p className={`invoice-review-action-status ${invoiceReviewActionState.kind}`}>
             {invoiceReviewActionState.message}
           </p>
@@ -9235,6 +9317,12 @@ function App() {
                 field.kind,
                 field.value,
               )
+              const hasAmountMismatch =
+                amountReconciliation.mismatch && moneyFieldKinds.has(field.kind)
+              const suggestedAmount =
+                amountReconciliation.suggestion?.kind === field.kind
+                  ? amountReconciliation.suggestion.value
+                  : null
 
               return (
                 <li
@@ -9247,6 +9335,7 @@ function App() {
                     fieldConflict ? 'registry-conflict-field' : '',
                     isViewingOriginalScan ? 'original-scan-view-field' : '',
                     hasInvalidMoney ? 'invalid-money-field' : '',
+                    hasAmountMismatch ? 'economic-mismatch-field' : '',
                   ]
                     .filter(Boolean)
                     .join(' ')}
@@ -9331,6 +9420,7 @@ function App() {
                         <input
                           data-field-index={fieldIndex}
                           value={field.value}
+                          aria-invalid={hasInvalidMoney || hasAmountMismatch}
                           aria-autocomplete="list"
                           aria-expanded={isSuggestionOpen}
                           onFocus={() => {
@@ -9536,6 +9626,21 @@ function App() {
                       <em>({formatOcrConfidence(field.ocr_confidence)})</em>
                     ) : null}
                   </span>
+                  {suggestedAmount ? (
+                    <button
+                      type="button"
+                      className="invoice-amount-suggestion"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => updateFieldValue(field.kind, suggestedAmount)}
+                    >
+                      Usa importo suggerito: {suggestedAmount}
+                    </button>
+                  ) : null}
+                  {hasAmountMismatch && invoiceFieldAliases.totale_netto_fattura.includes(field.kind) ? (
+                    <small className="invoice-amount-mismatch-note">
+                      Totale - ritenuta deve essere uguale al netto.
+                    </small>
+                  ) : null}
                 </li>
               )
             })}
@@ -9573,7 +9678,9 @@ function App() {
           onConfirm={confirmBatchReviewAction}
         />
       ) : null}
-      {isBatchDiscarding ? <BatchDiscardProgressDialog /> : null}
+      {batchReviewProgressAction ? (
+        <BatchReviewProgressDialog action={batchReviewProgressAction} />
+      ) : null}
       {isProcessingCancelConfirmOpen ? (
         <ProcessingCancelConfirmDialog
           onCancel={() => {

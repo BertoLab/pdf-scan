@@ -47,6 +47,7 @@ def test_save_reviewed_invoice_persists_snapshot_and_removes_it_from_review(
     try:
         paths, review_batch = _processed_review_batch(workspace)
         invoice_payload = _invoice_payload("invoice-001")
+        invoice_payload["pages"] = [{"page": 1, "tokens": [{"text": "Importo \u20ac 85,79"}]}]
         _mock_pdf_archive(monkeypatch, paths)
 
         record = save_reviewed_invoice(
@@ -77,6 +78,10 @@ def test_save_reviewed_invoice_persists_snapshot_and_removes_it_from_review(
         assert record["archived_source_pdf_path"] == "archive/sources/source.pdf"
         assert record["archived_source_pdf_url"] == "/runtime/archive/sources/source.pdf"
         assert registry["records"][0]["invoice"]["fields"][0]["value"] == "85,79"
+        assert registry["records"][0]["invoice"]["pages"] == invoice_payload["pages"]
+        assert paths.invoice_registry_file.read_text(encoding="utf-8") == json.dumps(
+            registry, ensure_ascii=False, separators=(",", ":")
+        )
         assert list_review_batches(paths) == []
 
         assert not review_batch_dir_from_base_path(

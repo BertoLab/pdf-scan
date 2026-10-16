@@ -26,6 +26,7 @@ def main() -> None:
         raise SystemExit("Run packaging/prepare_build.py before --skip-preparation")
     _validate_inputs()
     environment = dict(os.environ, PYINSTALLER_CONFIG_DIR=str(BUILD_DIR / "pyinstaller-cache"))
+    print("  Compilazione del programma desktop...", flush=True)
     subprocess.run(
         [
             str(python), "-m", "PyInstaller", "--noconfirm",

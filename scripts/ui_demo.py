@@ -95,7 +95,7 @@ def _fields(number: int) -> list[dict]:
             "value": f"DEMO-{number:03d}" if kind == "numero_fattura" else value,
             "score": 0.96,
             "page": number,
-            "bbox": None,
+            "bbox": {"x1": 95, "y1": 555, "x2": 525, "y2": 615} if kind == "numero_fattura" else None,
         }
         for kind, label, value in FIELD_VALUES
     ]

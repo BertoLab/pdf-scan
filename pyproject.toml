@@ -21,7 +21,7 @@ ocr = ["pytesseract>=0.3.13"]
 
 [tool.estrattore.desktop_release]
 stage = "rc"
-revision = 4
+revision = 6
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

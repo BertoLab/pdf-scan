@@ -52,6 +52,7 @@ def main() -> None:
     if os.name != "nt" or sys.version_info[:2] != (3, 12) or struct.calcsize("P") != 8:
         raise SystemExit("Build requires 64-bit Windows and Python 3.12")
 
+    print("  Preparazione 1/4: ambiente Python e dipendenze...", flush=True)
     BUILD_DIR.mkdir(exist_ok=True)
     _recreate_generated_dir(VENV_DIR)
     _run([sys.executable, "-m", "venv", str(VENV_DIR)])
@@ -71,6 +72,7 @@ def main() -> None:
         "import estrattore, openpyxl, PIL, pdf2image, pypdf, pytesseract, tkinter, webview, PyInstaller",
     ])
 
+    print("  Preparazione 2/4: frontend React...", flush=True)
     _recreate_generated_dir(FRONTEND_WORK_DIR)
     _stage_frontend_sources()
     npm = shutil.which("npm.cmd")
@@ -80,7 +82,9 @@ def main() -> None:
     _run([npm, "run", "lint"], cwd=FRONTEND_WORK_DIR)
     _run([npm, "run", "build"], cwd=FRONTEND_WORK_DIR)
     _stage_built_frontend()
+    print("  Preparazione 3/4: motori PDF e OCR...", flush=True)
     prepare_native()
+    print("  Preparazione 4/4: runtime della finestra...", flush=True)
     prepare_webview()
 
     print(f"Python environment: {VENV_DIR}")

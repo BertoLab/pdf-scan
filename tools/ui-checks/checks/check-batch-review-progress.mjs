@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const baseUrl = process.argv[2] ?? "http://127.0.0.1:4187";
 const screenshotRoot = path.join(root, "tmp", "ui-checks");
 await fs.mkdir(screenshotRoot, { recursive: true });
-const screenshotDir = await fs.mkdtemp(path.join(screenshotRoot, "batch-discard-"));
+const screenshotDir = await fs.mkdtemp(path.join(screenshotRoot, "batch-review-progress-"));
 const browser = await chromium.launch();
 
 const invoiceManifest = {
@@ -23,12 +23,12 @@ const invoiceManifest = {
   })),
 };
 
-async function runScenario(name, viewport, failSecond) {
+async function runScenario(action, name, viewport, failSecond) {
   const page = await browser.newPage({ viewport });
   let completed = 0;
-  let discardCalls = 0;
+  let actionCalls = 0;
   let releaseFirst;
-  const firstDiscardHeld = new Promise((resolve) => { releaseFirst = resolve; });
+  const firstActionHeld = new Promise((resolve) => { releaseFirst = resolve; });
   const json = (route, payload, status = 200) => route.fulfill({
     status,
     contentType: "application/json",
@@ -38,11 +38,11 @@ async function runScenario(name, viewport, failSecond) {
   await page.route("**/*", async (route) => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
-    if (request.method() === "POST" && pathname === "/invoices/discard") {
-      discardCalls += 1;
-      if (discardCalls === 1) await firstDiscardHeld;
-      if (failSecond && discardCalls === 2) {
-        await json(route, { error: "Scarto non riuscito" }, 500);
+    if (request.method() === "POST" && pathname === `/invoices/${action}`) {
+      actionCalls += 1;
+      if (actionCalls === 1) await firstActionHeld;
+      if (failSecond && actionCalls === 2) {
+        await json(route, { error: "Operazione non riuscita" }, 500);
       } else {
         completed += 1;
         await json(route, { ok: true });
@@ -73,15 +73,22 @@ async function runScenario(name, viewport, failSecond) {
 
   try {
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await page.getByRole("button", { name: "Scarta gruppo" }).first().click();
-    await page.locator(".batch-review-action-dialog").getByRole("button", { name: "Scarta gruppo" }).click();
-    const progress = page.getByRole("alertdialog", { name: "Scarto del gruppo in corso" });
+    const isDiscard = action === "discard";
+    const actionLabel = isDiscard ? "Scarta gruppo" : "Salva gruppo";
+    const confirmLabel = isDiscard ? actionLabel : "Continua e salva gruppo";
+    const progressTitle = isDiscard ? "Scarto del gruppo in corso" : "Salvataggio del gruppo in corso";
+    await page.getByRole("button", { name: actionLabel }).first().click();
+    await page.locator(".batch-review-action-dialog").getByRole("button", { name: confirmLabel }).click();
+    const progress = page.getByRole("alertdialog", { name: progressTitle });
     await progress.waitFor();
-    assert.match(await progress.innerText(), /Stiamo eliminando i record delle fatture/);
+    assert.match(
+      await progress.innerText(),
+      isDiscard ? /Stiamo eliminando i record delle fatture/ : /Stiamo salvando le fatture nel registro/,
+    );
     await page.keyboard.press("Escape");
     assert.equal(await progress.isVisible(), true);
-    assert.equal(await page.getByRole("button", { name: "Scarta gruppo" }).isDisabled(), true);
-    assert.equal(discardCalls, 1);
+    assert.equal(await page.getByRole("button", { name: actionLabel }).isDisabled(), true);
+    assert.equal(actionCalls, 1);
     const bar = progress.locator(".segmentation-progress-bar span");
     await page.waitForTimeout(450);
     const firstBarPosition = await bar.evaluate((element) => getComputedStyle(element).transform);
@@ -91,12 +98,12 @@ async function runScenario(name, viewport, failSecond) {
     await page.screenshot({ path: path.join(screenshotDir, `${name}-progress.png`) });
     releaseFirst();
     await progress.waitFor({ state: "hidden" });
-    assert.equal(discardCalls, 2);
+    assert.equal(actionCalls, 2);
     if (failSecond) {
       await page.getByText(/Operazione sul gruppo non completata/).waitFor();
       await page.screenshot({ path: path.join(screenshotDir, `${name}-error.png`) });
     } else {
-      await page.getByText("2 fatture spostate tra le scartate.").waitFor();
+      await page.getByText(isDiscard ? "2 fatture spostate tra le scartate." : "2 fatture salvate.").waitFor();
     }
   } finally {
     releaseFirst();
@@ -105,10 +112,12 @@ async function runScenario(name, viewport, failSecond) {
 }
 
 try {
-  await runScenario("desktop-success", { width: 1440, height: 900 }, false);
-  await runScenario("compact-success", { width: 1024, height: 768 }, false);
-  await runScenario("desktop-partial-failure", { width: 1440, height: 900 }, true);
-  console.log(`Batch discard UI check passed; screenshots: ${screenshotDir}`);
+  for (const action of ["save", "discard"]) {
+    await runScenario(action, `${action}-desktop-success`, { width: 1440, height: 900 }, false);
+    await runScenario(action, `${action}-compact-success`, { width: 1024, height: 768 }, false);
+    await runScenario(action, `${action}-desktop-partial-failure`, { width: 1440, height: 900 }, true);
+  }
+  console.log(`Batch review progress UI check passed; screenshots: ${screenshotDir}`);
 } finally {
   await browser.close();
   if (!process.argv.includes("--keep")) await fs.rm(screenshotDir, { recursive: true, force: true });

@@ -389,7 +389,7 @@ aside:first-child p {
   width: min(600px, calc(100vw - 2rem));
 }
 
-.batch-discard-progress-dialog:focus {
+.batch-review-progress-dialog:focus {
   outline: none;
 }
 
@@ -1771,6 +1771,25 @@ button.review-actions-menu-button:hover:not(:disabled) {
   background: #fff;
   color: #47584f;
   white-space: nowrap;
+}
+
+.zoom-controls .document-zoom-lock-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  min-width: 34px;
+  height: 30px;
+  padding: 0;
+  border-color: #c4cec8;
+  background: #fff;
+  color: #47584f;
+}
+
+.zoom-controls .document-zoom-lock-button.active {
+  border-color: #216951;
+  background: #e6f2eb;
+  color: #174c3a;
 }
 
 .developer-tools {
@@ -4092,4 +4111,45 @@ button.review-actions-menu-button:hover:not(:disabled) {
 
 .invoice-fields-panel li.invalid-money-field strong {
   color: #9f1c16;
+}
+
+.invoice-fields-panel li.economic-mismatch-field {
+  border-color: #e2a4a4;
+  border-left-color: #b42318;
+  background: #fff1f1;
+}
+
+.invoice-fields-panel li.economic-mismatch-field input {
+  border-color: #c93838;
+  background: #fff8f8;
+  box-shadow: 0 0 0 2px rgba(180, 35, 24, 0.12);
+}
+
+.invoice-fields-panel li.economic-mismatch-field strong,
+.invoice-amount-mismatch-note {
+  color: #9f1c16;
+}
+
+.invoice-fields-panel li > .invoice-amount-suggestion {
+  justify-self: start;
+  margin-left: calc(1em + 0.15em);
+  padding: 3px 7px;
+  border: 1px solid #a9c8bc;
+  border-radius: 5px;
+  background: #f0f8f3;
+  color: #165840;
+  font: inherit;
+  font-size: 0.75em;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.invoice-fields-panel li > .invoice-amount-suggestion:hover {
+  background: #e3f2e8;
+  transform: translateY(-1px);
+}
+
+.invoice-fields-panel li > .invoice-amount-mismatch-note {
+  margin-left: calc(1em + 0.15em);
+  font-size: 0.74em;
 }

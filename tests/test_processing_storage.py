@@ -1403,7 +1403,7 @@ def test_segmentation_move_merges_single_page_invoice_and_renumbers_following() 
         _clean_workspace(workspace)
 
 
-def test_segmentation_split_creates_invoice_and_cascades_review_overflow() -> None:
+def test_segmentation_split_keeps_new_invoice_in_original_review() -> None:
     workspace = _workspace()
     try:
         source_file = workspace / "source.pdf"
@@ -1422,10 +1422,14 @@ def test_segmentation_split_creates_invoice_and_cascades_review_overflow() -> No
                     "invoice_id": f"invoice-{number:03d}",
                     "display_number": number,
                     "title": f"Fattura {number:03d}",
-                    "page_numbers": [1, 2] if number == 1 else [number + 1],
+                    "page_numbers": (
+                        [15, 16] if number == 15
+                        else [number] if number < 15
+                        else [number + 1]
+                    ),
                     "fields": [],
                 }
-                for number in range(1, 16)
+                for number in range(1, 31)
             ]
             manifest_path = output_dir / "viewer_manifest.json"
             manifest_path.write_text(
@@ -1435,7 +1439,7 @@ def test_segmentation_split_creates_invoice_and_cascades_review_overflow() -> No
                         "source_file": "source.pdf",
                         "pages": [
                             {"page": page, "targets": []}
-                            for page in range(1, 17)
+                            for page in range(1, 32)
                         ],
                         "invoices": invoices,
                     }
@@ -1451,12 +1455,13 @@ def test_segmentation_split_creates_invoice_and_cascades_review_overflow() -> No
             review_batch_size=15,
             now=datetime(2026, 8, 10, 11, 0, 0),
         )
+        promote_batch_sources(imported_batch, run_index.process_id, paths)
 
         source_draft = save_review_invoice_draft(
             {
                 "review_batch_base_path": run_index.review_batches[0].base_path,
                 "document_id": "doc_000001",
-                "invoice_id": "invoice-001",
+                "invoice_id": "invoice-015",
                 "fields": [
                     {
                         "kind": "numero_fattura",
@@ -1472,7 +1477,7 @@ def test_segmentation_split_creates_invoice_and_cascades_review_overflow() -> No
             {
                 "review_batch_base_path": run_index.review_batches[0].base_path,
                 "document_id": "doc_000001",
-                "invoice_id": "invoice-002",
+                "invoice_id": "invoice-014",
                 "fields": [
                     {
                         "kind": "numero_fattura",
@@ -1489,7 +1494,7 @@ def test_segmentation_split_creates_invoice_and_cascades_review_overflow() -> No
             {
                 "review_batch_base_path": run_index.review_batches[0].base_path,
                 "document_id": "doc_000001",
-                "invoice_id": "invoice-001",
+                "invoice_id": "invoice-015",
                 "operation": "split",
                 "after_position": 1,
             },
@@ -1497,13 +1502,14 @@ def test_segmentation_split_creates_invoice_and_cascades_review_overflow() -> No
         )
 
         listed_reviews = list_review_batches(paths)
-        assert [review.invoice_count for review in listed_reviews] == [15, 1]
+        assert [review.invoice_count for review in listed_reviews] == [16, 15]
+        assert result["selected_batch_id"] == run_index.review_batches[0].base_path
         assert load_processing_run_index(
             paths.manifests_dir / run_index.process_id
-        ).invoice_count == 16
+        ).invoice_count == 31
         assert result["created_invoice_id"].startswith("invoice-manual-")
         assert set(result["affected_invoice_ids"]) == {
-            "invoice-001",
+            "invoice-015",
             result["created_invoice_id"],
         }
         remaining_drafts = list_review_invoice_drafts(paths)["drafts"]
@@ -1529,10 +1535,23 @@ def test_segmentation_split_creates_invoice_and_cascades_review_overflow() -> No
         second_payload = json.loads(
             (second_review_dir / "review_batch_index.json").read_text(encoding="utf-8")
         )
-        assert first_payload["invoices"][1]["invoice_id"] == result["created_invoice_id"]
-        assert first_payload["invoices"][1]["title"] == "Fattura 002"
-        assert second_payload["invoices"][0]["invoice_id"] == "invoice-015"
-        assert second_payload["invoices"][0]["title"] == "Fattura 016"
+        assert first_payload["invoice_count"] == 16
+        assert first_payload["invoices"][14]["invoice_id"] == "invoice-015"
+        assert first_payload["invoices"][15]["invoice_id"] == result["created_invoice_id"]
+        assert first_payload["invoices"][15]["title"] == "Fattura 016"
+        assert second_payload["invoice_count"] == 15
+        assert second_payload["invoices"][0]["invoice_id"] == "invoice-016"
+        assert second_payload["invoices"][0]["title"] == "Fattura 017"
+        first_viewer_index = first_review_dir / "viewer_index.json"
+        first_viewer = json.loads(first_viewer_index.read_text(encoding="utf-8"))
+        assert len(first_viewer["documents"][0]["review_invoice_ids"]) == 16
+
+        first_viewer_index.unlink()
+        assert recover_missing_review_batches(paths) == 1
+        restored_viewer = json.loads(first_viewer_index.read_text(encoding="utf-8"))
+        assert len(restored_viewer["documents"][0]["review_invoice_ids"]) == 16
+        assert restored_viewer["documents"][0]["review_invoice_ids"][-1] == result["created_invoice_id"]
+        assert [review.invoice_count for review in list_review_batches(paths)] == [16, 15]
     finally:
         _clean_workspace(workspace)
 
